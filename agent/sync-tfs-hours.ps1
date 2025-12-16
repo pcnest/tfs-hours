@@ -30,6 +30,11 @@ $SyncKey = $env:SYNC_API_KEY
 $ApiV = if ($env:API_VERSION) { $env:API_VERSION } else { "2.0" }
 $SinceDays = if ($env:SINCE_DAYS) { [int]$env:SINCE_DAYS } else { 30 }
 
+# Normalize base: allow TFS_HOST to be either https://remote.spdev.us or https://remote.spdev.us/tfs
+$TfsRoot = ($HostUrl ?? "").TrimEnd("/")
+if ($TfsRoot -notmatch "/tfs$") { $TfsRoot = "$TfsRoot/tfs" }
+
+
 if (-not $HostUrl -or -not $Collection -or -not $Project -or -not $Pat -or -not $SyncUrl) {
   throw "Missing env vars. Need TFS_HOST, TFS_COLLECTION, TFS_PROJECT, TFS_PAT, SYNC_URL."
 }
@@ -86,7 +91,8 @@ $SinceIso = $SinceUtc.ToString("o")
 Write-Host "Since UTC: $SinceIso"
 
 # --- WIQL: Tasks changed since ---
-$WiqlUrl = "$HostUrl/$Collection/$Project/_apis/wit/wiql?api-version=$ApiV"
+$WiqlUrl = "$TfsRoot/$Collection/$Project/_apis/wit/wiql?api-version=$ApiV"
+
 
 $wiql = @{
   query = @"
@@ -128,7 +134,7 @@ $taskFields = @(
 $tasks = @()
 foreach ($ch in (Chunk $taskIds 200)) {
   $idsCsv = ($ch -join ",")
-  $url = "$HostUrl/$Collection/$Project/_apis/wit/workitems?ids=$idsCsv&fields=$taskFields&`$expand=relations&api-version=$ApiV"
+  $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&fields=$taskFields&`$expand=relations&api-version=$ApiV"
   $r = Invoke-Tfs "GET" $url
   if ($r.value) { $tasks += $r.value }
 }
@@ -173,7 +179,7 @@ foreach ($t in $tasks) {
     taskAssignedTo    = $assignedName
     taskAssignedToUPN = $assignedUPN
     actualHours       = $f."SupplyPro.SPApplication.Task.ActualHours"
-    parentId          = $pid
+    parentId          = $parentId
     # parent fields filled later
     parentType        = $null
     parentTitle       = $null
@@ -196,7 +202,7 @@ if ($parentIds.Count -gt 0) {
   $pidArr = $parentIds.ToArray()
   foreach ($ch in (Chunk $pidArr 200)) {
     $idsCsv = ($ch -join ",")
-    $url = "$HostUrl/$Collection/$Project/_apis/wit/workitems?ids=$idsCsv&fields=$parentFields&api-version=$ApiV"
+    $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&fields=$parentFields&api-version=$ApiV"
     $r = Invoke-Tfs "GET" $url
     if ($r.value) {
       foreach ($p in $r.value) {
