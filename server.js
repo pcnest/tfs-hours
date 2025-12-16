@@ -9,6 +9,10 @@ const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
 const TFS_WORKITEM_URL_TEMPLATE = process.env.TFS_WORKITEM_URL_TEMPLATE || '';
+const REPORT_TZ_OFFSET_MINUTES = Number(
+  process.env.REPORT_TZ_OFFSET_MINUTES || '0'
+); // PST = -480
+const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
 
 if (!DATABASE_URL) {
   console.error('ERROR: DATABASE_URL env var not set.');
@@ -34,7 +38,11 @@ app.get('/health', async (req, res) => {
 app.get('/api/config', (req, res) => {
   res.json({
     ok: true,
-    tfsWorkItemUrlTemplate: TFS_WORKITEM_URL_TEMPLATE, // ".../_workitems/edit/{id}"
+    tfsWorkItemUrlTemplate: TFS_WORKITEM_URL_TEMPLATE,
+    reportTzOffsetMinutes: Number.isFinite(REPORT_TZ_OFFSET_MINUTES)
+      ? REPORT_TZ_OFFSET_MINUTES
+      : 0,
+    reportTzLabel: REPORT_TZ_LABEL,
   });
 });
 

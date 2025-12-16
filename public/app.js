@@ -69,18 +69,40 @@ function uniquePeople(rows) {
   return s.size;
 }
 
+function tzOffsetMinutes() {
+  const n = Number(APP_CFG?.reportTzOffsetMinutes ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function tzLabel() {
+  return APP_CFG?.reportTzLabel || 'UTC';
+}
+
+function shiftDateByOffset(d, offsetMinutes) {
+  return new Date(d.getTime() + offsetMinutes * 60 * 1000);
+}
+
 function fmtDate(v) {
   if (!v) return '—';
   const d = new Date(v);
   if (isNaN(d.getTime())) return '—';
-  return d.toISOString().slice(0, 10);
+
+  const shifted = shiftDateByOffset(d, tzOffsetMinutes());
+  return shifted.toISOString().slice(0, 10);
 }
 
 function fmtDateTime(v) {
   if (!v) return '—';
   const d = new Date(v);
   if (isNaN(d.getTime())) return '—';
-  return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+
+  const off = tzOffsetMinutes(); // e.g. -480
+  const shifted = shiftDateByOffset(d, off);
+
+  // Use ISO formatting on the shifted date (gives us YYYY-MM-DD HH:mm)
+  const s = shifted.toISOString().replace('T', ' ').slice(0, 16);
+
+  return `${s} ${tzLabel()}`;
 }
 
 async function loadSummary() {
