@@ -125,19 +125,12 @@ if (-not $taskIds -or $taskIds.Count -eq 0) {
 Write-Host "Found task ids: $($taskIds.Count)"
 
 # --- Fetch task details (include relations for parent) ---
-$taskFields = @(
-  "System.Id",
-  "System.Title",
-  "System.AssignedTo",
-  "System.ChangedDate",
-  "Microsoft.VSTS.Common.Activity",
-  "SupplyPro.SPApplication.Task.ActualHours"
-) -join ","
+
 
 $tasks = @()
 foreach ($ch in (Chunk $taskIds 200)) {
   $idsCsv = ($ch -join ",")
-  $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&fields=$taskFields&`$expand=relations&api-version=$ApiV"
+  $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&`$expand=relations&api-version=$ApiV"
   $r = Invoke-Tfs "GET" $url
   if ($r.value) { $tasks += $r.value }
 }
