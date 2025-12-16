@@ -82,6 +82,26 @@ function shiftDateByOffset(d, offsetMinutes) {
   return new Date(d.getTime() + offsetMinutes * 60 * 1000);
 }
 
+function setTzLabels() {
+  const tz = tzLabel();
+  const a = qs('tzLabelFrom');
+  const b = qs('tzLabelTo');
+  if (a) a.textContent = tz;
+  if (b) b.textContent = tz;
+}
+
+function ymdTodayInReportTz() {
+  const off = tzOffsetMinutes();
+  const shiftedNow = shiftDateByOffset(new Date(), off);
+  return shiftedNow.toISOString().slice(0, 10);
+}
+
+function ymdAddDays(ymd, days) {
+  const d = new Date(`${ymd}T00:00:00.000Z`);
+  if (isNaN(d.getTime())) return ymd;
+  return new Date(d.getTime() + days * 86400 * 1000).toISOString().slice(0, 10);
+}
+
 function fmtDate(v) {
   if (!v) return '—';
   const d = new Date(v);
@@ -222,31 +242,35 @@ async function loadAll() {
   if (s?.ok) {
     qs('status').innerHTML = `Bucket <b>${escapeHtml(
       s.bucket
-    )}</b> · Range <b>${escapeHtml(s.from)}</b> → <b>${escapeHtml(s.to)}</b>`;
+    )}</b> · Range <b>${escapeHtml(s.from)}</b> → <b>${escapeHtml(
+      s.to
+    )}</b> <span class="muted">(${escapeHtml(tzLabel())})</span>`;
   }
 }
 
 qs('btnLoad').addEventListener('click', async () => {
   await loadConfig();
-  loadAll();
+  setTzLabels(); // optional but recommended (keeps UI labels correct if config changes)
+  await loadAll(); // IMPORTANT: await so UI status + tables update in order
 });
 
 qs('btnExport').addEventListener('click', async () => {
   await loadConfig();
+  setTzLabels();
   const params = buildCommonParams();
   window.location.href = `/api/hours/export.csv?${params.toString()}`;
 });
 
-// boot defaults: last 30 days (UTC)
-(function boot() {
-  const today = new Date();
-  const to = new Date(
-    Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
-  );
-  const from = new Date(to.getTime() - 29 * 86400 * 1000);
+// boot defaults: last 30 days (report TZ)
+(async function boot() {
+  await loadConfig();
+  setTzLabels();
 
-  qs('from').value = from.toISOString().slice(0, 10);
-  qs('to').value = to.toISOString().slice(0, 10);
+  const toStr = ymdTodayInReportTz();
+  const fromStr = ymdAddDays(toStr, -29);
 
-  loadAll();
+  qs('from').value = fromStr;
+  qs('to').value = toStr;
+
+  await loadAll();
 })();

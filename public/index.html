@@ -122,8 +122,9 @@
   </div>
 
   <div class="bar">
-    <div><label>From (UTC)</label><input id="from" type="date" /></div>
-    <div><label>To (UTC)</label><input id="to" type="date" /></div>
+    <div><label>From (<span id="tzLabelFrom">UTC</span>)</label><input id="from" type="date" /></div>
+    <div><label>To (<span id="tzLabelTo">UTC</span>)</label><input id="to" type="date" /></div>
+
     <div>
       <label>Bucket</label>
       <select id="bucket">
@@ -134,7 +135,8 @@
     </div>
     <div><label>AssignedToUPN (optional)</label><input id="assignedToUPN" placeholder="email or DOMAIN\\user" /></div>
     <div><label>AccountCode (optional)</label><input id="accountCode" placeholder="e.g. 1" /></div>
-    <div><label>Latest rows limit</label>
+    <div><label>Entry rows limit</label>
+
       <select id="latestLimit">
         <option>100</option>
         <option selected>200</option>
