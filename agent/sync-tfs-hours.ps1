@@ -200,7 +200,9 @@ if ($parentIds.Count -gt 0) {
     "SupplyPro.SPApplication.Bug.ProjectTypeCode"
   ) -join ","
 
-  $pidArr = $parentIds.ToArray()
+  $pidArr = New-Object 'int[]' $parentIds.Count
+  $parentIds.CopyTo($pidArr)
+
   foreach ($ch in (Chunk $pidArr 200)) {
     $idsCsv = ($ch -join ",")
     $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&fields=$parentFields&api-version=$ApiV"
