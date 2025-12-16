@@ -86,6 +86,49 @@ function addDaysIso(dateObj, days) {
   return d.toISOString();
 }
 
+function getReportOffsetMinutes() {
+  return Number.isFinite(REPORT_TZ_OFFSET_MINUTES)
+    ? REPORT_TZ_OFFSET_MINUTES
+    : 0;
+}
+
+// Parses "YYYY-MM-DD" safely
+function parseYmd(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '').trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d))
+    return null;
+  return { y, mo, d };
+}
+
+// Converts local-midnight (in report timezone) to UTC Date.
+// Formula: utc = UTCmidnight(date) - offsetMinutes
+function localMidnightToUtcDate(dateStr, offsetMinutes) {
+  const p = parseYmd(dateStr);
+  if (!p) return null;
+  const utcMidnightMs = Date.UTC(p.y, p.mo - 1, p.d, 0, 0, 0, 0);
+  return new Date(utcMidnightMs - offsetMinutes * 60 * 1000);
+}
+
+// From/To are *calendar days* in report timezone (PST).
+// Returns { fromUtc, toExclusiveUtc } where toExclusive is next-day midnight (PST) in UTC.
+function rangeFromToUtc(fromStr, toStr, offsetMinutes) {
+  const fromUtc = localMidnightToUtcDate(fromStr, offsetMinutes);
+  const toStartUtc = localMidnightToUtcDate(toStr, offsetMinutes);
+  if (
+    !fromUtc ||
+    !toStartUtc ||
+    isNaN(fromUtc.getTime()) ||
+    isNaN(toStartUtc.getTime())
+  )
+    return null;
+  const toExclusiveUtc = new Date(toStartUtc.getTime() + 86400 * 1000);
+  return { fromUtc, toExclusiveUtc };
+}
+
 // ---------- Ingest ----------
 function buildUpsertLatest(rows) {
   const cols = [
@@ -253,12 +296,12 @@ app.get('/api/hours/latest', async (req, res) => {
   let from = null,
     toExclusive = null;
   if (fromStr && toStr) {
-    from = new Date(`${fromStr}T00:00:00.000Z`);
-    const toInc = new Date(`${toStr}T00:00:00.000Z`);
-    if (isNaN(from.getTime()) || isNaN(toInc.getTime())) {
+    const offsetMin = getReportOffsetMinutes(); // PST = -480
+    const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+    if (!rng)
       return res.status(400).json({ ok: false, error: 'invalid from/to date' });
-    }
-    toExclusive = new Date(toInc.getTime() + 86400 * 1000);
+    from = rng.fromUtc;
+    toExclusive = rng.toExclusiveUtc;
   }
 
   const params = [];
@@ -332,19 +375,24 @@ app.get('/api/hours/summary', async (req, res) => {
       .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
   }
 
-  const from = new Date(`${fromStr}T00:00:00.000Z`);
-  const toInclusive = new Date(`${toStr}T00:00:00.000Z`);
-  if (isNaN(from.getTime()) || isNaN(toInclusive.getTime())) {
+  const offsetMin = getReportOffsetMinutes(); // PST = -480
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+  if (!rng) {
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
   }
-
-  const toExclusive = new Date(toInclusive.getTime() + 86400 * 1000);
+  const from = rng.fromUtc;
+  const toExclusive = rng.toExclusiveUtc;
 
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const accountCodeRaw = (req.query.accountCode || '').toString().trim();
   const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
 
-  const params = [from.toISOString(), toExclusive.toISOString(), bucket];
+  const params = [
+    from.toISOString(),
+    toExclusive.toISOString(),
+    bucket,
+    offsetMin,
+  ];
   let idx = params.length;
 
   // optional filters
@@ -398,7 +446,7 @@ app.get('/api/hours/summary', async (req, res) => {
   ),
   d AS (
     SELECT
-      date_trunc($3, t) AS bucket,
+      (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
       task_assigned_upn,
       task_assigned_to,
       account_code,
@@ -443,12 +491,13 @@ app.get('/api/hours/entries', async (req, res) => {
       .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
   }
 
-  const from = new Date(`${fromStr}T00:00:00.000Z`);
-  const toInclusive = new Date(`${toStr}T00:00:00.000Z`);
-  if (isNaN(from.getTime()) || isNaN(toInclusive.getTime())) {
+  const offsetMin = getReportOffsetMinutes(); // PST = -480
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+  if (!rng) {
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
   }
-  const toExclusive = new Date(toInclusive.getTime() + 86400 * 1000);
+  const from = rng.fromUtc;
+  const toExclusive = rng.toExclusiveUtc;
 
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const accountCodeRaw = (req.query.accountCode || '').toString().trim();
@@ -616,15 +665,21 @@ app.get('/api/hours/export.csv', async (req, res) => {
 
   if (!from || !to) return res.status(400).send('from/to required');
 
-  const fromD = new Date(`${from}T00:00:00.000Z`);
-  const toD = new Date(`${to}T00:00:00.000Z`);
-  if (isNaN(fromD.getTime()) || isNaN(toD.getTime()))
-    return res.status(400).send('invalid from/to');
+  const offsetMin = getReportOffsetMinutes(); // PST = -480
+  const rng = rangeFromToUtc(from, to, offsetMin);
+  if (!rng) return res.status(400).send('invalid from/to');
 
-  const toExclusive = new Date(toD.getTime() + 86400 * 1000);
+  const fromD = rng.fromUtc;
+  const toExclusive = rng.toExclusiveUtc;
 
-  const params = [fromD.toISOString(), toExclusive.toISOString(), unit];
+  const params = [
+    fromD.toISOString(),
+    toExclusive.toISOString(),
+    unit,
+    offsetMin,
+  ];
   let idx = params.length;
+
   const filters = [];
   if (assignedToUPN) {
     idx += 1;
@@ -677,7 +732,8 @@ app.get('/api/hours/export.csv', async (req, res) => {
   ),
   d AS (
     SELECT
-      date_trunc($3, t) AS bucket,
+      (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
+
       task_assigned_upn,
       task_assigned_to,
       account_code,
