@@ -86,9 +86,12 @@ function Write-LastSyncUtc([DateTime]$dtUtc) {
 
 # --- Since watermark ---
 $SinceUtc = Read-LastSyncUtc
-$SinceIso = $SinceUtc.ToString("o")
+$SinceIso = $SinceUtc.ToString("o")            # keep full precision for post-filter + logging
+$SinceDate = $SinceUtc.ToString("yyyy-MM-dd")   # WIQL-safe (date only)
 
-Write-Host "Since UTC: $SinceIso"
+Write-Host "Since UTC (watermark): $SinceIso"
+Write-Host "WIQL date floor:       $SinceDate"
+
 
 # --- WIQL: Tasks changed since ---
 $WiqlUrl = "$TfsRoot/$Collection/$Project/_apis/wit/wiql?api-version=$ApiV"
@@ -101,7 +104,7 @@ FROM WorkItems
 WHERE
   [System.TeamProject] = @project
   AND [System.WorkItemType] = 'Task'
-  AND [System.ChangedDate] >= '$SinceIso'
+  AND [System.ChangedDate] >= '$SinceDate'
 ORDER BY [System.ChangedDate] ASC
 "@
 }
@@ -155,6 +158,11 @@ $taskRows = @()
 
 foreach ($t in $tasks) {
   $f = $t.fields
+
+  $changed = $f."System.ChangedDate"
+  $changedUtc = if ($changed -is [DateTime]) { $changed.ToUniversalTime() } else { [DateTime]::Parse([string]$changed).ToUniversalTime() }
+  if ($changedUtc -lt $SinceUtc) { continue }
+
 
   $assigned = $f."System.AssignedTo"
   $assignedName = $null
