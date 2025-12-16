@@ -81,11 +81,6 @@ function chunkArray(arr, size) {
   return out;
 }
 
-function addDaysIso(dateObj, days) {
-  const d = new Date(dateObj.getTime() + days * 86400 * 1000);
-  return d.toISOString();
-}
-
 function getReportOffsetMinutes() {
   return Number.isFinite(REPORT_TZ_OFFSET_MINUTES)
     ? REPORT_TZ_OFFSET_MINUTES
