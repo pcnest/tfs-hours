@@ -60,6 +60,26 @@ function Invoke-Tfs($method, $url, $body = $null) {
   }
 }
 
+function Get-WorkItemUpdatesAll([int]$id) {
+  $all = @()
+  $top = 200
+  $skip = 0
+
+  while ($true) {
+    $url = "$TfsRoot/$Collection/_apis/wit/workitems/$id/updates?`$top=$top&`$skip=$skip&api-version=$ApiV"
+    $r = Invoke-Tfs "GET" $url
+    if (-not $r -or -not $r.value -or $r.value.Count -eq 0) { break }
+
+    $all += $r.value
+
+    if ($r.value.Count -lt $top) { break }
+    $skip += $top
+  }
+
+  return $all
+}
+
+
 function Chunk($arr, $size) {
   $out = @()
   for ($i = 0; $i -lt $arr.Count; $i += $size) {
@@ -165,6 +185,8 @@ function Get-ParentIdFromRelations($rels) {
 $parentIds = New-Object System.Collections.Generic.HashSet[int]
 $taskRows = @()
 
+$MaxSeenUtc = $SinceUtc
+
 foreach ($t in $tasks) {
   $f = $t.fields
 
@@ -172,6 +194,7 @@ foreach ($t in $tasks) {
   $changedUtc = if ($changed -is [DateTime]) { $changed.ToUniversalTime() } else { [DateTime]::Parse([string]$changed).ToUniversalTime() }
   if ($changedUtc -lt $SinceUtc) { continue }
 
+  if ($changedUtc -gt $MaxSeenUtc) { $MaxSeenUtc = $changedUtc }
 
   $assigned = $f."System.AssignedTo"
   $assignedName = $null
@@ -188,20 +211,62 @@ foreach ($t in $tasks) {
   $parentId = Get-ParentIdFromRelations $t.relations
   if ($parentId) { [void]$parentIds.Add($parentId) }
 
-  $taskRows += [pscustomobject]@{
-    taskId            = $t.id
-    taskTitle         = $f."System.Title"
-    taskChangedDate   = $f."System.ChangedDate"
-    activity          = $f."Microsoft.VSTS.Common.Activity"
-    taskAssignedTo    = $assignedName
-    taskAssignedToUPN = $assignedUPN
-    actualHours       = $f."SupplyPro.SPApplication.Task.ActualHours"
-    parentId          = $parentId
-    # parent fields filled later
-    parentType        = $null
-    parentTitle       = $null
-    accountCode       = $null
+  # Pull update history and emit entries only when ActualHours changed
+  $updates = Get-WorkItemUpdatesAll ([int]$t.id)
+
+  $events = @()
+  foreach ($u in $updates) {
+    # revisedDate is the timestamp of that revision/update
+    $revDateRaw = $u.revisedDate
+    if ([string]::IsNullOrWhiteSpace([string]$revDateRaw)) { continue }
+
+    $revUtc = ([DateTime]::Parse([string]$revDateRaw)).ToUniversalTime()
+    if ($revUtc -lt $SinceUtc) { continue }
+
+    # Only keep updates where ActualHours changed
+    $hField = $u.fields."SupplyPro.SPApplication.Task.ActualHours"
+    if (-not $hField) { continue }
+
+    $newH = $hField.newValue
+    $events += [pscustomobject]@{
+      changedUtc = $revUtc
+      actualH    = $newH
+      revId      = ($u.rev ?? $u.id)  # best-effort (varies by server)
+      activity   = ($u.fields."Microsoft.VSTS.Common.Activity"?.newValue)
+      assigned   = ($u.fields."System.AssignedTo"?.newValue)
+      title      = ($u.fields."System.Title"?.newValue)
+    }
+
+    if ($revUtc -gt $MaxSeenUtc) { $MaxSeenUtc = $revUtc }
   }
+
+  # If you want to still emit 1 row when there were no ActualHours changes (optional), keep this OFF for now:
+  # if ($events.Count -eq 0) { continue }
+
+  foreach ($ev in ($events | Sort-Object changedUtc, revId)) {
+    $evAssignedName = $assignedName
+    $evAssignedUpn = $assignedUPN
+
+    if ($ev.assigned) {
+      $evAssignedName = Get-IdentityDisplayNameFromString ([string]$ev.assigned)
+      $evAssignedUpn = Get-IdentityUpnFromString ([string]$ev.assigned)
+    }
+
+    $taskRows += [pscustomobject]@{
+      taskId            = $t.id
+      taskTitle         = ($ev.title ?? $f."System.Title")
+      taskChangedDate   = $ev.changedUtc.ToString("o")
+      activity          = ($ev.activity ?? $f."Microsoft.VSTS.Common.Activity")
+      taskAssignedTo    = $evAssignedName
+      taskAssignedToUPN = $evAssignedUpn
+      actualHours       = $ev.actualH
+      parentId          = $parentId
+      parentType        = $null
+      parentTitle       = $null
+      accountCode       = $null
+    }
+  }
+
 }
 
 Write-Host "Unique parent ids: $($parentIds.Count)"
@@ -263,4 +328,6 @@ $r = Invoke-RestMethod -Method POST -Uri $SyncUrl -Headers $syncHeaders -Body $b
 Write-Host "SYNC OK: runId=$($r.runId) runAt=$($r.runAt) count=$($r.count)"
 
 # advance watermark
-Write-LastSyncUtc $runAtUtc
+Write-Host "Advancing watermark to (max seen): $($MaxSeenUtc.ToString('o'))"
+Write-LastSyncUtc $MaxSeenUtc
+
