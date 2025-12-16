@@ -84,6 +84,22 @@ function Write-LastSyncUtc([DateTime]$dtUtc) {
   $obj | ConvertTo-Json | Set-Content -Path $StatePath -Encoding UTF8
 }
 
+function Get-IdentityDisplayNameFromString([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $m = [regex]::Match($s, "^(.*?)\s*<.+?>\s*$")
+  if ($m.Success) { return $m.Groups[1].Value.Trim() }
+  return $s.Trim()
+}
+
+function Get-IdentityUpnFromString([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $m = [regex]::Match($s, "<(.+?)>")
+  if ($m.Success) { return $m.Groups[1].Value.Trim() }
+  return $s.Trim()
+}
+
+
+
 # --- Since watermark ---
 $SinceUtc = Read-LastSyncUtc
 $SinceIso = $SinceUtc.ToString("o")            # keep full precision for post-filter + logging
@@ -161,8 +177,8 @@ foreach ($t in $tasks) {
   $assignedName = $null
   $assignedUPN = $null
   if ($assigned -is [string]) {
-    $assignedName = $assigned
-    $assignedUPN = $assigned
+    $assignedName = Get-IdentityDisplayNameFromString $assigned
+    $assignedUPN = Get-IdentityUpnFromString $assigned
   }
   elseif ($assigned) {
     $assignedName = $assigned.displayName

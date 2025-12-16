@@ -232,6 +232,82 @@ app.post('/api/tfs-hours-sync', async (req, res) => {
   }
 });
 
+app.get('/api/hours/latest', async (req, res) => {
+  const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
+  const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
+  const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
+  const accountCodeRaw = (req.query.accountCode || '').toString().trim();
+  const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
+
+  const limit = Math.min(2000, Math.max(1, Number(req.query.limit || 200)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+
+  let from = null,
+    toExclusive = null;
+  if (fromStr && toStr) {
+    from = new Date(`${fromStr}T00:00:00.000Z`);
+    const toInc = new Date(`${toStr}T00:00:00.000Z`);
+    if (isNaN(from.getTime()) || isNaN(toInc.getTime())) {
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+    }
+    toExclusive = new Date(toInc.getTime() + 86400 * 1000);
+  }
+
+  const params = [];
+  const where = [];
+
+  if (from && toExclusive) {
+    params.push(from.toISOString(), toExclusive.toISOString());
+    where.push(
+      `task_changed_date >= $${params.length - 1} AND task_changed_date < $${
+        params.length
+      }`
+    );
+  }
+
+  // make AssignedToUPN filter forgiving (works even with older snapshots that stored "Name <UPN>")
+  if (assignedToUPN) {
+    params.push(`%${assignedToUPN}%`);
+    where.push(`COALESCE(task_assigned_upn,'') ILIKE $${params.length}`);
+  }
+
+  if (Number.isFinite(accountCode)) {
+    params.push(accountCode);
+    where.push(`account_code = $${params.length}`);
+  }
+
+  params.push(limit, offset);
+
+  const sql = `
+    SELECT
+      task_id,
+      task_title,
+      task_changed_date,
+      task_activity,
+      task_assigned_to,
+      task_assigned_upn,
+      task_actual_hours,
+      parent_id,
+      parent_type,
+      parent_title,
+      account_code,
+      COUNT(*) OVER() AS total_count
+    FROM public.tfs_task_hours_latest
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY task_changed_date DESC NULLS LAST
+    LIMIT $${params.length - 1} OFFSET $${params.length}
+  `;
+
+  try {
+    const r = await pool.query(sql, params);
+    const total = r.rows.length ? Number(r.rows[0].total_count) : 0;
+    const rows = r.rows.map(({ total_count, ...rest }) => rest);
+    res.json({ ok: true, total, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Hours summary (delta-based; supports negative corrections) ----------
 app.get('/api/hours/summary', async (req, res) => {
   const bucketRaw = (req.query.bucket || 'day').toString().trim().toLowerCase();
@@ -449,7 +525,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
         task_assigned_upn,
         task_assigned_to,
         account_code,
-        CASE WHEN prev_h IS NULL THEN 0 ELSE h - prev_h END AS delta_h
+        CASE WHEN prev_h IS NULL THEN h ELSE h - prev_h END AS delta_h
       FROM w
       WHERE snapshot_at >= $1::timestamptz
         AND snapshot_at <  $2::timestamptz

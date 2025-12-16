@@ -25,7 +25,25 @@ async function loadConfig() {
   return APP_CFG;
 }
 
-function buildParams() {
+function workItemHref(id) {
+  const tpl = APP_CFG?.tfsWorkItemUrlTemplate;
+  if (!tpl) return null;
+  return tpl.replace('{id}', encodeURIComponent(String(id)));
+}
+
+function renderIdPill(id) {
+  if (id === null || id === undefined || id === '') return '—';
+  const href = workItemHref(id);
+  const label = escapeHtml(id);
+  if (href) {
+    return `<a class="pill" href="${escapeHtml(
+      href
+    )}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  }
+  return `<span class="pill">${label}</span>`;
+}
+
+function buildCommonParams() {
   const p = new URLSearchParams();
   const add = (k, v) => {
     if (v !== null && v !== undefined && String(v).trim() !== '') p.set(k, v);
@@ -46,24 +64,41 @@ function sumHours(rows) {
 
 function uniquePeople(rows) {
   const s = new Set(
-    rows.map((r) => r.assignedToUPN || r.assignedTo || '').filter(Boolean)
+    rows.map((r) => (r.assignedTo || '').trim()).filter(Boolean)
   );
   return s.size;
 }
 
-async function load() {
-  qs('status').textContent = 'Loading…';
-  qs(
-    'tbody'
-  ).innerHTML = `<tr><td colspan="5" class="muted">Loading…</td></tr>`;
+function fmtDate(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '—';
+  return d.toISOString().slice(0, 10);
+}
 
-  const params = buildParams();
+function fmtDateTime(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '—';
+  return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+}
+
+async function loadSummary() {
+  qs(
+    'tbodySummary'
+  ).innerHTML = `<tr><td colspan="4" class="muted">Loading…</td></tr>`;
+
+  const params = buildCommonParams();
   const r = await fetch(`/api/hours/summary?${params.toString()}`);
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
-    qs('status').textContent = `Error: ${data.error || `HTTP ${r.status}`}`;
-    return;
+    qs(
+      'tbodySummary'
+    ).innerHTML = `<tr><td colspan="4" class="muted">Error: ${escapeHtml(
+      data.error || `HTTP ${r.status}`
+    )}</td></tr>`;
+    return { ok: false };
   }
 
   const rows = data.rows || [];
@@ -76,45 +111,105 @@ async function load() {
   qs('m_people').textContent = String(people);
   qs('m_rows').textContent = String(rows.length);
 
-  qs('status').innerHTML = `Bucket <b>${escapeHtml(
-    data.bucket
-  )}</b> · Range <b>${escapeHtml(data.from)}</b> → <b>${escapeHtml(
-    data.to
-  )}</b>`;
+  if (!rows.length) {
+    qs(
+      'tbodySummary'
+    ).innerHTML = `<tr><td colspan="4" class="muted">No rows.</td></tr>`;
+    return { ok: true, bucket: data.bucket, from: data.from, to: data.to };
+  }
+
+  qs('tbodySummary').innerHTML = rows
+    .map((x) => {
+      const bucket = x.bucket ? fmtDate(x.bucket) : '—';
+      return `
+        <tr>
+          <td>${escapeHtml(bucket)}</td>
+          <td>${escapeHtml(x.assignedTo || '')}</td>
+          <td>${x.accountCode ?? ''}</td>
+          <td>${Number(x.hours || 0).toFixed(2)}</td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  return { ok: true, bucket: data.bucket, from: data.from, to: data.to };
+}
+
+async function loadLatest() {
+  qs(
+    'tbodyLatest'
+  ).innerHTML = `<tr><td colspan="9" class="muted">Loading…</td></tr>`;
+
+  const params = buildCommonParams();
+  params.set('limit', qs('latestLimit')?.value || '200');
+
+  const r = await fetch(`/api/hours/latest?${params.toString()}`);
+  const data = await r.json().catch(() => ({}));
+
+  if (!r.ok || !data.ok) {
+    qs(
+      'tbodyLatest'
+    ).innerHTML = `<tr><td colspan="9" class="muted">Error: ${escapeHtml(
+      data.error || `HTTP ${r.status}`
+    )}</td></tr>`;
+    qs('m_latestRows').textContent = '—';
+    return { ok: false };
+  }
+
+  const rows = data.rows || [];
+  qs('m_latestRows').textContent = String(rows.length);
 
   if (!rows.length) {
     qs(
-      'tbody'
-    ).innerHTML = `<tr><td colspan="5" class="muted">No rows.</td></tr>`;
-    return;
+      'tbodyLatest'
+    ).innerHTML = `<tr><td colspan="9" class="muted">No rows.</td></tr>`;
+    return { ok: true };
   }
 
-  qs('tbody').innerHTML = rows
-    .map((x) => {
-      const bucket = x.bucket
-        ? new Date(x.bucket).toISOString().slice(0, 10)
-        : '—';
-      return `
+  qs('tbodyLatest').innerHTML = rows
+    .map(
+      (x) => `
       <tr>
-        <td>${escapeHtml(bucket)}</td>
-        <td>${escapeHtml(x.assignedTo || '')}</td>
-        <td>${escapeHtml(x.assignedToUPN || '')}</td>
-        <td>${x.accountCode ?? ''}</td>
-        <td>${Number(x.hours || 0).toFixed(2)}</td>
+        <td>${renderIdPill(x.task_id)}</td>
+        <td>${escapeHtml(x.task_title || '')}</td>
+        <td>${escapeHtml(x.task_activity || '')}</td>
+        <td>${escapeHtml(fmtDateTime(x.task_changed_date))}</td>
+        <td>${x.task_actual_hours ?? ''}</td>
+        <td>${escapeHtml(x.task_assigned_to || '')}</td>
+        <td>${renderIdPill(x.parent_id)} <span class="muted">${escapeHtml(
+        x.parent_type || ''
+      )}</span></td>
+        <td>${escapeHtml(x.parent_title || '')}</td>
+        <td>${x.account_code ?? ''}</td>
       </tr>
-    `;
-    })
+    `
+    )
     .join('');
+
+  return { ok: true, total: data.total };
+}
+
+async function loadAll() {
+  qs('status').textContent = 'Loading…';
+
+  const s = await loadSummary();
+  await loadLatest();
+
+  if (s?.ok) {
+    qs('status').innerHTML = `Bucket <b>${escapeHtml(
+      s.bucket
+    )}</b> · Range <b>${escapeHtml(s.from)}</b> → <b>${escapeHtml(s.to)}</b>`;
+  }
 }
 
 qs('btnLoad').addEventListener('click', async () => {
   await loadConfig();
-  load();
+  loadAll();
 });
 
 qs('btnExport').addEventListener('click', async () => {
   await loadConfig();
-  const params = buildParams();
+  const params = buildCommonParams();
   window.location.href = `/api/hours/export.csv?${params.toString()}`;
 });
 
@@ -129,5 +224,5 @@ qs('btnExport').addEventListener('click', async () => {
   qs('from').value = from.toISOString().slice(0, 10);
   qs('to').value = to.toISOString().slice(0, 10);
 
-  load();
+  loadAll();
 })();
