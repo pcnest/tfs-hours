@@ -259,9 +259,9 @@ app.get('/api/hours/latest', async (req, res) => {
   if (from && toExclusive) {
     params.push(from.toISOString(), toExclusive.toISOString());
     where.push(
-      `task_changed_date >= $${params.length - 1} AND task_changed_date < $${
-        params.length
-      }`
+      `COALESCE(task_changed_date, synced_at) >= $${
+        params.length - 1
+      } AND COALESCE(task_changed_date, synced_at) < $${params.length}`
     );
   }
 
@@ -294,7 +294,8 @@ app.get('/api/hours/latest', async (req, res) => {
       COUNT(*) OVER() AS total_count
     FROM public.tfs_task_hours_latest
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-    ORDER BY task_changed_date DESC NULLS LAST
+    ORDER BY COALESCE(task_changed_date, synced_at) DESC NULLS LAST
+
     LIMIT $${params.length - 1} OFFSET $${params.length}
   `;
 
@@ -342,8 +343,8 @@ app.get('/api/hours/summary', async (req, res) => {
   const filters = [];
   if (assignedToUPN) {
     idx += 1;
-    params.push(assignedToUPN);
-    filters.push(`AND d.task_assigned_upn = $${idx}`);
+    params.push(`%${assignedToUPN}%`);
+    filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
   }
   if (Number.isFinite(accountCode)) {
     idx += 1;
@@ -352,72 +353,63 @@ app.get('/api/hours/summary', async (req, res) => {
   }
 
   const sql = `
-    WITH prior AS (
-      SELECT DISTINCT ON (task_id)
-        task_id,
-        snapshot_at,
-        task_assigned_upn,
-        task_assigned_to,
-        account_code,
-        COALESCE(task_actual_hours, 0) AS h
-      FROM public.tfs_task_hours_snapshots
-      WHERE snapshot_at < $1::timestamptz
-      ORDER BY task_id, snapshot_at DESC
-    ),
-    inrange AS (
-      SELECT
-        task_id,
-        snapshot_at,
-        task_assigned_upn,
-        task_assigned_to,
-        account_code,
-        COALESCE(task_actual_hours, 0) AS h
-      FROM public.tfs_task_hours_snapshots
-      WHERE snapshot_at >= $1::timestamptz
-        AND snapshot_at <  $2::timestamptz
-    ),
-    s AS (
-      SELECT * FROM prior
-      UNION ALL
-      SELECT * FROM inrange
-    ),
-    w AS (
-      SELECT
-        task_id,
-        snapshot_at,
-        task_assigned_upn,
-        task_assigned_to,
-        account_code,
-        h,
-        LAG(h) OVER (PARTITION BY task_id ORDER BY snapshot_at) AS prev_h
-      FROM s
-    ),
-    d AS (
-      SELECT
-        date_trunc($3, snapshot_at) AS bucket,
-        task_assigned_upn,
-        task_assigned_to,
-        account_code,
-        CASE
-          WHEN prev_h IS NULL THEN 0
-          ELSE h - prev_h
-        END AS delta_h
-      FROM w
-      WHERE snapshot_at >= $1::timestamptz
-        AND snapshot_at <  $2::timestamptz
-    )
+  WITH snaps AS (
     SELECT
-      bucket,
-      task_assigned_upn AS "assignedToUPN",
-      task_assigned_to  AS "assignedTo",
-      account_code      AS "accountCode",
-      SUM(delta_h)      AS "hours"
-    FROM d
-    WHERE 1=1
-      ${filters.join('\n      ')}
-    GROUP BY 1,2,3,4
-    ORDER BY 1 ASC, 3 ASC;
-  `;
+      task_id,
+      snapshot_at,
+      COALESCE(task_changed_date, snapshot_at) AS t,
+      task_assigned_upn,
+      task_assigned_to,
+      account_code,
+      COALESCE(task_actual_hours, 0) AS h
+    FROM public.tfs_task_hours_snapshots
+  ),
+  prior AS (
+    SELECT DISTINCT ON (task_id)
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+    FROM snaps
+    WHERE t < $1::timestamptz
+    ORDER BY task_id, t DESC, snapshot_at DESC
+  ),
+  inrange AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+    FROM snaps
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  ),
+  s AS (
+    SELECT * FROM prior
+    UNION ALL
+    SELECT * FROM inrange
+  ),
+  w AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h,
+      LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+    FROM s
+  ),
+  d AS (
+    SELECT
+      date_trunc($3, t) AS bucket,
+      task_assigned_upn,
+      task_assigned_to,
+      account_code,
+      (h - COALESCE(prev_h, 0)) AS delta_h
+    FROM w
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  )
+  SELECT
+    bucket,
+    task_assigned_upn AS "assignedToUPN",
+    task_assigned_to  AS "assignedTo",
+    account_code      AS "accountCode",
+    SUM(delta_h)      AS "hours"
+  FROM d
+  WHERE 1=1
+    ${filters.join('\n ')}
+  GROUP BY 1,2,3,4
+  ORDER BY 1 ASC, 3 ASC;
+`;
 
   try {
     const r = await pool.query(sql, params);
@@ -428,6 +420,163 @@ app.get('/api/hours/summary', async (req, res) => {
       to: toStr,
       rows: r.rows,
     });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Entries (by Date Changed) ----------
+app.get('/api/hours/entries', async (req, res) => {
+  const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
+  const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD inclusive
+  if (!fromStr || !toStr) {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
+  }
+
+  const from = new Date(`${fromStr}T00:00:00.000Z`);
+  const toInclusive = new Date(`${toStr}T00:00:00.000Z`);
+  if (isNaN(from.getTime()) || isNaN(toInclusive.getTime())) {
+    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+  }
+  const toExclusive = new Date(toInclusive.getTime() + 86400 * 1000);
+
+  const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
+  const accountCodeRaw = (req.query.accountCode || '').toString().trim();
+  const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
+
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+
+  const params = [from.toISOString(), toExclusive.toISOString()];
+  let idx = params.length;
+
+  const filters = [];
+  if (assignedToUPN) {
+    idx += 1;
+    params.push(`%${assignedToUPN}%`);
+    filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
+  }
+  if (Number.isFinite(accountCode)) {
+    idx += 1;
+    params.push(accountCode);
+    filters.push(`AND d.account_code = $${idx}`);
+  }
+
+  idx += 1;
+  params.push(limit);
+  idx += 1;
+  params.push(offset);
+
+  const sql = `
+    WITH snaps AS (
+      SELECT
+        s.run_id,
+        s.snapshot_at,
+        COALESCE(s.task_changed_date, s.snapshot_at) AS t,
+        s.task_id,
+        s.task_assigned_upn,
+        s.task_assigned_to,
+        s.task_activity,
+        COALESCE(s.task_actual_hours, 0) AS h,
+        s.parent_id,
+        s.account_code
+      FROM public.tfs_task_hours_snapshots s
+    ),
+    prior AS (
+      SELECT DISTINCT ON (task_id)
+        task_id, snapshot_at, t, h
+      FROM snaps
+      WHERE t < $1::timestamptz
+      ORDER BY task_id, t DESC, snapshot_at DESC
+    ),
+    inrange AS (
+      SELECT *
+      FROM snaps
+      WHERE t >= $1::timestamptz AND t < $2::timestamptz
+    ),
+    s AS (
+      SELECT
+        NULL::bigint AS run_id,
+        p.snapshot_at,
+        p.t,
+        p.task_id,
+        NULL::text AS task_assigned_upn,
+        NULL::text AS task_assigned_to,
+        NULL::text AS task_activity,
+        p.h,
+        NULL::int  AS parent_id,
+        NULL::int  AS account_code,
+        TRUE AS is_prior
+      FROM prior p
+      UNION ALL
+      SELECT
+        i.run_id,
+        i.snapshot_at,
+        i.t,
+        i.task_id,
+        i.task_assigned_upn,
+        i.task_assigned_to,
+        i.task_activity,
+        i.h,
+        i.parent_id,
+        i.account_code,
+        FALSE AS is_prior
+      FROM inrange i
+    ),
+    w AS (
+      SELECT
+        *,
+        LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+      FROM s
+    ),
+    d AS (
+      SELECT
+        run_id,
+        snapshot_at,
+        t AS changed_at,
+        task_id,
+        task_assigned_upn,
+        task_assigned_to,
+        task_activity,
+        COALESCE(prev_h, 0) AS prev_hours,
+        h AS actual_hours,
+        (h - COALESCE(prev_h, 0)) AS delta_hours,
+        parent_id,
+        account_code
+      FROM w
+      WHERE is_prior = FALSE
+    )
+    SELECT
+      d.changed_at,
+      d.snapshot_at,
+      d.task_id,
+      l.task_title,
+      d.task_activity,
+      d.task_assigned_to,
+      d.task_assigned_upn,
+      d.prev_hours,
+      d.actual_hours,
+      d.delta_hours,
+      d.parent_id,
+      l.parent_type,
+      l.parent_title,
+      d.account_code,
+      COUNT(*) OVER() AS total_count
+    FROM d
+    LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
+    WHERE 1=1
+      ${filters.join('\n ')}
+    ORDER BY d.changed_at ASC, d.task_id ASC
+    LIMIT $${idx - 1} OFFSET $${idx};
+  `;
+
+  try {
+    const r = await pool.query(sql, params);
+    const total = r.rows.length ? Number(r.rows[0].total_count) : 0;
+    const rows = r.rows.map(({ total_count, ...rest }) => rest);
+    res.json({ ok: true, total, rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -451,20 +600,6 @@ app.get('/api/hours/export.csv', async (req, res) => {
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const accountCode = (req.query.accountCode || '').toString().trim();
 
-  const url = new URL('http://localhost/api/hours/summary');
-  url.searchParams.set('bucket', bucket);
-  url.searchParams.set('from', from);
-  url.searchParams.set('to', to);
-  if (assignedToUPN) url.searchParams.set('assignedToUPN', assignedToUPN);
-  if (accountCode) url.searchParams.set('accountCode', accountCode);
-
-  // call the handler by doing the query again (no HTTP)
-  req.query.bucket = bucket;
-  req.query.from = from;
-  req.query.to = to;
-  req.query.assignedToUPN = assignedToUPN;
-  req.query.accountCode = accountCode;
-
   // run the same SQL by invoking pool query via a small local function:
   // simplest: duplicate minimal code:
   const bucketRaw = bucket.toLowerCase();
@@ -485,9 +620,10 @@ app.get('/api/hours/export.csv', async (req, res) => {
   const filters = [];
   if (assignedToUPN) {
     idx += 1;
-    params.push(assignedToUPN);
-    filters.push(`AND d.task_assigned_upn = $${idx}`);
+    params.push(`%${assignedToUPN}%`);
+    filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
   }
+
   const ac = accountCode ? Number(accountCode) : null;
   if (Number.isFinite(ac)) {
     idx += 1;
@@ -496,52 +632,63 @@ app.get('/api/hours/export.csv', async (req, res) => {
   }
 
   const sql = `
-    WITH prior AS (
-      SELECT DISTINCT ON (task_id)
-        task_id, snapshot_at, task_assigned_upn, task_assigned_to, account_code,
-        COALESCE(task_actual_hours, 0) AS h
-      FROM public.tfs_task_hours_snapshots
-      WHERE snapshot_at < $1::timestamptz
-      ORDER BY task_id, snapshot_at DESC
-    ),
-    inrange AS (
-      SELECT
-        task_id, snapshot_at, task_assigned_upn, task_assigned_to, account_code,
-        COALESCE(task_actual_hours, 0) AS h
-      FROM public.tfs_task_hours_snapshots
-      WHERE snapshot_at >= $1::timestamptz
-        AND snapshot_at <  $2::timestamptz
-    ),
-    s AS ( SELECT * FROM prior UNION ALL SELECT * FROM inrange ),
-    w AS (
-      SELECT
-        task_id, snapshot_at, task_assigned_upn, task_assigned_to, account_code, h,
-        LAG(h) OVER (PARTITION BY task_id ORDER BY snapshot_at) AS prev_h
-      FROM s
-    ),
-    d AS (
-      SELECT
-        date_trunc($3, snapshot_at) AS bucket,
-        task_assigned_upn,
-        task_assigned_to,
-        account_code,
-        CASE WHEN prev_h IS NULL THEN h ELSE h - prev_h END AS delta_h
-      FROM w
-      WHERE snapshot_at >= $1::timestamptz
-        AND snapshot_at <  $2::timestamptz
-    )
+  WITH snaps AS (
     SELECT
-      bucket,
-      task_assigned_upn AS assigned_to_upn,
-      task_assigned_to  AS assigned_to,
+      task_id,
+      snapshot_at,
+      COALESCE(task_changed_date, snapshot_at) AS t,
+      task_assigned_upn,
+      task_assigned_to,
       account_code,
-      SUM(delta_h)      AS hours
-    FROM d
-    WHERE 1=1
-      ${filters.join('\n      ')}
-    GROUP BY 1,2,3,4
-    ORDER BY 1 ASC, 3 ASC;
-  `;
+      COALESCE(task_actual_hours, 0) AS h
+    FROM public.tfs_task_hours_snapshots
+  ),
+  prior AS (
+    SELECT DISTINCT ON (task_id)
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+    FROM snaps
+    WHERE t < $1::timestamptz
+    ORDER BY task_id, t DESC, snapshot_at DESC
+  ),
+  inrange AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+    FROM snaps
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  ),
+  s AS (
+    SELECT * FROM prior
+    UNION ALL
+    SELECT * FROM inrange
+  ),
+  w AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h,
+      LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+    FROM s
+  ),
+  d AS (
+    SELECT
+      date_trunc($3, t) AS bucket,
+      task_assigned_upn,
+      task_assigned_to,
+      account_code,
+      (h - COALESCE(prev_h, 0)) AS delta_h
+    FROM w
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  )
+  SELECT
+    bucket,
+    task_assigned_upn AS "assignedToUPN",
+    task_assigned_to  AS "assignedTo",
+    account_code      AS "accountCode",
+    SUM(delta_h)      AS "hours"
+  FROM d
+  WHERE 1=1
+    ${filters.join('\n ')}
+  GROUP BY 1,2,3,4
+  ORDER BY 1 ASC, 3 ASC;
+`;
 
   try {
     const r = await pool.query(sql, params);
@@ -554,11 +701,12 @@ app.get('/api/hours/export.csv', async (req, res) => {
 
     const headers = [
       'bucket',
-      'assigned_to',
-      'assigned_to_upn',
-      'account_code',
+      'assignedTo',
+      'assignedToUPN',
+      'accountCode',
       'hours',
     ];
+
     res.write(headers.join(',') + '\n');
 
     for (const row of r.rows) {
@@ -566,11 +714,12 @@ app.get('/api/hours/export.csv', async (req, res) => {
         row.bucket?.toISOString?.()
           ? row.bucket.toISOString().slice(0, 10)
           : row.bucket,
-        row.assigned_to,
-        row.assigned_to_upn,
-        row.account_code,
+        row.assignedTo,
+        row.assignedToUPN,
+        row.accountCode,
         row.hours,
       ]
+
         .map(csvEscape)
         .join(',');
       res.write(line + '\n');

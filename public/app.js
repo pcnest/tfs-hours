@@ -135,21 +135,22 @@ async function loadSummary() {
   return { ok: true, bucket: data.bucket, from: data.from, to: data.to };
 }
 
-async function loadLatest() {
+async function loadEntries() {
   qs(
     'tbodyLatest'
-  ).innerHTML = `<tr><td colspan="9" class="muted">Loading…</td></tr>`;
+  ).innerHTML = `<tr><td colspan="10" class="muted">Loading…</td></tr>`;
 
   const params = buildCommonParams();
+  // entries endpoint doesn't need bucket, but harmless if present
   params.set('limit', qs('latestLimit')?.value || '200');
 
-  const r = await fetch(`/api/hours/latest?${params.toString()}`);
+  const r = await fetch(`/api/hours/entries?${params.toString()}`);
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
     qs(
       'tbodyLatest'
-    ).innerHTML = `<tr><td colspan="9" class="muted">Error: ${escapeHtml(
+    ).innerHTML = `<tr><td colspan="10" class="muted">Error: ${escapeHtml(
       data.error || `HTTP ${r.status}`
     )}</td></tr>`;
     qs('m_latestRows').textContent = '—';
@@ -162,7 +163,7 @@ async function loadLatest() {
   if (!rows.length) {
     qs(
       'tbodyLatest'
-    ).innerHTML = `<tr><td colspan="9" class="muted">No rows.</td></tr>`;
+    ).innerHTML = `<tr><td colspan="10" class="muted">No rows.</td></tr>`;
     return { ok: true };
   }
 
@@ -173,8 +174,9 @@ async function loadLatest() {
         <td>${renderIdPill(x.task_id)}</td>
         <td>${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
-        <td>${escapeHtml(fmtDateTime(x.task_changed_date))}</td>
-        <td>${x.task_actual_hours ?? ''}</td>
+        <td>${escapeHtml(fmtDateTime(x.changed_at))}</td>
+        <td>${Number(x.delta_hours || 0).toFixed(2)}</td>
+        <td>${x.actual_hours ?? ''}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
         <td>${renderIdPill(x.parent_id)} <span class="muted">${escapeHtml(
         x.parent_type || ''
@@ -193,7 +195,7 @@ async function loadAll() {
   qs('status').textContent = 'Loading…';
 
   const s = await loadSummary();
-  await loadLatest();
+  await loadEntries();
 
   if (s?.ok) {
     qs('status').innerHTML = `Bucket <b>${escapeHtml(

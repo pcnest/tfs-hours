@@ -161,7 +161,7 @@
       <div class="v" id="m_rows">—</div>
     </div>
     <div class="card">
-      <div class="k">Latest tasks shown</div>
+      <div class="k">Entry rows shown</div>
       <div class="v" id="m_latestRows">—</div>
     </div>
   </div>
@@ -185,10 +185,12 @@
     </tbody>
   </table>
 
-  <div class="sectionTitle">Latest task rows (raw current ActualHours)</div>
+  <div class="sectionTitle">Task entries (by Date Changed)</div>
   <div class="muted" style="margin-top:6px;">
-    This table shows the latest known <b>task_actual_hours</b> per task (from <code>tfs_task_hours_latest</code>).
+    This table shows raw changed rows within the selected range, ordered by <b>Date Changed</b>, with <b>Hours Δ</b> per
+    change.
   </div>
+
 
   <table>
     <thead>
@@ -197,6 +199,7 @@
         <th>Task Title</th>
         <th>Activity</th>
         <th>Changed</th>
+        <th>Hours Δ</th>
         <th>ActualHours</th>
         <th>AssignedTo</th>
         <th>Parent</th>
@@ -204,9 +207,11 @@
         <th>Account</th>
       </tr>
     </thead>
+
     <tbody id="tbodyLatest">
       <tr>
-        <td colspan="9" class="muted">No data loaded yet.</td>
+        <td colspan="10" class="muted">No data loaded yet.</td>
+
       </tr>
     </tbody>
   </table>
