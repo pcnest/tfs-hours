@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TFS Hours Dashboard</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 18px;
+    }
+
+    label {
+      font-size: 12px;
+      opacity: .8;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    input,
+    select {
+      padding: 8px;
+      border: 1px solid #3334;
+      border-radius: 10px;
+      min-width: 170px;
+    }
+
+    button {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid #3334;
+      cursor: pointer;
+    }
+
+    .bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+
+    .cards {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .card {
+      border: 1px solid #3333;
+      border-radius: 14px;
+      padding: 12px 14px;
+      min-width: 200px;
+    }
+
+    .k {
+      font-size: 12px;
+      opacity: .7;
+    }
+
+    .v {
+      font-size: 20px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid #3332;
+      padding: 8px;
+      font-size: 13px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #fff;
+    }
+
+    .muted {
+      opacity: .7;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border: 1px solid #3333;
+      border-radius: 999px;
+      font-size: 12px;
+    }
+
+    a.pill {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    a.pill:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+
+<body>
+  <h2 style="margin:0 0 10px 0;">TFS Hours Dashboard</h2>
+  <div class="muted" style="margin-bottom:14px;">
+    Delta-based rollup of <b>SupplyPro.SPApplication.Task.ActualHours</b> by <b>Task.AssignedTo</b>. Supports negative
+    corrections.
+  </div>
+
+  <div class="bar">
+    <div>
+      <label>From (UTC)</label>
+      <input id="from" type="date" />
+    </div>
+    <div>
+      <label>To (UTC)</label>
+      <input id="to" type="date" />
+    </div>
+    <div>
+      <label>Bucket</label>
+      <select id="bucket">
+        <option value="day" selected>day</option>
+        <option value="week">week</option>
+        <option value="month">month</option>
+      </select>
+    </div>
+    <div>
+      <label>AssignedToUPN (optional)</label>
+      <input id="assignedToUPN" placeholder="email or DOMAIN\\user" />
+    </div>
+    <div>
+      <label>AccountCode (optional)</label>
+      <input id="accountCode" placeholder="e.g. 1" />
+    </div>
+    <button id="btnLoad">Load</button>
+    <button id="btnExport">Export CSV</button>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="k">Total hours (range)</div>
+      <div class="v" id="m_totalHours">—</div>
+    </div>
+    <div class="card">
+      <div class="k">People (range)</div>
+      <div class="v" id="m_people">—</div>
+    </div>
+    <div class="card">
+      <div class="k">Rows</div>
+      <div class="v" id="m_rows">—</div>
+    </div>
+  </div>
+
+  <div id="status" class="muted" style="margin-top:12px;">Loading…</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Bucket</th>
+        <th>AssignedTo</th>
+        <th>AssignedToUPN</th>
+        <th>Account</th>
+        <th>Hours (net)</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr>
+        <td colspan="5" class="muted">No data loaded yet.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <script src="app.js"></script>
+</body>
+
+</html>
