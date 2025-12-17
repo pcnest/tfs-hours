@@ -70,7 +70,9 @@ function Get-WorkItemUpdatesAll([int]$id) {
     $r = Invoke-Tfs "GET" $url
     if (-not $r -or -not $r.value -or $r.value.Count -eq 0) { break }
 
-    $all += $r.value
+    # Only keep updates that actually change ActualHours
+    $relevantUpdates = $r.value | Where-Object { $_.fields."SupplyPro.SPApplication.Task.ActualHours" }
+    $all += $relevantUpdates
 
     if ($r.value.Count -lt $top) { break }
     $skip += $top
@@ -78,6 +80,7 @@ function Get-WorkItemUpdatesAll([int]$id) {
 
   return $all
 }
+
 
 
 function Chunk($arr, $size) {
@@ -135,7 +138,7 @@ $WiqlUrl = "$TfsRoot/$Collection/$Project/_apis/wit/wiql?api-version=$ApiV"
 
 $wiql = @{
   query = @"
-SELECT [System.Id]
+SELECT [System.Id], [System.ChangedDate]
 FROM WorkItems
 WHERE
   [System.TeamProject] = @project
@@ -145,7 +148,10 @@ ORDER BY [System.ChangedDate] ASC
 "@
 }
 
+$start = Get-Date
 $wiqlR = Invoke-Tfs "POST" $WiqlUrl $wiql
+Write-Host "WIQL query took: $((Get-Date) - $start).TotalSeconds seconds."
+
 $taskIds = @()
 if ($wiqlR.workItems) {
   $taskIds = $wiqlR.workItems | ForEach-Object { $_.id }
@@ -164,12 +170,30 @@ Write-Host "Found task ids: $($taskIds.Count)"
 
 
 $tasks = @()
-foreach ($ch in (Chunk $taskIds 200)) {
+$jobs = @()
+foreach ($ch in (Chunk $taskIds 100)) {
+  # Adjust chunk size to 100 for parallel fetching
   $idsCsv = ($ch -join ",")
   $url = "$TfsRoot/$Collection/_apis/wit/workitems?ids=$idsCsv&`$expand=relations&api-version=$ApiV"
-  $r = Invoke-Tfs "GET" $url
-  if ($r.value) { $tasks += $r.value }
+
+  # Start each API fetch in parallel using Start-Job
+  $jobs += Start-Job -ScriptBlock {
+    $url = $using:url  # Use $using: to pass the $url variable to the job
+    $result = Invoke-Tfs "GET" $url
+    return $result.value
+  }
 }
+
+# Collect results from all jobs after they complete
+$jobs | ForEach-Object {
+  $job = $_
+  $result = Receive-Job -Job $job
+  if ($result) {
+    $tasks += $result
+  }
+  Remove-Job -Job $job  # Clean up the job after receiving the result
+}
+
 
 # --- Extract parent ids from Hierarchy-Reverse link ---
 function Get-ParentIdFromRelations($rels) {
@@ -241,7 +265,7 @@ foreach ($t in $tasks) {
   }
 
   # If you want to still emit 1 row when there were no ActualHours changes (optional), keep this OFF for now:
-  # if ($events.Count -eq 0) { continue }
+  if ($events.Count -eq 0) { continue }
 
   foreach ($ev in ($events | Sort-Object changedUtc, revId)) {
     $evAssignedName = $assignedName
