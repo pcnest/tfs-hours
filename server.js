@@ -142,7 +142,7 @@ function buildUpsertLatest(rows) {
   ];
 
   const values = [];
-  const valuesSql = uniq
+  const valuesSql = rows
     .map((r, idx) => {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
@@ -214,7 +214,7 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
   ];
 
   const values = [];
-  const valuesSql = rows
+  const valuesSql = uniq
     .map((r, idx) => {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
