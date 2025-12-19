@@ -142,7 +142,7 @@ function buildUpsertLatest(rows) {
   ];
 
   const values = [];
-  const valuesSql = rows
+  const valuesSql = uniq
     .map((r, idx) => {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
@@ -187,6 +187,19 @@ function buildUpsertLatest(rows) {
 }
 
 function buildSnapshotInsert(runId, snapshotAt, rows) {
+  // Dedupe within the batch by (task_id, task_changed_date) so a single insert
+  // doesn't generate multiple conflicts on the same row for this run.
+  const seen = new Set();
+  const uniq = [];
+  for (const r of rows) {
+    const tid = normInt(r.taskId);
+    const tcd = toDateOrNull(r.taskChangedDate);
+    const key = `${tid ?? 'null'}|${tcd ? tcd.toISOString() : 'null'}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push({ ...r, taskId: tid, taskChangedDate: tcd });
+  }
+
   const cols = [
     'run_id',
     'snapshot_at',
@@ -209,10 +222,10 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
       values.push(
         runId,
         snapshotAt,
-        normInt(r.taskId),
+        r.taskId ?? null,
         r.taskAssignedToUPN ?? null,
         r.taskAssignedTo ?? null,
-        toDateOrNull(r.taskChangedDate),
+        r.taskChangedDate,
         r.activity ?? null,
         normNum(r.actualHours),
         normInt(r.parentId),
