@@ -181,6 +181,7 @@ function buildUpsertLatest(rows) {
       parent_title      = EXCLUDED.parent_title,
       account_code      = EXCLUDED.account_code,
       synced_at         = EXCLUDED.synced_at
+    WHERE public.tfs_task_hours_latest.task_changed_date <= EXCLUDED.task_changed_date
   `;
   return { text, values };
 }
@@ -225,6 +226,14 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
   const text = `
     INSERT INTO public.tfs_task_hours_snapshots (${cols.join(',')})
     VALUES ${valuesSql}
+    ON CONFLICT (run_id, task_id, task_changed_date) DO UPDATE SET
+      snapshot_at       = EXCLUDED.snapshot_at,
+      task_assigned_upn = EXCLUDED.task_assigned_upn,
+      task_assigned_to  = EXCLUDED.task_assigned_to,
+      task_activity     = EXCLUDED.task_activity,
+      task_actual_hours = EXCLUDED.task_actual_hours,
+      parent_id         = EXCLUDED.parent_id,
+      account_code      = EXCLUDED.account_code
   `;
   return { text, values };
 }
