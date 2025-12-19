@@ -126,6 +126,25 @@ function rangeFromToUtc(fromStr, toStr, offsetMinutes) {
 
 // ---------- Ingest ----------
 function buildUpsertLatest(rows) {
+  // Reduce to latest per task_id within this batch to avoid ON CONFLICT
+  // collisions in a single INSERT statement.
+  const latestByTask = new Map();
+  for (const r of rows) {
+    const tid = normInt(r.taskId);
+    if (tid === null || tid === undefined) continue;
+    const tcd = toDateOrNull(r.taskChangedDate);
+    const prev = latestByTask.get(tid);
+    if (!prev) {
+      latestByTask.set(tid, { ...r, taskId: tid, taskChangedDate: tcd });
+      continue;
+    }
+    const prevDate = prev.taskChangedDate;
+    if (!prevDate || (tcd && tcd > prevDate)) {
+      latestByTask.set(tid, { ...r, taskId: tid, taskChangedDate: tcd });
+    }
+  }
+  const uniq = Array.from(latestByTask.values());
+
   const cols = [
     'task_id',
     'task_title',
@@ -142,13 +161,13 @@ function buildUpsertLatest(rows) {
   ];
 
   const values = [];
-  const valuesSql = rows
+  const valuesSql = uniq
     .map((r, idx) => {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
 
       values.push(
-        normInt(r.taskId),
+        r.taskId,
         r.taskTitle ?? null,
         toDateOrNull(r.taskChangedDate),
         r.activity ?? null,
