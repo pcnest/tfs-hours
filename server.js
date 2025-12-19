@@ -446,7 +446,8 @@ app.get('/api/hours/summary', async (req, res) => {
 
   const sql = `
   WITH snaps AS (
-    SELECT
+    -- Deduplicate by (task_id, effective change time) taking the latest snapshot per change
+    SELECT DISTINCT ON (task_id, COALESCE(task_changed_date, snapshot_at))
       task_id,
       snapshot_at,
       COALESCE(task_changed_date, snapshot_at) AS t,
@@ -455,6 +456,7 @@ app.get('/api/hours/summary', async (req, res) => {
       account_code,
       COALESCE(task_actual_hours, 0) AS h
     FROM public.tfs_task_hours_snapshots
+    ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
   ),
   prior AS (
     SELECT DISTINCT ON (task_id)
@@ -564,7 +566,8 @@ app.get('/api/hours/entries', async (req, res) => {
 
   const sql = `
     WITH snaps AS (
-      SELECT
+      -- Deduplicate by (task_id, effective change time); keep the latest snapshot per change
+      SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
         s.run_id,
         s.snapshot_at,
         COALESCE(s.task_changed_date, s.snapshot_at) AS t,
@@ -576,6 +579,7 @@ app.get('/api/hours/entries', async (req, res) => {
         s.parent_id,
         s.account_code
       FROM public.tfs_task_hours_snapshots s
+      ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
     ),
     prior AS (
       SELECT DISTINCT ON (task_id)
@@ -732,7 +736,8 @@ app.get('/api/hours/export.csv', async (req, res) => {
 
   const sql = `
   WITH snaps AS (
-    SELECT
+    -- Deduplicate by (task_id, effective change time) taking the latest snapshot per change
+    SELECT DISTINCT ON (task_id, COALESCE(task_changed_date, snapshot_at))
       task_id,
       snapshot_at,
       COALESCE(task_changed_date, snapshot_at) AS t,
@@ -741,6 +746,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
       account_code,
       COALESCE(task_actual_hours, 0) AS h
     FROM public.tfs_task_hours_snapshots
+    ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
   ),
   prior AS (
     SELECT DISTINCT ON (task_id)
