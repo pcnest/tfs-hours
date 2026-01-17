@@ -455,6 +455,7 @@ app.get('/api/hours/summary', async (req, res) => {
   const from = rng.fromUtc;
   const toExclusive = rng.toExclusiveUtc;
 
+  const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
@@ -581,6 +582,7 @@ app.get('/api/hours/entries', async (req, res) => {
   const from = rng.fromUtc;
   const toExclusive = rng.toExclusiveUtc;
 
+  const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
