@@ -75,6 +75,12 @@ function normNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function normText(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
 function chunkArray(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -153,10 +159,12 @@ function buildUpsertLatest(rows) {
     'task_assigned_to',
     'task_assigned_upn',
     'task_actual_hours',
-    'parent_id',
-    'parent_type',
-    'parent_title',
-    'account_code',
+    'ticket_id',
+    'ticket_type',
+    'ticket_title',
+    'feature_id',
+    'feature_title',
+    'cost_type',
     'synced_at',
   ];
 
@@ -166,6 +174,13 @@ function buildUpsertLatest(rows) {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
 
+      const ticketId = normInt(r.ticketId ?? r.parentId);
+      const ticketType = normText(r.ticketType ?? r.parentType);
+      const ticketTitle = normText(r.ticketTitle ?? r.parentTitle);
+      const featureId = normInt(r.featureId);
+      const featureTitle = normText(r.featureTitle);
+      const costType = normText(r.costType ?? r.accountCode ?? r.account_code);
+
       values.push(
         r.taskId,
         r.taskTitle ?? null,
@@ -174,10 +189,12 @@ function buildUpsertLatest(rows) {
         r.taskAssignedTo ?? null,
         r.taskAssignedToUPN ?? null,
         normNum(r.actualHours),
-        normInt(r.parentId),
-        r.parentType ?? null,
-        r.parentTitle ?? null,
-        normInt(r.accountCode),
+        ticketId,
+        ticketType,
+        ticketTitle,
+        featureId,
+        featureTitle,
+        costType,
         toDateOrNull(r.syncedAtUtc) ?? new Date()
       );
 
@@ -195,10 +212,12 @@ function buildUpsertLatest(rows) {
       task_assigned_to  = EXCLUDED.task_assigned_to,
       task_assigned_upn = EXCLUDED.task_assigned_upn,
       task_actual_hours = EXCLUDED.task_actual_hours,
-      parent_id         = EXCLUDED.parent_id,
-      parent_type       = EXCLUDED.parent_type,
-      parent_title      = EXCLUDED.parent_title,
-      account_code      = EXCLUDED.account_code,
+      ticket_id         = EXCLUDED.ticket_id,
+      ticket_type       = EXCLUDED.ticket_type,
+      ticket_title      = EXCLUDED.ticket_title,
+      feature_id        = EXCLUDED.feature_id,
+      feature_title     = EXCLUDED.feature_title,
+      cost_type         = EXCLUDED.cost_type,
       synced_at         = EXCLUDED.synced_at
     WHERE public.tfs_task_hours_latest.task_changed_date <= EXCLUDED.task_changed_date
   `;
@@ -228,8 +247,9 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
     'task_changed_date',
     'task_activity',
     'task_actual_hours',
-    'parent_id',
-    'account_code',
+    'ticket_id',
+    'feature_id',
+    'cost_type',
   ];
 
   const values = [];
@@ -237,6 +257,10 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
     .map((r, idx) => {
       const base = idx * cols.length;
       const p = (i) => `$${base + i + 1}`;
+
+      const ticketId = normInt(r.ticketId ?? r.parentId);
+      const featureId = normInt(r.featureId);
+      const costType = normText(r.costType ?? r.accountCode ?? r.account_code);
 
       values.push(
         runId,
@@ -247,8 +271,9 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
         r.taskChangedDate,
         r.activity ?? null,
         normNum(r.actualHours),
-        normInt(r.parentId),
-        normInt(r.accountCode)
+        ticketId,
+        featureId,
+        costType
       );
 
       return `(${cols.map((_, j) => p(j)).join(',')})`;
@@ -264,8 +289,9 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
       task_assigned_to  = EXCLUDED.task_assigned_to,
       task_activity     = EXCLUDED.task_activity,
       task_actual_hours = EXCLUDED.task_actual_hours,
-      parent_id         = EXCLUDED.parent_id,
-      account_code      = EXCLUDED.account_code
+      ticket_id         = EXCLUDED.ticket_id,
+      feature_id        = EXCLUDED.feature_id,
+      cost_type         = EXCLUDED.cost_type
   `;
   return { text, values };
 }
@@ -323,8 +349,12 @@ app.get('/api/hours/latest', async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const accountCodeRaw = (req.query.accountCode || '').toString().trim();
-  const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
+  const costTypeRaw = (
+    req.query.costType ||
+    req.query.accountCode ||
+    ''
+  ).toString().trim();
+  const costType = costTypeRaw || null;
 
   const limit = Math.min(2000, Math.max(1, Number(req.query.limit || 200)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -358,9 +388,9 @@ app.get('/api/hours/latest', async (req, res) => {
     where.push(`COALESCE(task_assigned_upn,'') ILIKE $${params.length}`);
   }
 
-  if (Number.isFinite(accountCode)) {
-    params.push(accountCode);
-    where.push(`account_code = $${params.length}`);
+  if (costType) {
+    params.push(costType);
+    where.push(`LOWER(cost_type) = LOWER($${params.length})`);
   }
 
   params.push(limit, offset);
@@ -374,10 +404,12 @@ app.get('/api/hours/latest', async (req, res) => {
       task_assigned_to,
       task_assigned_upn,
       task_actual_hours,
-      parent_id,
-      parent_type,
-      parent_title,
-      account_code,
+      ticket_id,
+      ticket_type,
+      ticket_title,
+      feature_id,
+      feature_title,
+      cost_type,
       COUNT(*) OVER() AS total_count
     FROM public.tfs_task_hours_latest
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
@@ -420,8 +452,12 @@ app.get('/api/hours/summary', async (req, res) => {
   const toExclusive = rng.toExclusiveUtc;
 
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const accountCodeRaw = (req.query.accountCode || '').toString().trim();
-  const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
+  const costTypeRaw = (
+    req.query.costType ||
+    req.query.accountCode ||
+    ''
+  ).toString().trim();
+  const costType = costTypeRaw || null;
 
   const params = [
     from.toISOString(),
@@ -438,10 +474,10 @@ app.get('/api/hours/summary', async (req, res) => {
     params.push(`%${assignedToUPN}%`);
     filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
   }
-  if (Number.isFinite(accountCode)) {
+  if (costType) {
     idx += 1;
-    params.push(accountCode);
-    filters.push(`AND d.account_code = $${idx}`);
+    params.push(costType);
+    filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
   }
 
   const sql = `
@@ -453,21 +489,21 @@ app.get('/api/hours/summary', async (req, res) => {
       COALESCE(task_changed_date, snapshot_at) AS t,
       task_assigned_upn,
       task_assigned_to,
-      account_code,
+      cost_type,
       COALESCE(task_actual_hours, 0) AS h
     FROM public.tfs_task_hours_snapshots
     ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
   ),
   prior AS (
     SELECT DISTINCT ON (task_id)
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
     FROM snaps
     WHERE t < $1::timestamptz
     ORDER BY task_id, t DESC, snapshot_at DESC
   ),
   inrange AS (
     SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
     FROM snaps
     WHERE t >= $1::timestamptz AND t < $2::timestamptz
   ),
@@ -478,7 +514,7 @@ app.get('/api/hours/summary', async (req, res) => {
   ),
   w AS (
     SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h,
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h,
       LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
     FROM s
   ),
@@ -487,7 +523,7 @@ app.get('/api/hours/summary', async (req, res) => {
       (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
       task_assigned_upn,
       task_assigned_to,
-      account_code,
+      cost_type,
       (h - COALESCE(prev_h, 0)) AS delta_h
     FROM w
     WHERE t >= $1::timestamptz AND t < $2::timestamptz
@@ -496,7 +532,8 @@ app.get('/api/hours/summary', async (req, res) => {
     bucket,
     task_assigned_upn AS "assignedToUPN",
     task_assigned_to  AS "assignedTo",
-    account_code      AS "accountCode",
+    cost_type         AS "accountCode",
+    cost_type         AS "costType",
     SUM(delta_h)      AS "hours"
   FROM d
   WHERE 1=1
@@ -538,8 +575,12 @@ app.get('/api/hours/entries', async (req, res) => {
   const toExclusive = rng.toExclusiveUtc;
 
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const accountCodeRaw = (req.query.accountCode || '').toString().trim();
-  const accountCode = accountCodeRaw ? Number(accountCodeRaw) : null;
+  const costTypeRaw = (
+    req.query.costType ||
+    req.query.accountCode ||
+    ''
+  ).toString().trim();
+  const costType = costTypeRaw || null;
 
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -553,10 +594,10 @@ app.get('/api/hours/entries', async (req, res) => {
     params.push(`%${assignedToUPN}%`);
     filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
   }
-  if (Number.isFinite(accountCode)) {
+  if (costType) {
     idx += 1;
-    params.push(accountCode);
-    filters.push(`AND d.account_code = $${idx}`);
+    params.push(costType);
+    filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
   }
 
   idx += 1;
@@ -576,8 +617,9 @@ app.get('/api/hours/entries', async (req, res) => {
         s.task_assigned_to,
         s.task_activity,
         COALESCE(s.task_actual_hours, 0) AS h,
-        s.parent_id,
-        s.account_code
+        s.ticket_id,
+        s.feature_id,
+        s.cost_type
       FROM public.tfs_task_hours_snapshots s
       ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
     ),
@@ -603,8 +645,9 @@ app.get('/api/hours/entries', async (req, res) => {
         NULL::text AS task_assigned_to,
         NULL::text AS task_activity,
         p.h,
-        NULL::int  AS parent_id,
-        NULL::int  AS account_code,
+        NULL::int  AS ticket_id,
+        NULL::int  AS feature_id,
+        NULL::text AS cost_type,
         TRUE AS is_prior
       FROM prior p
       UNION ALL
@@ -617,8 +660,9 @@ app.get('/api/hours/entries', async (req, res) => {
         i.task_assigned_to,
         i.task_activity,
         i.h,
-        i.parent_id,
-        i.account_code,
+        i.ticket_id,
+        i.feature_id,
+        i.cost_type,
         FALSE AS is_prior
       FROM inrange i
     ),
@@ -640,8 +684,9 @@ app.get('/api/hours/entries', async (req, res) => {
         COALESCE(prev_h, 0) AS prev_hours,
         h AS actual_hours,
         (h - COALESCE(prev_h, 0)) AS delta_hours,
-        parent_id,
-        account_code
+        ticket_id,
+        feature_id,
+        cost_type
       FROM w
       WHERE is_prior = FALSE
     )
@@ -656,10 +701,13 @@ app.get('/api/hours/entries', async (req, res) => {
       d.prev_hours,
       d.actual_hours,
       d.delta_hours,
-      d.parent_id,
-      l.parent_type,
-      l.parent_title,
-      d.account_code,
+      d.ticket_id,
+      l.ticket_type,
+      l.ticket_title,
+      l.feature_id,
+      l.feature_title,
+      d.cost_type AS account_code,
+      d.cost_type AS cost_type,
       COUNT(*) OVER() AS total_count
     FROM d
     LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
@@ -695,7 +743,11 @@ app.get('/api/hours/export.csv', async (req, res) => {
   const from = (req.query.from || '').toString().trim();
   const to = (req.query.to || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const accountCode = (req.query.accountCode || '').toString().trim();
+  const costType = (
+    req.query.costType ||
+    req.query.accountCode ||
+    ''
+  ).toString().trim();
 
   // run the same SQL by invoking pool query via a small local function:
   // simplest: duplicate minimal code:
@@ -727,11 +779,10 @@ app.get('/api/hours/export.csv', async (req, res) => {
     filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
   }
 
-  const ac = accountCode ? Number(accountCode) : null;
-  if (Number.isFinite(ac)) {
+  if (costType) {
     idx += 1;
-    params.push(ac);
-    filters.push(`AND d.account_code = $${idx}`);
+    params.push(costType);
+    filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
   }
 
   const sql = `
@@ -743,21 +794,21 @@ app.get('/api/hours/export.csv', async (req, res) => {
       COALESCE(task_changed_date, snapshot_at) AS t,
       task_assigned_upn,
       task_assigned_to,
-      account_code,
+      cost_type,
       COALESCE(task_actual_hours, 0) AS h
     FROM public.tfs_task_hours_snapshots
     ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
   ),
   prior AS (
     SELECT DISTINCT ON (task_id)
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
     FROM snaps
     WHERE t < $1::timestamptz
     ORDER BY task_id, t DESC, snapshot_at DESC
   ),
   inrange AS (
     SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
     FROM snaps
     WHERE t >= $1::timestamptz AND t < $2::timestamptz
   ),
@@ -768,7 +819,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
   ),
   w AS (
     SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, account_code, h,
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h,
       LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
     FROM s
   ),
@@ -778,7 +829,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
 
       task_assigned_upn,
       task_assigned_to,
-      account_code,
+      cost_type,
       (h - COALESCE(prev_h, 0)) AS delta_h
     FROM w
     WHERE t >= $1::timestamptz AND t < $2::timestamptz
@@ -787,7 +838,8 @@ app.get('/api/hours/export.csv', async (req, res) => {
     bucket,
     task_assigned_upn AS "assignedToUPN",
     task_assigned_to  AS "assignedTo",
-    account_code      AS "accountCode",
+    cost_type         AS "accountCode",
+    cost_type         AS "costType",
     SUM(delta_h)      AS "hours"
   FROM d
   WHERE 1=1
