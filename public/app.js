@@ -156,7 +156,7 @@ function renderReportRows(rows) {
         <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
         <td>${escapeHtml(fmtDateTime(x.changed_at || x.task_changed_date))}</td>
-        <td>${fmtHours(x.delta_hours ?? x.actual_hours ?? x.task_actual_hours)}</td>
+        <td>${fmtHours(x.actual_hours ?? x.task_actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
     `
@@ -228,7 +228,7 @@ function exportCsv() {
       x.task_title,
       x.task_activity,
       fmtDateTime(x.changed_at || x.task_changed_date),
-      x.delta_hours ?? x.actual_hours ?? x.task_actual_hours,
+      x.actual_hours ?? x.task_actual_hours,
       x.task_assigned_to,
     ];
     lines.push(row.map(csvEscape).join(','));
