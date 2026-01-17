@@ -723,7 +723,7 @@ app.get('/api/hours/entries', async (req, res) => {
       COUNT(*) OVER() AS total_count
     FROM d
     LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
-    WHERE 1=1
+    WHERE d.delta_hours > 0
       ${filters.join('\n ')}
     ORDER BY d.changed_at ASC, d.task_id ASC
     LIMIT $${idx - 1} OFFSET $${idx};
