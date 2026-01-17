@@ -348,6 +348,7 @@ app.post('/api/tfs-hours-sync', async (req, res) => {
 app.get('/api/hours/latest', async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
+  const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
@@ -382,10 +383,13 @@ app.get('/api/hours/latest', async (req, res) => {
     );
   }
 
-  // make AssignedToUPN filter forgiving (works even with older snapshots that stored "Name <UPN>")
-  if (assignedToUPN) {
-    params.push(`%${assignedToUPN}%`);
-    where.push(`COALESCE(task_assigned_upn,'') ILIKE $${params.length}`);
+  // Assigned To: allow name or UPN (works with older snapshots that stored "Name <UPN>")
+  const assignedFilter = assignedTo || assignedToUPN;
+  if (assignedFilter) {
+    params.push(`%${assignedFilter}%`);
+    where.push(
+      `(COALESCE(task_assigned_to,'') ILIKE $${params.length} OR COALESCE(task_assigned_upn,'') ILIKE $${params.length})`
+    );
   }
 
   if (costType) {

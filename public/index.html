@@ -4,219 +4,397 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>TFS Hours Dashboard</title>
+  <title>TFS Hours Report</title>
   <style>
+    :root {
+      --bg: #f7f2e8;
+      --bg-2: #e6f2ec;
+      --ink: #1f2b2c;
+      --muted: #5c6a6b;
+      --accent: #1f7a6b;
+      --accent-2: #c8742b;
+      --panel: rgba(255, 255, 255, 0.9);
+      --stroke: rgba(31, 43, 44, 0.14);
+      --shadow: 0 26px 50px rgba(16, 24, 24, 0.14);
+      --radius: 18px;
+      --font-display: "Palatino Linotype", "Book Antiqua", serif;
+      --font-body: "Trebuchet MS", "Lucida Sans Unicode", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      margin: 18px;
+      margin: 0;
+      padding: 28px;
+      font-family: var(--font-body);
+      color: var(--ink);
+      background: radial-gradient(circle at 10% 0%, #fff4df 0%, var(--bg) 35%, var(--bg-2) 100%);
+      min-height: 100vh;
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      width: 420px;
+      height: 420px;
+      border-radius: 999px;
+      filter: blur(0);
+      opacity: 0.25;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    body::before {
+      top: -120px;
+      right: -120px;
+      background: radial-gradient(circle at 30% 30%, #f7b56a, transparent 70%);
+    }
+
+    body::after {
+      bottom: -180px;
+      left: -120px;
+      background: radial-gradient(circle at 40% 40%, #4ba28d, transparent 65%);
+    }
+
+    .app {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero {
+      display: grid;
+      gap: 6px;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: clamp(28px, 3vw, 44px);
+      font-weight: 700;
+    }
+
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      max-width: 720px;
+      line-height: 1.5;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+      animation: rise 0.6s ease both;
+    }
+
+    .filters {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 2fr 1.2fr 1fr;
+      align-items: end;
     }
 
     label {
       font-size: 12px;
-      opacity: .8;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
       display: block;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
     }
 
-    input,
-    select {
-      padding: 8px;
-      border: 1px solid #3334;
-      border-radius: 10px;
-      min-width: 170px;
+    .range {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .range-sep {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .tz {
+      display: inline-block;
+      margin-left: 8px;
+      font-size: 11px;
+      color: var(--accent);
+    }
+
+    input {
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      min-width: 160px;
+      background: white;
+      font-family: var(--font-body);
     }
 
     button {
-      padding: 9px 12px;
-      border-radius: 10px;
-      border: 1px solid #3334;
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
       cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
 
-    .bar {
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(31, 122, 107, 0.2);
+    }
+
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--stroke);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .actions {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
-      align-items: end;
+      justify-content: flex-end;
     }
 
-    .cards {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-top: 14px;
+    .stats {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3, minmax(180px, 1fr));
+      animation: rise 0.6s ease both;
+      animation-delay: 0.08s;
     }
 
-    .card {
-      border: 1px solid #3333;
+    .stat {
+      background: white;
+      border: 1px solid var(--stroke);
       border-radius: 14px;
-      padding: 12px 14px;
-      min-width: 200px;
+      padding: 12px 16px;
     }
 
-    .k {
+    .stat .k {
       font-size: 12px;
-      opacity: .7;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
     }
 
-    .v {
+    .stat .v {
       font-size: 20px;
       font-weight: 700;
       margin-top: 4px;
+      font-family: var(--font-display);
+    }
+
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .table-wrap {
+      background: white;
+      border: 1px solid var(--stroke);
+      border-radius: 18px;
+      padding: 10px;
+      overflow: auto;
+      box-shadow: var(--shadow);
+      animation: rise 0.6s ease both;
+      animation-delay: 0.16s;
     }
 
     table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 14px;
+      min-width: 1100px;
     }
 
     th,
     td {
-      border-bottom: 1px solid #3332;
-      padding: 8px;
+      border-bottom: 1px solid #e6e6e6;
+      padding: 10px 12px;
       font-size: 13px;
       text-align: left;
       vertical-align: top;
+      white-space: nowrap;
     }
 
     th {
       position: sticky;
       top: 0;
-      background: #fff;
+      background: white;
+      z-index: 2;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
     }
 
-    .muted {
-      opacity: .7;
+    tbody tr:hover {
+      background: #f8fbfa;
     }
 
-    .pill {
-      display: inline-block;
-      padding: 2px 8px;
-      border: 1px solid #3333;
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
       border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: #f7f4ea;
       font-size: 12px;
     }
 
-    a.pill {
+    a.tag {
       color: inherit;
       text-decoration: none;
     }
 
-    a.pill:hover {
+    a.tag:hover {
       text-decoration: underline;
     }
 
-    .sectionTitle {
-      margin-top: 18px;
-      font-weight: 700;
+    .title-cell {
+      max-width: 320px;
+      white-space: normal;
+      line-height: 1.35;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 960px) {
+      .filters {
+        grid-template-columns: 1fr;
+      }
+
+      .actions {
+        justify-content: flex-start;
+      }
+
+      .stats {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .stats {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 
 <body>
-  <h2 style="margin:0 0 10px 0;">TFS Hours Dashboard</h2>
-  <div class="muted" style="margin-bottom:14px;">
-    Delta-based rollup of <b>SupplyPro.SPApplication.Task.ActualHours</b> by <b>Task.AssignedTo</b>. Supports negative
-    corrections.
+  <div class="app">
+    <header class="hero">
+      <div class="eyebrow">SupplyPro TFS 2017</div>
+      <h1>Actual Hours Report</h1>
+      <p class="sub">Feature, ticket, and task view driven by Task changed date, with one row per Task.</p>
+    </header>
+
+    <section class="panel filters">
+      <div>
+        <label>Report Date Range <span class="tz" id="tzLabel">UTC</span></label>
+        <div class="range">
+          <input id="from" type="date" />
+          <span class="range-sep">to</span>
+          <input id="to" type="date" />
+        </div>
+      </div>
+      <div>
+        <label>Assigned To</label>
+        <input id="assignedTo" placeholder="Name or UPN" />
+      </div>
+      <div class="actions">
+        <button id="btnLoad">Load report</button>
+        <button id="btnExport" class="ghost" disabled>Export CSV</button>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div class="stat">
+        <div class="k">Rows</div>
+        <div class="v" id="m_rows">-</div>
+      </div>
+      <div class="stat">
+        <div class="k">Total Hours</div>
+        <div class="v" id="m_hours">-</div>
+      </div>
+      <div class="stat">
+        <div class="k">Range</div>
+        <div class="v" id="m_range">-</div>
+      </div>
+    </section>
+
+    <div id="status" class="status muted">Loading.</div>
+
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Feature ID</th>
+            <th>Feature Name</th>
+            <th>Cost Type</th>
+            <th>Ticket Type</th>
+            <th>Ticket ID</th>
+            <th>Ticket Title</th>
+            <th>Task ID</th>
+            <th>Task Title</th>
+            <th>Task Activity</th>
+            <th>Changed Date</th>
+            <th>Actual Hours</th>
+            <th>Assigned To</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyReport">
+          <tr>
+            <td colspan="12" class="muted">No data loaded yet.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
   </div>
-
-  <div class="bar">
-    <div><label>From (<span id="tzLabelFrom">UTC</span>)</label><input id="from" type="date" /></div>
-    <div><label>To (<span id="tzLabelTo">UTC</span>)</label><input id="to" type="date" /></div>
-
-    <div>
-      <label>Bucket</label>
-      <select id="bucket">
-        <option value="day" selected>day</option>
-        <option value="week">week</option>
-        <option value="month">month</option>
-      </select>
-    </div>
-    <div><label>AssignedToUPN (optional)</label><input id="assignedToUPN" placeholder="email or DOMAIN\\user" /></div>
-    <div><label>AccountCode (optional)</label><input id="accountCode" placeholder="e.g. 1" /></div>
-    <div><label>Entry rows limit</label>
-
-      <select id="latestLimit">
-        <option>100</option>
-        <option selected>200</option>
-        <option>500</option>
-        <option>1000</option>
-      </select>
-    </div>
-
-    <button id="btnLoad">Load</button>
-    <button id="btnExport">Export CSV</button>
-  </div>
-
-  <div class="cards">
-    <div class="card">
-      <div class="k">Total hours (range)</div>
-      <div class="v" id="m_totalHours">—</div>
-    </div>
-    <div class="card">
-      <div class="k">People (range)</div>
-      <div class="v" id="m_people">—</div>
-    </div>
-    <div class="card">
-      <div class="k">Summary rows</div>
-      <div class="v" id="m_rows">—</div>
-    </div>
-    <div class="card">
-      <div class="k">Entry rows shown</div>
-      <div class="v" id="m_latestRows">—</div>
-    </div>
-  </div>
-
-  <div id="status" class="muted" style="margin-top:12px;">Loading…</div>
-
-  <div class="sectionTitle">Summary (delta-based)</div>
-  <table>
-    <thead>
-      <tr>
-        <th>Bucket</th>
-        <th>AssignedTo</th>
-        <th>Account</th>
-        <th>Hours (net)</th>
-      </tr>
-    </thead>
-    <tbody id="tbodySummary">
-      <tr>
-        <td colspan="4" class="muted">No data loaded yet.</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="sectionTitle">Task entries (by Date Changed)</div>
-  <div class="muted" style="margin-top:6px;">
-    This table shows raw changed rows within the selected range, ordered by <b>Date Changed</b>, with <b>Hours Δ</b> per
-    change.
-  </div>
-
-
-  <table>
-    <thead>
-      <tr>
-        <th>Task ID</th>
-        <th>Task Title</th>
-        <th>Activity</th>
-        <th>Changed</th>
-        <th>Hours Δ</th>
-        <th>ActualHours</th>
-        <th>AssignedTo</th>
-        <th>Parent</th>
-        <th>Parent Title</th>
-        <th>Account</th>
-      </tr>
-    </thead>
-
-    <tbody id="tbodyLatest">
-      <tr>
-        <td colspan="10" class="muted">No data loaded yet.</td>
-
-      </tr>
-    </tbody>
-  </table>
 
   <script src="app.js"></script>
 </body>
