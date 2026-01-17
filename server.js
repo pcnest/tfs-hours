@@ -349,6 +349,7 @@ app.get('/api/hours/latest', async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
   const assignedTo = (req.query.assignedTo || '').toString().trim();
+  const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
@@ -596,10 +597,13 @@ app.get('/api/hours/entries', async (req, res) => {
   let idx = params.length;
 
   const filters = [];
-  if (assignedToUPN) {
+  const assignedFilter = assignedTo || assignedToUPN;
+  if (assignedFilter) {
     idx += 1;
-    params.push(`%${assignedToUPN}%`);
-    filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
+    params.push(`%${assignedFilter}%`);
+    filters.push(
+      `AND (COALESCE(d.task_assigned_to,'') ILIKE $${idx} OR COALESCE(d.task_assigned_upn,'') ILIKE $${idx})`
+    );
   }
   if (costType) {
     idx += 1;
