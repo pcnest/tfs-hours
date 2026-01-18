@@ -432,8 +432,6 @@ app.get('/api/hours/latest', async (req, res) => {
   const changedByUPN = (req.query.changedByUPN || '').toString().trim();
   const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const changedBy = (req.query.changedBy || '').toString().trim();
-  const changedByUPN = (req.query.changedByUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
     req.query.accountCode ||
