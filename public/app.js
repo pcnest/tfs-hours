@@ -60,6 +60,7 @@ function buildReportParams() {
   add('from', qs('from').value);
   add('to', qs('to').value);
   add('changedBy', qs('changedBy').value);
+  add('assignedTo', qs('assignedTo').value);
   add('limit', '2000');
 
   return p;
