@@ -158,6 +158,8 @@ function buildUpsertLatest(rows) {
     'task_activity',
     'task_assigned_to',
     'task_assigned_upn',
+    'task_changed_by',
+    'task_changed_by_upn',
     'task_actual_hours',
     'ticket_id',
     'ticket_type',
@@ -188,6 +190,8 @@ function buildUpsertLatest(rows) {
         r.activity ?? null,
         r.taskAssignedTo ?? null,
         r.taskAssignedToUPN ?? null,
+        r.taskChangedBy ?? null,
+        r.taskChangedByUPN ?? null,
         normNum(r.actualHours),
         ticketId,
         ticketType,
@@ -211,6 +215,8 @@ function buildUpsertLatest(rows) {
       task_activity     = EXCLUDED.task_activity,
       task_assigned_to  = EXCLUDED.task_assigned_to,
       task_assigned_upn = EXCLUDED.task_assigned_upn,
+      task_changed_by   = EXCLUDED.task_changed_by,
+      task_changed_by_upn = EXCLUDED.task_changed_by_upn,
       task_actual_hours = EXCLUDED.task_actual_hours,
       ticket_id         = EXCLUDED.ticket_id,
       ticket_type       = EXCLUDED.ticket_type,
@@ -243,6 +249,8 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
     'task_id',
     'task_assigned_upn',
     'task_assigned_to',
+    'task_changed_by',
+    'task_changed_by_upn',
     'task_changed_date',
     'task_activity',
     'task_actual_hours',
@@ -267,6 +275,8 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
         r.taskId ?? null,
         r.taskAssignedToUPN ?? null,
         r.taskAssignedTo ?? null,
+        r.taskChangedBy ?? null,
+        r.taskChangedByUPN ?? null,
         r.taskChangedDate,
         r.activity ?? null,
         normNum(r.actualHours),
@@ -286,6 +296,8 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
       snapshot_at       = EXCLUDED.snapshot_at,
       task_assigned_upn = EXCLUDED.task_assigned_upn,
       task_assigned_to  = EXCLUDED.task_assigned_to,
+      task_changed_by   = EXCLUDED.task_changed_by,
+      task_changed_by_upn = EXCLUDED.task_changed_by_upn,
       task_activity     = EXCLUDED.task_activity,
       task_actual_hours = EXCLUDED.task_actual_hours,
       ticket_id         = EXCLUDED.ticket_id,
@@ -347,8 +359,12 @@ app.post('/api/tfs-hours-sync', async (req, res) => {
 app.get('/api/hours/latest', async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
-  const assignedTo = (req.query.assignedTo || '').toString().trim();
-  const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
+  const changedBy = (req.query.changedBy || req.query.assignedTo || '')
+    .toString()
+    .trim();
+  const changedByUPN = (req.query.changedByUPN || req.query.assignedToUPN || '')
+    .toString()
+    .trim();
   const costTypeRaw = (
     req.query.costType ||
     req.query.accountCode ||
@@ -382,12 +398,12 @@ app.get('/api/hours/latest', async (req, res) => {
     );
   }
 
-  // Assigned To: allow name or UPN (works with older snapshots that stored "Name <UPN>")
-  const assignedFilter = assignedTo || assignedToUPN;
-  if (assignedFilter) {
-    params.push(`%${assignedFilter}%`);
+  // Changed By: allow name or UPN.
+  const changedFilter = changedBy || changedByUPN;
+  if (changedFilter) {
+    params.push(`%${changedFilter}%`);
     where.push(
-      `(COALESCE(task_assigned_to,'') ILIKE $${params.length} OR COALESCE(task_assigned_upn,'') ILIKE $${params.length})`
+      `(COALESCE(task_changed_by,'') ILIKE $${params.length} OR COALESCE(task_changed_by_upn,'') ILIKE $${params.length})`
     );
   }
 
