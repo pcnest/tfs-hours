@@ -419,6 +419,9 @@ app.get('/api/hours/latest', async (req, res) => {
     where.push(`LOWER(cost_type) = LOWER($${params.length})`);
   }
 
+  // Default: match desktop behavior by excluding zero/negative hours.
+  where.push('COALESCE(task_actual_hours, 0) > 0');
+
   params.push(limit, offset);
 
   const sql = `
