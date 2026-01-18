@@ -219,7 +219,6 @@ function buildUpsertLatest(rows) {
       feature_title     = EXCLUDED.feature_title,
       cost_type         = EXCLUDED.cost_type,
       synced_at         = EXCLUDED.synced_at
-    WHERE public.tfs_task_hours_latest.task_changed_date <= EXCLUDED.task_changed_date
   `;
   return { text, values };
 }

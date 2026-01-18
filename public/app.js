@@ -126,7 +126,7 @@ function updateStats(rows) {
   qs('m_rows').textContent = String(rows.length || 0);
 
   const totalHours = rows.reduce((acc, r) => {
-    const raw = r.delta_hours ?? r.actual_hours ?? r.task_actual_hours;
+    const raw = r.actual_hours ?? r.task_actual_hours;
     const n = Number(raw || 0);
     return acc + (Number.isFinite(n) ? n : 0);
   }, 0);
@@ -155,7 +155,7 @@ function renderReportRows(rows) {
         <td>${renderIdTag(x.task_id)}</td>
         <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
-        <td>${escapeHtml(fmtDateTime(x.changed_at || x.task_changed_date))}</td>
+        <td>${escapeHtml(fmtDateTime(x.task_changed_date))}</td>
         <td>${fmtHours(x.actual_hours ?? x.task_actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
@@ -171,7 +171,7 @@ async function loadReport() {
   setStatus('Loading report.');
 
   const params = buildReportParams();
-  const r = await fetch(`/api/hours/entries?${params.toString()}`);
+  const r = await fetch(`/api/hours/latest?${params.toString()}`);
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
@@ -227,7 +227,7 @@ function exportCsv() {
       x.task_id,
       x.task_title,
       x.task_activity,
-      fmtDateTime(x.changed_at || x.task_changed_date),
+      fmtDateTime(x.task_changed_date),
       x.actual_hours ?? x.task_actual_hours,
       x.task_assigned_to,
     ];
