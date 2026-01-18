@@ -13,6 +13,7 @@ const REPORT_TZ_OFFSET_MINUTES = Number(
   process.env.REPORT_TZ_OFFSET_MINUTES || '0'
 ); // PST = -480
 const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
+const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
 
 if (!DATABASE_URL) {
   console.error('ERROR: DATABASE_URL env var not set.');
@@ -43,6 +44,7 @@ app.get('/api/config', (req, res) => {
       ? REPORT_TZ_OFFSET_MINUTES
       : 0,
     reportTzLabel: REPORT_TZ_LABEL,
+    reportTzIana: REPORT_TZ_IANA || null,
   });
 });
 
@@ -93,6 +95,49 @@ function getReportOffsetMinutes() {
     : 0;
 }
 
+function getReportTimeZone() {
+  return REPORT_TZ_IANA || null;
+}
+
+function getTimeZoneParts(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = dtf.formatToParts(date);
+  const map = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') map[p.type] = p.value;
+  }
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour: Number(map.hour),
+    minute: Number(map.minute),
+    second: Number(map.second),
+  };
+}
+
+function getTimeZoneOffsetMinutes(date, timeZone) {
+  const parts = getTimeZoneParts(date, timeZone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
+  return (asUtc - date.getTime()) / 60000;
+}
+
 // Parses "YYYY-MM-DD" safely
 function parseYmd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '').trim());
@@ -105,6 +150,13 @@ function parseYmd(s) {
   return { y, mo, d };
 }
 
+function addDaysToYmd(ymd, days) {
+  const p = parseYmd(ymd);
+  if (!p) return null;
+  const base = Date.UTC(p.y, p.mo - 1, p.d, 0, 0, 0, 0);
+  return new Date(base + days * 86400 * 1000).toISOString().slice(0, 10);
+}
+
 // Converts local-midnight (in report timezone) to UTC Date.
 // Formula: utc = UTCmidnight(date) - offsetMinutes
 function localMidnightToUtcDate(dateStr, offsetMinutes) {
@@ -114,19 +166,36 @@ function localMidnightToUtcDate(dateStr, offsetMinutes) {
   return new Date(utcMidnightMs - offsetMinutes * 60 * 1000);
 }
 
-// From/To are *calendar days* in report timezone (PST).
-// Returns { fromUtc, toExclusiveUtc } where toExclusive is next-day midnight (PST) in UTC.
-function rangeFromToUtc(fromStr, toStr, offsetMinutes) {
-  const fromUtc = localMidnightToUtcDate(fromStr, offsetMinutes);
-  const toStartUtc = localMidnightToUtcDate(toStr, offsetMinutes);
+function localMidnightToUtcDateInZone(dateStr, timeZone) {
+  const p = parseYmd(dateStr);
+  if (!p) return null;
+  const utcMidnight = new Date(Date.UTC(p.y, p.mo - 1, p.d, 0, 0, 0, 0));
+  let offset = getTimeZoneOffsetMinutes(utcMidnight, timeZone);
+  let utc = new Date(utcMidnight.getTime() - offset * 60 * 1000);
+  const offset2 = getTimeZoneOffsetMinutes(utc, timeZone);
+  if (offset2 !== offset) {
+    utc = new Date(utcMidnight.getTime() - offset2 * 60 * 1000);
+  }
+  return utc;
+}
+
+// From/To are *calendar days* in report timezone.
+// Returns { fromUtc, toExclusiveUtc } where toExclusive is next-day midnight in that timezone (UTC).
+function rangeFromToUtc(fromStr, toStr, offsetMinutes, timeZone) {
+  const toNext = addDaysToYmd(toStr, 1);
+  const fromUtc = timeZone
+    ? localMidnightToUtcDateInZone(fromStr, timeZone)
+    : localMidnightToUtcDate(fromStr, offsetMinutes);
+  const toExclusiveUtc = timeZone
+    ? localMidnightToUtcDateInZone(toNext, timeZone)
+    : localMidnightToUtcDate(toNext, offsetMinutes);
   if (
     !fromUtc ||
-    !toStartUtc ||
+    !toExclusiveUtc ||
     isNaN(fromUtc.getTime()) ||
-    isNaN(toStartUtc.getTime())
+    isNaN(toExclusiveUtc.getTime())
   )
     return null;
-  const toExclusiveUtc = new Date(toStartUtc.getTime() + 86400 * 1000);
   return { fromUtc, toExclusiveUtc };
 }
 
@@ -363,6 +432,8 @@ app.get('/api/hours/latest', async (req, res) => {
   const changedByUPN = (req.query.changedByUPN || '').toString().trim();
   const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
+  const changedBy = (req.query.changedBy || '').toString().trim();
+  const changedByUPN = (req.query.changedByUPN || '').toString().trim();
   const costTypeRaw = (
     req.query.costType ||
     req.query.accountCode ||
@@ -377,7 +448,8 @@ app.get('/api/hours/latest', async (req, res) => {
     toExclusive = null;
   if (fromStr && toStr) {
     const offsetMin = getReportOffsetMinutes(); // PST = -480
-    const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+    const tz = getReportTimeZone();
+    const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
     if (!rng)
       return res.status(400).json({ ok: false, error: 'invalid from/to date' });
     from = rng.fromUtc;
@@ -473,7 +545,8 @@ app.get('/api/hours/summary', async (req, res) => {
   }
 
   const offsetMin = getReportOffsetMinutes(); // PST = -480
-  const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
   if (!rng) {
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
   }
@@ -499,6 +572,14 @@ app.get('/api/hours/summary', async (req, res) => {
 
   // optional filters
   const filters = [];
+  const changedFilter = changedBy || changedByUPN;
+  if (changedFilter) {
+    idx += 1;
+    params.push(`%${changedFilter}%`);
+    filters.push(
+      `AND (COALESCE(d.task_changed_by,'') ILIKE $${idx} OR COALESCE(d.task_changed_by_upn,'') ILIKE $${idx})`
+    );
+  }
   const assignedFilter = assignedTo || assignedToUPN;
   if (assignedFilter) {
     idx += 1;
@@ -600,7 +681,8 @@ app.get('/api/hours/entries', async (req, res) => {
   }
 
   const offsetMin = getReportOffsetMinutes(); // PST = -480
-  const rng = rangeFromToUtc(fromStr, toStr, offsetMin);
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
   if (!rng) {
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
   }
@@ -653,6 +735,8 @@ app.get('/api/hours/entries', async (req, res) => {
         s.task_assigned_upn,
         s.task_assigned_to,
         s.task_activity,
+        s.task_changed_by,
+        s.task_changed_by_upn,
         COALESCE(s.task_actual_hours, 0) AS h,
         s.ticket_id,
         s.feature_id,
@@ -681,6 +765,8 @@ app.get('/api/hours/entries', async (req, res) => {
         NULL::text AS task_assigned_upn,
         NULL::text AS task_assigned_to,
         NULL::text AS task_activity,
+        NULL::text AS task_changed_by,
+        NULL::text AS task_changed_by_upn,
         p.h,
         NULL::int  AS ticket_id,
         NULL::int  AS feature_id,
@@ -696,6 +782,8 @@ app.get('/api/hours/entries', async (req, res) => {
         i.task_assigned_upn,
         i.task_assigned_to,
         i.task_activity,
+        i.task_changed_by,
+        i.task_changed_by_upn,
         i.h,
         i.ticket_id,
         i.feature_id,
@@ -718,6 +806,8 @@ app.get('/api/hours/entries', async (req, res) => {
         task_assigned_upn,
         task_assigned_to,
         task_activity,
+        task_changed_by,
+        task_changed_by_upn,
         COALESCE(prev_h, 0) AS prev_hours,
         h AS actual_hours,
         (h - COALESCE(prev_h, 0)) AS delta_hours,
@@ -735,6 +825,8 @@ app.get('/api/hours/entries', async (req, res) => {
       d.task_activity,
       d.task_assigned_to,
       d.task_assigned_upn,
+      d.task_changed_by,
+      d.task_changed_by_upn,
       d.prev_hours,
       d.actual_hours,
       d.delta_hours,
@@ -795,7 +887,8 @@ app.get('/api/hours/export.csv', async (req, res) => {
   if (!from || !to) return res.status(400).send('from/to required');
 
   const offsetMin = getReportOffsetMinutes(); // PST = -480
-  const rng = rangeFromToUtc(from, to, offsetMin);
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(from, to, offsetMin, tz);
   if (!rng) return res.status(400).send('invalid from/to');
 
   const fromD = rng.fromUtc;

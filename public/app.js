@@ -1,5 +1,6 @@
 let APP_CFG = null;
 let LAST_ROWS = [];
+let LAST_MODE = 'latest';
 
 function qs(id) {
   return document.getElementById(id);
@@ -51,7 +52,7 @@ function renderIdTag(id) {
   return `<span class="tag">${label}</span>`;
 }
 
-function buildReportParams() {
+function buildReportParams(opts = {}) {
   const p = new URLSearchParams();
   const add = (k, v) => {
     if (v !== null && v !== undefined && String(v).trim() !== '') p.set(k, v);
@@ -61,7 +62,7 @@ function buildReportParams() {
   add('to', qs('to').value);
   add('changedBy', qs('changedBy').value);
   add('assignedTo', qs('assignedTo').value);
-  add('limit', '2000');
+  add('limit', opts.limit ?? '2000');
 
   return p;
 }
@@ -75,8 +76,42 @@ function tzLabel() {
   return APP_CFG?.reportTzLabel || 'UTC';
 }
 
+function reportTimeZone() {
+  const tz = APP_CFG?.reportTzIana;
+  return tz && String(tz).trim() ? String(tz).trim() : null;
+}
+
 function shiftDateByOffset(d, offsetMinutes) {
   return new Date(d.getTime() + offsetMinutes * 60 * 1000);
+}
+
+function formatPartsInZone(date, timeZone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(date);
+  const map = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') map[p.type] = p.value;
+  }
+  return map;
+}
+
+function formatDateTimeInZone(date, timeZone) {
+  const p = formatPartsInZone(date, timeZone);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+function formatYmdInZone(date, timeZone) {
+  const p = formatPartsInZone(date, timeZone);
+  return `${p.year}-${p.month}-${p.day}`;
 }
 
 function setTzLabels() {
@@ -86,6 +121,8 @@ function setTzLabels() {
 }
 
 function ymdTodayInReportTz() {
+  const tz = reportTimeZone();
+  if (tz) return formatYmdInZone(new Date(), tz);
   const off = tzOffsetMinutes();
   const shiftedNow = shiftDateByOffset(new Date(), off);
   return shiftedNow.toISOString().slice(0, 10);
@@ -97,14 +134,23 @@ function ymdAddDays(ymd, days) {
   return new Date(d.getTime() + days * 86400 * 1000).toISOString().slice(0, 10);
 }
 
+function isHistoryMode() {
+  const el = qs('historyMode');
+  return !!el && el.checked;
+}
+
 function fmtDateTime(v) {
   if (!v) return '-';
   const d = new Date(v);
   if (isNaN(d.getTime())) return '-';
 
-  const off = tzOffsetMinutes();
-  const shifted = shiftDateByOffset(d, off);
-  const s = shifted.toISOString().replace('T', ' ').slice(0, 16);
+  const tz = reportTimeZone();
+  const s = tz
+    ? formatDateTimeInZone(d, tz)
+    : shiftDateByOffset(d, tzOffsetMinutes())
+        .toISOString()
+        .replace('T', ' ')
+        .slice(0, 16);
 
   return `${s} ${tzLabel()}`;
 }
@@ -156,7 +202,7 @@ function renderReportRows(rows) {
         <td>${renderIdTag(x.task_id)}</td>
         <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
-        <td>${escapeHtml(fmtDateTime(x.task_changed_date))}</td>
+        <td>${escapeHtml(fmtDateTime(x.changed_at || x.task_changed_date))}</td>
         <td>${fmtHours(x.actual_hours ?? x.task_actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
@@ -171,8 +217,10 @@ async function loadReport() {
   ).innerHTML = `<tr><td colspan="12" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
-  const params = buildReportParams();
-  const r = await fetch(`/api/hours/latest?${params.toString()}`);
+  const useHistory = isHistoryMode();
+  const params = buildReportParams({ limit: useHistory ? '5000' : '2000' });
+  const endpoint = useHistory ? '/api/hours/entries' : '/api/hours/latest';
+  const r = await fetch(`${endpoint}?${params.toString()}`);
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
@@ -190,11 +238,12 @@ async function loadReport() {
 
   const rows = data.rows || [];
   LAST_ROWS = rows;
+  LAST_MODE = useHistory ? 'history' : 'latest';
 
   qs('tbodyReport').innerHTML = renderReportRows(rows);
   updateStats(rows);
   qs('btnExport').disabled = rows.length === 0;
-  setStatus(`Loaded ${rows.length} rows.`);
+  setStatus(`Loaded ${rows.length} rows (${LAST_MODE}).`);
   return { ok: true };
 }
 
@@ -228,7 +277,7 @@ function exportCsv() {
       x.task_id,
       x.task_title,
       x.task_activity,
-      fmtDateTime(x.task_changed_date),
+      fmtDateTime(x.changed_at || x.task_changed_date),
       x.actual_hours ?? x.task_actual_hours,
       x.task_assigned_to,
     ];
