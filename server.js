@@ -10,7 +10,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
 const TFS_WORKITEM_URL_TEMPLATE = process.env.TFS_WORKITEM_URL_TEMPLATE || '';
 const REPORT_TZ_OFFSET_MINUTES = Number(
-  process.env.REPORT_TZ_OFFSET_MINUTES || '0'
+  process.env.REPORT_TZ_OFFSET_MINUTES || '0',
 ); // PST = -480
 const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
 const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
@@ -133,7 +133,7 @@ function getTimeZoneOffsetMinutes(date, timeZone) {
     parts.day,
     parts.hour,
     parts.minute,
-    parts.second
+    parts.second,
   );
   return (asUtc - date.getTime()) / 60000;
 }
@@ -268,7 +268,7 @@ function buildUpsertLatest(rows) {
         featureId,
         featureTitle,
         costType,
-        toDateOrNull(r.syncedAtUtc) ?? new Date()
+        toDateOrNull(r.syncedAtUtc) ?? new Date(),
       );
 
       return `(${cols.map((_, j) => p(j)).join(',')})`;
@@ -351,7 +351,7 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
         normNum(r.actualHours),
         ticketId,
         featureId,
-        costType
+        costType,
       );
 
       return `(${cols.map((_, j) => p(j)).join(',')})`;
@@ -395,7 +395,7 @@ app.post('/api/tfs-hours-sync', async (req, res) => {
       `INSERT INTO public.tfs_hours_runs(run_at, source, item_count)
        VALUES ($1, $2, $3)
        RETURNING run_id, run_at`,
-      [syncTs, src, rows.length]
+      [syncTs, src, rows.length],
     );
     const runId = runR.rows[0].run_id;
     const runAt = runR.rows[0].run_at;
@@ -432,11 +432,9 @@ app.get('/api/hours/latest', async (req, res) => {
   const changedByUPN = (req.query.changedByUPN || '').toString().trim();
   const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const costTypeRaw = (
-    req.query.costType ||
-    req.query.accountCode ||
-    ''
-  ).toString().trim();
+  const costTypeRaw = (req.query.costType || req.query.accountCode || '')
+    .toString()
+    .trim();
   const costType = costTypeRaw || null;
 
   const limit = Math.min(2000, Math.max(1, Number(req.query.limit || 200)));
@@ -462,7 +460,7 @@ app.get('/api/hours/latest', async (req, res) => {
     where.push(
       `COALESCE(task_changed_date, synced_at) >= $${
         params.length - 1
-      } AND COALESCE(task_changed_date, synced_at) < $${params.length}`
+      } AND COALESCE(task_changed_date, synced_at) < $${params.length}`,
     );
   }
 
@@ -471,7 +469,7 @@ app.get('/api/hours/latest', async (req, res) => {
   if (changedFilter) {
     params.push(`%${changedFilter}%`);
     where.push(
-      `(COALESCE(task_changed_by,'') ILIKE $${params.length} OR COALESCE(task_changed_by_upn,'') ILIKE $${params.length})`
+      `(COALESCE(task_changed_by,'') ILIKE $${params.length} OR COALESCE(task_changed_by_upn,'') ILIKE $${params.length})`,
     );
   }
 
@@ -480,7 +478,7 @@ app.get('/api/hours/latest', async (req, res) => {
   if (assignedFilter) {
     params.push(`%${assignedFilter}%`);
     where.push(
-      `(COALESCE(task_assigned_to,'') ILIKE $${params.length} OR COALESCE(task_assigned_upn,'') ILIKE $${params.length})`
+      `(COALESCE(task_assigned_to,'') ILIKE $${params.length} OR COALESCE(task_assigned_upn,'') ILIKE $${params.length})`,
     );
   }
 
@@ -535,6 +533,8 @@ app.get('/api/hours/summary', async (req, res) => {
 
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD (inclusive in UI)
+  const changedBy = (req.query.changedBy || '').toString().trim();
+  const changedByUPN = (req.query.changedByUPN || '').toString().trim();
 
   if (!fromStr || !toStr) {
     return res
@@ -553,11 +553,9 @@ app.get('/api/hours/summary', async (req, res) => {
 
   const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const costTypeRaw = (
-    req.query.costType ||
-    req.query.accountCode ||
-    ''
-  ).toString().trim();
+  const costTypeRaw = (req.query.costType || req.query.accountCode || '')
+    .toString()
+    .trim();
   const costType = costTypeRaw || null;
 
   const params = [
@@ -575,7 +573,7 @@ app.get('/api/hours/summary', async (req, res) => {
     idx += 1;
     params.push(`%${changedFilter}%`);
     filters.push(
-      `AND (COALESCE(d.task_changed_by,'') ILIKE $${idx} OR COALESCE(d.task_changed_by_upn,'') ILIKE $${idx})`
+      `AND (COALESCE(d.task_changed_by,'') ILIKE $${idx} OR COALESCE(d.task_changed_by_upn,'') ILIKE $${idx})`,
     );
   }
   const assignedFilter = assignedTo || assignedToUPN;
@@ -583,7 +581,7 @@ app.get('/api/hours/summary', async (req, res) => {
     idx += 1;
     params.push(`%${assignedFilter}%`);
     filters.push(
-      `AND (COALESCE(d.task_assigned_to,'') ILIKE $${idx} OR COALESCE(d.task_assigned_upn,'') ILIKE $${idx})`
+      `AND (COALESCE(d.task_assigned_to,'') ILIKE $${idx} OR COALESCE(d.task_assigned_upn,'') ILIKE $${idx})`,
     );
   }
   if (costType) {
@@ -689,11 +687,9 @@ app.get('/api/hours/entries', async (req, res) => {
 
   const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const costTypeRaw = (
-    req.query.costType ||
-    req.query.accountCode ||
-    ''
-  ).toString().trim();
+  const costTypeRaw = (req.query.costType || req.query.accountCode || '')
+    .toString()
+    .trim();
   const costType = costTypeRaw || null;
 
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
@@ -708,7 +704,7 @@ app.get('/api/hours/entries', async (req, res) => {
     idx += 1;
     params.push(`%${assignedFilter}%`);
     filters.push(
-      `AND (COALESCE(d.task_assigned_to,'') ILIKE $${idx} OR COALESCE(d.task_assigned_upn,'') ILIKE $${idx})`
+      `AND (COALESCE(d.task_assigned_to,'') ILIKE $${idx} OR COALESCE(d.task_assigned_upn,'') ILIKE $${idx})`,
     );
   }
   if (costType) {
@@ -870,11 +866,9 @@ app.get('/api/hours/export.csv', async (req, res) => {
   const from = (req.query.from || '').toString().trim();
   const to = (req.query.to || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
-  const costType = (
-    req.query.costType ||
-    req.query.accountCode ||
-    ''
-  ).toString().trim();
+  const costType = (req.query.costType || req.query.accountCode || '')
+    .toString()
+    .trim();
 
   // run the same SQL by invoking pool query via a small local function:
   // simplest: duplicate minimal code:
@@ -982,7 +976,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename=tfs_hours_summary.csv'
+      'attachment; filename=tfs_hours_summary.csv',
     );
 
     const headers = [

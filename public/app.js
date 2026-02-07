@@ -46,7 +46,7 @@ function renderIdTag(id) {
   const label = escapeHtml(id);
   if (href) {
     return `<a class="tag" href="${escapeHtml(
-      href
+      href,
     )}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   }
   return `<span class="tag">${label}</span>`;
@@ -181,7 +181,8 @@ function updateStats(rows) {
 
   const from = qs('from').value;
   const to = qs('to').value;
-  qs('m_range').textContent = from && to ? `${from} to ${to} ${tzLabel()}` : '-';
+  qs('m_range').textContent =
+    from && to ? `${from} to ${to} ${tzLabel()}` : '-';
 }
 
 function renderReportRows(rows) {
@@ -206,15 +207,14 @@ function renderReportRows(rows) {
         <td>${fmtHours(x.actual_hours ?? x.task_actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
-    `
+    `,
     )
     .join('');
 }
 
 async function loadReport() {
-  qs(
-    'tbodyReport'
-  ).innerHTML = `<tr><td colspan="12" class="muted">Loading.</td></tr>`;
+  qs('tbodyReport').innerHTML =
+    `<tr><td colspan="12" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
   const useHistory = isHistoryMode();
@@ -224,11 +224,10 @@ async function loadReport() {
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
-    qs(
-      'tbodyReport'
-    ).innerHTML = `<tr><td colspan="12" class="muted">Error: ${escapeHtml(
-      data.error || `HTTP ${r.status}`
-    )}</td></tr>`;
+    qs('tbodyReport').innerHTML =
+      `<tr><td colspan="12" class="muted">Error: ${escapeHtml(
+        data.error || `HTTP ${r.status}`,
+      )}</td></tr>`;
     setStatus('Failed to load report.');
     LAST_ROWS = [];
     updateStats(LAST_ROWS);
@@ -314,7 +313,7 @@ qs('btnExport').addEventListener('click', () => {
   setTzLabels();
 
   const toStr = ymdTodayInReportTz();
-  const fromStr = ymdAddDays(toStr, -29);
+  const fromStr = ymdAddDays(toStr, -6);
 
   qs('from').value = fromStr;
   qs('to').value = toStr;
