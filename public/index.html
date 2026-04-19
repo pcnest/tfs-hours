@@ -66,7 +66,12 @@
       max-width: 1400px;
       margin: 0 auto;
       display: grid;
-      gap: 20px;
+      gap: 16px;
+    }
+
+    .report-body {
+      display: grid;
+      gap: 10px;
     }
 
     .hero {
@@ -569,56 +574,60 @@
         </div>
       </section>
 
-      <section class="stats">
-        <div class="stat">
-          <div class="k">Working Hours</div>
-          <div class="v" id="m_required">-</div>
-        </div>
-        <div class="stat">
-          <div class="k">PTO</div>
-          <div class="v" id="m_pto">-</div>
-        </div>
-        <div class="stat">
-          <div class="k">Public Holiday</div>
-          <div class="v" id="m_holiday">-</div>
-        </div>
-        <div class="stat">
-          <div class="k">Total Hours</div>
-          <div class="v" id="m_hours">-</div>
-        </div>
-        <div class="stat">
-          <div class="k">Missing Hours</div>
-          <div class="v" id="m_missing">-</div>
-        </div>
-      </section>
+      <div class="report-body">
 
-      <div id="status" class="status muted">Loading.</div>
+        <section class="stats">
+          <div class="stat">
+            <div class="k">Working Hours</div>
+            <div class="v" id="m_required">-</div>
+          </div>
+          <div class="stat">
+            <div class="k">PTO</div>
+            <div class="v" id="m_pto">-</div>
+          </div>
+          <div class="stat">
+            <div class="k">Public Holiday</div>
+            <div class="v" id="m_holiday">-</div>
+          </div>
+          <div class="stat">
+            <div class="k">Total Hours</div>
+            <div class="v" id="m_hours">-</div>
+          </div>
+          <div class="stat">
+            <div class="k">Missing Hours</div>
+            <div class="v" id="m_missing">-</div>
+          </div>
+        </section>
 
-      <section class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Feature ID</th>
-              <th>Feature Name</th>
-              <th>Cost Type</th>
-              <th>Ticket Type</th>
-              <th>Ticket ID</th>
-              <th>Ticket Title</th>
-              <th>Task ID</th>
-              <th>Task Title</th>
-              <th>Task Activity</th>
-              <th>Changed Date</th>
-              <th>Actual Hours</th>
-              <th>Assigned To</th>
-            </tr>
-          </thead>
-          <tbody id="tbodyReport">
-            <tr>
-              <td colspan="12" class="muted">No data loaded yet.</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
+        <div id="status" class="status muted">Loading.</div>
+
+        <section class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Feature ID</th>
+                <th>Feature Name</th>
+                <th>Cost Type</th>
+                <th>Ticket Type</th>
+                <th>Ticket ID</th>
+                <th>Ticket Title</th>
+                <th>Task ID</th>
+                <th>Task Title</th>
+                <th>Task Activity</th>
+                <th>Changed Date</th>
+                <th>Actual Hours</th>
+                <th>Assigned To</th>
+              </tr>
+            </thead>
+            <tbody id="tbodyReport">
+              <tr>
+                <td colspan="12" class="muted">No data loaded yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+      </div><!-- /report-body -->
 
     </div><!-- /tabReport -->
 
