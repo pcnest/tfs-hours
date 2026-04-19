@@ -280,9 +280,57 @@ function renderReportRows(rows) {
     .join('');
 }
 
+function renderDailyHoursTable(rows, fromYmd, toYmd) {
+  if (!fromYmd || !toYmd) {
+    return `<tr><td colspan="3" class="muted">No date range selected.</td></tr>`;
+  }
+
+  // Build a map of localDate -> total actual_hours
+  const tz = reportTimeZone();
+  const off = tzOffsetMinutes();
+  const dayTotals = new Map();
+  for (const row of rows) {
+    if (!row.changed_at) continue;
+    const d = new Date(row.changed_at);
+    if (isNaN(d.getTime())) continue;
+    const localYmd = tz
+      ? formatYmdInZone(d, tz)
+      : shiftDateByOffset(d, off).toISOString().slice(0, 10);
+    const h = Number(row.actual_hours || 0);
+    dayTotals.set(
+      localYmd,
+      (dayTotals.get(localYmd) || 0) + (Number.isFinite(h) ? h : 0),
+    );
+  }
+
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const html = [];
+  const cur = new Date(`${fromYmd}T00:00:00.000Z`);
+  const end = new Date(`${toYmd}T00:00:00.000Z`);
+
+  while (cur <= end) {
+    const ymd = cur.toISOString().slice(0, 10);
+    const dow = cur.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow !== 0 && dow !== 6) {
+      const total = dayTotals.get(ymd) || 0;
+      const zeroClass = total === 0 ? ' class="day-zero"' : '';
+      html.push(
+        `<tr${zeroClass}><td>${escapeHtml(ymd)}</td><td>${DAY_NAMES[dow]}</td><td>${fmtHours(total)}</td></tr>`,
+      );
+    }
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+
+  return html.length
+    ? html.join('')
+    : `<tr><td colspan="3" class="muted">No working days in range.</td></tr>`;
+}
+
 async function loadReport() {
   qs('tbodyReport').innerHTML =
     `<tr><td colspan="10" class="muted">Loading.</td></tr>`;
+  qs('tbodyDailyHours').innerHTML =
+    `<tr><td colspan="3" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
   const params = buildReportParams({ limit: '5000' });
@@ -295,6 +343,8 @@ async function loadReport() {
       `<tr><td colspan="10" class="muted">Error: ${escapeHtml(
         data.error || `HTTP ${r.status}`,
       )}</td></tr>`;
+    qs('tbodyDailyHours').innerHTML =
+      `<tr><td colspan="3" class="muted">Error loading data.</td></tr>`;
     setStatus('Failed to load report.');
     LAST_ROWS = [];
     updateStats(LAST_ROWS);
@@ -307,6 +357,11 @@ async function loadReport() {
   LAST_ROWS = rows;
 
   qs('tbodyReport').innerHTML = renderReportRows(rows);
+  qs('tbodyDailyHours').innerHTML = renderDailyHoursTable(
+    rows,
+    qs('from').value,
+    qs('to').value,
+  );
   updateStats(rows);
   await loadMetrics(rows);
   qs('btnExport').disabled = rows.length === 0;
