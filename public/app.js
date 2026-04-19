@@ -846,6 +846,16 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   await loadConfig();
   setTzLabels();
 
+  // Pre-fill manager email from server config
+  if (APP_CFG?.notifyManagerEmail) {
+    const el = qs('notify_manager');
+    if (el && !el.value) el.value = APP_CFG.notifyManagerEmail;
+  }
+  if (APP_CFG?.smtpConfigured === false) {
+    const s = qs('notifyStatus');
+    if (s) s.textContent = 'Warning: email service not configured on server.';
+  }
+
   const toStr = ymdTodayInReportTz();
   const fromStr = ymdAddDays(toStr, -6);
 
@@ -855,3 +865,40 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   await loadUsers();
   await loadReport();
 })();
+
+qs('btnNotify')?.addEventListener('click', async () => {
+  const from      = qs('from').value;
+  const to        = qs('to').value;
+  const threshold = qs('notify_threshold').value;
+  const manager   = qs('notify_manager').value.trim();
+  const statusEl  = qs('notifyStatus');
+
+  if (!from || !to) {
+    statusEl.textContent = 'Please select a date range first.';
+    return;
+  }
+
+  statusEl.textContent = 'Sending notifications\u2026';
+  qs('btnNotify').disabled = true;
+
+  try {
+    const r = await fetch('/api/notifications/missing-hours', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to, threshold: Number(threshold), managerEmail: manager }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      statusEl.textContent = `Error: ${j.error || `HTTP ${r.status}`}`;
+    } else if (j.sent === 0) {
+      statusEl.textContent = j.message || 'No users exceed the threshold \u2014 no emails sent.';
+    } else {
+      statusEl.textContent = `Done \u2014 ${j.sent} of ${j.offenders} email(s) sent.` +
+        (j.errors?.length ? ` (${j.errors.length} failed)` : '');
+    }
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+  } finally {
+    qs('btnNotify').disabled = false;
+  }
+});

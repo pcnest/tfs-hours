@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -14,6 +15,34 @@ const REPORT_TZ_OFFSET_MINUTES = Number(
 ); // PST = -480
 const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
 const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
+
+const BREVO_SMTP_USER      = process.env.BREVO_SMTP_USER      || '';
+const BREVO_SMTP_KEY       = process.env.BREVO_SMTP_KEY       || '';
+const NOTIFY_FROM_EMAIL    = process.env.NOTIFY_FROM_EMAIL    || '';
+const NOTIFY_FROM_NAME     = process.env.NOTIFY_FROM_NAME     || 'TFS Hours Report';
+const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
+
+function createMailTransporter() {
+  return nodemailer.createTransport({
+    host: 'smtp-relay.brevo.com',
+    port: 587,
+    secure: false,
+    auth: { user: BREVO_SMTP_USER, pass: BREVO_SMTP_KEY },
+  });
+}
+
+function escapeEmailHtml(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtH(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toFixed(1) : '0.0';
+}
 
 if (!DATABASE_URL) {
   console.error('ERROR: DATABASE_URL env var not set.');
@@ -45,6 +74,8 @@ app.get('/api/config', (req, res) => {
       : 0,
     reportTzLabel: REPORT_TZ_LABEL,
     reportTzIana: REPORT_TZ_IANA || null,
+    notifyManagerEmail: NOTIFY_MANAGER_EMAIL || null,
+    smtpConfigured: !!(BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL),
   });
 });
 
@@ -1291,6 +1322,243 @@ app.get('/api/hours/metrics', async (req, res) => {
       individualPtoHours,
     });
   } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Missing hours notifications ----------
+app.post('/api/notifications/missing-hours', async (req, res) => {
+  if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY) {
+    return res.status(503).json({ ok: false, error: 'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).' });
+  }
+  if (!NOTIFY_FROM_EMAIL) {
+    return res.status(503).json({ ok: false, error: 'NOTIFY_FROM_EMAIL not configured on server.' });
+  }
+
+  const { from: fromRaw, to: toRaw, threshold: thresholdRaw, managerEmail: managerEmailRaw } = req.body || {};
+
+  const fromStr      = validateDateStr(fromRaw);
+  const toStr        = validateDateStr(toRaw);
+  const threshold    = normNum(thresholdRaw) ?? 16;
+  const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
+
+  if (!fromStr || !toStr)
+    return res.status(400).json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
+  if (!Number.isFinite(threshold) || threshold < 0)
+    return res.status(400).json({ ok: false, error: 'threshold must be a positive number' });
+
+  const offsetMin = getReportOffsetMinutes();
+  const tz        = getReportTimeZone();
+  const rng       = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+  if (!rng)
+    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
+  const { fromUtc, toExclusiveUtc } = rng;
+
+  try {
+    // 1 — Weekday hours (same for everyone)
+    const wdR = await pool.query(
+      `SELECT (COUNT(*) * 8)::float AS weekday_hours
+       FROM generate_series($1::date, $2::date, '1 day'::interval) AS d
+       WHERE EXTRACT(DOW FROM d) BETWEEN 1 AND 5`,
+      [fromStr, toStr],
+    );
+    const weekdayHours = Number(wdR.rows[0]?.weekday_hours ?? 0);
+
+    // 2 — Team off + holidays (same for everyone)
+    const offR = await pool.query(
+      `SELECT
+         COALESCE((SELECT SUM(hours) FROM public.team_off_entries  WHERE entry_date   BETWEEN $1::date AND $2::date), 0) +
+         COALESCE((SELECT SUM(hours) FROM public.public_holidays   WHERE holiday_date BETWEEN $1::date AND $2::date), 0)
+         AS shared_off_hours`,
+      [fromStr, toStr],
+    );
+    const sharedOffHours = Number(offR.rows[0]?.shared_off_hours ?? 0);
+    const requiredHours  = Math.max(0, weekdayHours - sharedOffHours);
+
+    // 3 — Individual PTO per user (keyed by lower-trimmed name)
+    const ptoR = await pool.query(
+      `SELECT LOWER(TRIM(COALESCE(user_name, user_upn))) AS name_key,
+              COALESCE(SUM(hours), 0) AS pto_hours
+       FROM public.pto_entries
+       WHERE entry_date BETWEEN $1::date AND $2::date
+       GROUP BY 1`,
+      [fromStr, toStr],
+    );
+    const ptoByName = new Map(ptoR.rows.map((r) => [r.name_key, Number(r.pto_hours)]));
+
+    // 4 — Actual logged hours per person (delta from snapshots)
+    const loggedR = await pool.query(
+      `WITH snaps AS (
+         SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
+           s.task_id,
+           s.snapshot_at,
+           COALESCE(s.task_changed_date, s.snapshot_at) AS t,
+           s.task_assigned_to,
+           COALESCE(s.task_actual_hours, 0)             AS h
+         FROM public.tfs_task_hours_snapshots s
+         ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
+       ),
+       prior AS (
+         SELECT DISTINCT ON (task_id) task_id, snapshot_at, t, h
+         FROM snaps WHERE t < $1::timestamptz
+         ORDER BY task_id, t DESC, snapshot_at DESC
+       ),
+       inrange AS (
+         SELECT task_id, snapshot_at, t, task_assigned_to, h
+         FROM snaps WHERE t >= $1::timestamptz AND t < $2::timestamptz
+       ),
+       combined AS (
+         SELECT task_id, snapshot_at, t, NULL::text AS task_assigned_to, h, TRUE  AS is_prior FROM prior
+         UNION ALL
+         SELECT task_id, snapshot_at, t, task_assigned_to,               h, FALSE AS is_prior FROM inrange
+       ),
+       w AS (
+         SELECT *, LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+         FROM combined
+       )
+       SELECT
+         LOWER(TRIM(task_assigned_to))               AS name_key,
+         GREATEST(SUM(h - COALESCE(prev_h, 0)), 0)  AS logged_hours
+       FROM w
+       WHERE is_prior = FALSE AND task_assigned_to IS NOT NULL
+       GROUP BY 1`,
+      [fromUtc.toISOString(), toExclusiveUtc.toISOString()],
+    );
+    const loggedByName = new Map(loggedR.rows.map((r) => [r.name_key, Number(r.logged_hours)]));
+
+    // 5 — All users with a real email address
+    const usersR = await pool.query(
+      `SELECT email, name FROM public.users WHERE email LIKE '%@%' ORDER BY name ASC`,
+    );
+
+    // 6 — Identify offenders
+    const offenders = [];
+    for (const user of usersR.rows) {
+      const nameKey     = user.name ? user.name.trim().toLowerCase() : '';
+      const ptoHours    = ptoByName.get(nameKey)     ?? 0;
+      const loggedHours = loggedByName.get(nameKey)  ?? 0;
+      const missing     = requiredHours - ptoHours - loggedHours;
+      if (missing > threshold) {
+        offenders.push({
+          email: user.email,
+          name: user.name || user.email,
+          weekdayHours,
+          sharedOffHours,
+          requiredHours,
+          ptoHours,
+          loggedHours,
+          missing,
+        });
+      }
+    }
+
+    if (offenders.length === 0) {
+      return res.json({
+        ok: true,
+        sent: 0,
+        offenders: 0,
+        message: `No users have missing hours above ${threshold}h for this period.`,
+      });
+    }
+
+    // 7 — Send individual emails
+    const transporter = createMailTransporter();
+    const period = `${fromStr} to ${toStr}`;
+    let sent = 0;
+    const errors = [];
+
+    for (const u of offenders) {
+      const html = `
+        <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:520px;">
+          <p>Hi <strong>${escapeEmailHtml(u.name)}</strong>,</p>
+          <p>This is a reminder that you have
+             <strong style="color:#c8742b;">${fmtH(u.missing)} missing hours</strong>
+             for the period <strong>${escapeEmailHtml(period)}</strong>.</p>
+          <table border="1" cellpadding="8" cellspacing="0"
+                 style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
+            <thead>
+              <tr style="background:#f0ebe0;">
+                <th>Workday Hrs</th><th>Team Off / Holiday</th>
+                <th>Your PTO</th><th>Logged</th><th>Missing</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="text-align:center;">
+                <td>${fmtH(u.weekdayHours)}</td>
+                <td>${fmtH(u.sharedOffHours)}</td>
+                <td>${fmtH(u.ptoHours)}</td>
+                <td>${fmtH(u.loggedHours)}</td>
+                <td style="color:#c8742b;font-weight:bold;">${fmtH(u.missing)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>Please log your hours in TFS at your earliest convenience.</p>
+          <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
+        </div>`;
+      try {
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: u.email,
+          ...(managerEmail ? { cc: managerEmail } : {}),
+          subject: `Missing Hours Alert \u2013 ${period}`,
+          html,
+        });
+        sent++;
+      } catch (e) {
+        errors.push({ email: u.email, error: String(e?.message || e) });
+      }
+    }
+
+    // 8 — Manager digest (separate summary email)
+    if (managerEmail) {
+      const tableRows = offenders
+        .map(
+          (u) => `
+        <tr>
+          <td>${escapeEmailHtml(u.name)}</td>
+          <td>${escapeEmailHtml(u.email)}</td>
+          <td style="text-align:center;">${fmtH(u.requiredHours)}</td>
+          <td style="text-align:center;">${fmtH(u.ptoHours)}</td>
+          <td style="text-align:center;">${fmtH(u.loggedHours)}</td>
+          <td style="text-align:center;color:#c8742b;font-weight:bold;">${fmtH(u.missing)}</td>
+        </tr>`,
+        )
+        .join('');
+      const digestHtml = `
+        <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
+          <p><strong>${offenders.length} user(s)</strong> have missing hours
+             &gt; ${fmtH(threshold)}h for <strong>${escapeEmailHtml(period)}</strong>:</p>
+          <table border="1" cellpadding="8" cellspacing="0"
+                 style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
+            <thead>
+              <tr style="background:#f0ebe0;">
+                <th>Name</th><th>Email</th><th>Required</th>
+                <th>PTO</th><th>Logged</th><th>Missing</th>
+              </tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+          <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
+        </div>`;
+      try {
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: managerEmail,
+          subject: `Missing Hours Digest \u2013 ${period} \u2013 ${offenders.length} user(s)`,
+          html: digestHtml,
+        });
+      } catch (_) { /* digest failure is non-critical */ }
+    }
+
+    res.json({
+      ok: true,
+      sent,
+      offenders: offenders.length,
+      ...(errors.length ? { errors } : {}),
+    });
+  } catch (e) {
+    console.error('NOTIFY ERROR:', e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
