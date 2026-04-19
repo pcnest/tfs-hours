@@ -1451,6 +1451,8 @@ app.get('/api/notifications/hours-preview', async (req, res) => {
       return {
         name: user.name || user.email,
         email: user.email,
+        weekdayHours,
+        sharedOffHours,
         requiredHours,
         ptoHours,
         loggedHours,

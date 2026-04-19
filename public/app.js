@@ -873,7 +873,7 @@ function renderNotifyPreview(rows, threshold) {
   if (!wrap || !tbody) return;
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted">No users found.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">No users found.</td></tr>`;
     wrap.hidden = false;
     return;
   }
@@ -886,7 +886,8 @@ function renderNotifyPreview(rows, threshold) {
       <tr>
         <td class="muted">${i + 1}</td>
         <td>${escapeHtml(r.name)}</td>
-        <td style="text-align:right;">${fmtHours(r.requiredHours)}</td>
+        <td style="text-align:right;">${fmtHours(r.weekdayHours)}</td>
+        <td style="text-align:right;">${fmtHours(r.sharedOffHours)}</td>
         <td style="text-align:right;">${fmtHours(r.ptoHours)}</td>
         <td style="text-align:right;">${fmtHours(r.loggedHours)}</td>
         <td style="text-align:right;" class="${escapeHtml(missCls)}">${fmtHours(r.missing)}</td>
