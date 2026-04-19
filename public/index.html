@@ -372,6 +372,145 @@
         grid-template-columns: 1fr;
       }
     }
+
+    /* ---- Tabs ---- */
+    .tab-nav {
+      display: flex;
+      gap: 8px;
+    }
+
+    .tab-btn {
+      padding: 8px 22px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: white;
+      color: var(--muted);
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .tab-btn.active {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .tab-btn:hover:not(.active) {
+      background: var(--bg-2);
+      color: var(--ink);
+      transform: none;
+      box-shadow: none;
+    }
+
+    /* ---- PTO tab sections ---- */
+    .pto-section {
+      display: grid;
+      gap: 14px;
+    }
+
+    .pto-section-title {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .pto-form {
+      background: var(--bg);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+
+    .pto-form-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .field {
+      display: grid;
+      gap: 4px;
+      min-width: 120px;
+    }
+
+    .field-grow {
+      flex: 1;
+      min-width: 160px;
+    }
+
+    .field-sm {
+      width: 90px;
+      min-width: 90px;
+    }
+
+    .field input {
+      min-width: unset;
+    }
+
+    .pto-table-wrap {
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      overflow: auto;
+    }
+
+    .pto-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 400px;
+    }
+
+    .pto-table th,
+    .pto-table td {
+      border-bottom: 1px solid #e6e6e6;
+      padding: 8px 12px;
+      font-size: 13px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .pto-table thead th {
+      background: white;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .pto-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .pto-table tbody tr:hover {
+      background: #f8fbfa;
+    }
+
+    .btn-del {
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: white;
+      color: var(--accent-2);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-del:hover {
+      background: var(--accent-2);
+      color: white;
+      border-color: var(--accent-2);
+      transform: none;
+      box-shadow: none;
+    }
   </style>
 </head>
 
@@ -384,81 +523,224 @@
       </p>
     </header>
 
-    <section class="panel filters">
-      <div>
-        <label>Report Date Range <span class="tz" id="tzLabel">UTC</span></label>
-        <div class="range">
-          <input id="from" type="date" />
-          <span class="range-sep">to</span>
-          <input id="to" type="date" />
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="report">Report</button>
+      <button class="tab-btn" data-tab="pto">PTO &amp; Holidays</button>
+    </nav>
+
+    <div id="tabReport" class="tab-panel">
+
+      <section class="panel filters">
+        <div>
+          <label>Report Date Range <span class="tz" id="tzLabel">UTC</span></label>
+          <div class="range">
+            <input id="from" type="date" />
+            <span class="range-sep">to</span>
+            <input id="to" type="date" />
+          </div>
+          <div class="presets">
+            <button type="button" class="preset-btn" data-preset="today">Today</button>
+            <button type="button" class="preset-btn" data-preset="thisweek">This week</button>
+            <button type="button" class="preset-btn" data-preset="lastweek">Last week</button>
+            <button type="button" class="preset-btn" data-preset="thismonth">This month</button>
+            <button type="button" class="preset-btn" data-preset="last30">Last 30 days</button>
+          </div>
         </div>
-        <div class="presets">
-          <button type="button" class="preset-btn" data-preset="today">Today</button>
-          <button type="button" class="preset-btn" data-preset="thisweek">This week</button>
-          <button type="button" class="preset-btn" data-preset="lastweek">Last week</button>
-          <button type="button" class="preset-btn" data-preset="thismonth">This month</button>
-          <button type="button" class="preset-btn" data-preset="last30">Last 30 days</button>
+        <div>
+          <label>Assigned To</label>
+          <input id="assignedTo" list="assignedToList" placeholder="Name or UPN" autocomplete="off" />
+          <datalist id="assignedToList"></datalist>
         </div>
-      </div>
-      <div>
-        <label>Assigned To</label>
-        <input id="assignedTo" list="assignedToList" placeholder="Name or UPN" autocomplete="off" />
-        <datalist id="assignedToList"></datalist>
-      </div>
-      <div>
-        <label>Cost Type</label>
-        <select id="costType">
-          <option value="">All</option>
-        </select>
-      </div>
-      <div class="actions">
-        <button id="btnLoad">Load report</button>
-        <button id="btnExport" class="ghost" disabled>Export CSV</button>
-      </div>
-    </section>
+        <div>
+          <label>Cost Type</label>
+          <select id="costType">
+            <option value="">All</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button id="btnLoad">Load report</button>
+          <button id="btnExport" class="ghost" disabled>Export CSV</button>
+        </div>
+      </section>
 
-    <section class="stats">
-      <div class="stat">
-        <div class="k">Rows</div>
-        <div class="v" id="m_rows">-</div>
-      </div>
-      <div class="stat">
-        <div class="k">Total Hours</div>
-        <div class="v" id="m_hours">-</div>
-      </div>
-      <div class="stat">
-        <div class="k">Range</div>
-        <div class="v" id="m_range">-</div>
-      </div>
-    </section>
+      <section class="stats">
+        <div class="stat">
+          <div class="k">Working Hours</div>
+          <div class="v" id="m_required">-</div>
+        </div>
+        <div class="stat">
+          <div class="k">Total Hours</div>
+          <div class="v" id="m_hours">-</div>
+        </div>
+        <div class="stat">
+          <div class="k">Missing Hours</div>
+          <div class="v" id="m_missing">-</div>
+        </div>
+      </section>
 
-    <div id="status" class="status muted">Loading.</div>
+      <div id="status" class="status muted">Loading.</div>
 
-    <section class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Feature ID</th>
-            <th>Feature Name</th>
-            <th>Cost Type</th>
-            <th>Ticket Type</th>
-            <th>Ticket ID</th>
-            <th>Ticket Title</th>
-            <th>Task ID</th>
-            <th>Task Title</th>
-            <th>Task Activity</th>
-            <th>Changed Date</th>
-            <th>Actual Hours</th>
-            <th>Assigned To</th>
-          </tr>
-        </thead>
-        <tbody id="tbodyReport">
-          <tr>
-            <td colspan="12" class="muted">No data loaded yet.</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Feature ID</th>
+              <th>Feature Name</th>
+              <th>Cost Type</th>
+              <th>Ticket Type</th>
+              <th>Ticket ID</th>
+              <th>Ticket Title</th>
+              <th>Task ID</th>
+              <th>Task Title</th>
+              <th>Task Activity</th>
+              <th>Changed Date</th>
+              <th>Actual Hours</th>
+              <th>Assigned To</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyReport">
+            <tr>
+              <td colspan="12" class="muted">No data loaded yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+    </div><!-- /tabReport -->
+
+    <div id="tabPto" class="tab-panel" hidden>
+
+      <!-- Public Holidays -->
+      <section class="panel pto-section">
+        <h2 class="pto-section-title">Public Holidays</h2>
+        <form id="formHoliday" class="pto-form" autocomplete="off">
+          <div class="pto-form-row">
+            <div class="field">
+              <label for="hol_date">Date</label>
+              <input type="date" id="hol_date" required />
+            </div>
+            <div class="field field-grow">
+              <label for="hol_name">Name</label>
+              <input type="text" id="hol_name" placeholder="e.g. Christmas Day" required />
+            </div>
+            <div class="field field-sm">
+              <label for="hol_hours">Hours</label>
+              <input type="number" id="hol_hours" value="8" min="0.5" max="24" step="0.5" required />
+            </div>
+            <div class="field">
+              <button type="submit">Add Holiday</button>
+            </div>
+          </div>
+        </form>
+        <div class="pto-table-wrap">
+          <table class="pto-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Name</th>
+                <th>Hours</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbodyHolidays">
+              <tr>
+                <td colspan="4" class="muted">Loading&#8230;</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Team Off -->
+      <section class="panel pto-section">
+        <h2 class="pto-section-title">Team Off</h2>
+        <form id="formTeamOff" class="pto-form" autocomplete="off">
+          <div class="pto-form-row">
+            <div class="field">
+              <label for="toff_date">Date</label>
+              <input type="date" id="toff_date" required />
+            </div>
+            <div class="field field-sm">
+              <label for="toff_hours">Hours</label>
+              <input type="number" id="toff_hours" value="8" min="0.5" max="24" step="0.5" required />
+            </div>
+            <div class="field field-grow">
+              <label for="toff_notes">Notes</label>
+              <input type="text" id="toff_notes" placeholder="Optional notes" />
+            </div>
+            <div class="field">
+              <button type="submit">Add Team Off</button>
+            </div>
+          </div>
+        </form>
+        <div class="pto-table-wrap">
+          <table class="pto-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Hours</th>
+                <th>Notes</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbodyTeamOff">
+              <tr>
+                <td colspan="4" class="muted">Loading&#8230;</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Individual PTO -->
+      <section class="panel pto-section">
+        <h2 class="pto-section-title">Individual PTO</h2>
+        <form id="formPto" class="pto-form" autocomplete="off">
+          <div class="pto-form-row">
+            <div class="field field-grow">
+              <label for="pto_user">User</label>
+              <input type="text" id="pto_user" list="ptoUserList" placeholder="Name or UPN" required />
+              <datalist id="ptoUserList"></datalist>
+            </div>
+            <div class="field">
+              <label for="pto_date">Date</label>
+              <input type="date" id="pto_date" required />
+            </div>
+            <div class="field field-sm">
+              <label for="pto_hours">Hours</label>
+              <input type="number" id="pto_hours" value="8" min="0.5" max="24" step="0.5" required />
+            </div>
+            <div class="field field-grow">
+              <label for="pto_notes">Notes</label>
+              <input type="text" id="pto_notes" placeholder="Optional notes" />
+            </div>
+            <div class="field">
+              <button type="submit">Add PTO</button>
+            </div>
+          </div>
+        </form>
+        <div class="pto-table-wrap">
+          <table class="pto-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Date</th>
+                <th>Hours</th>
+                <th>Notes</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbodyPto">
+              <tr>
+                <td colspan="5" class="muted">Loading&#8230;</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div><!-- /tabPto -->
+
   </div>
 
   <script src="app.js"></script>

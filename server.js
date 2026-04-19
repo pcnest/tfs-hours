@@ -984,6 +984,317 @@ app.get('/api/cost-types', async (req, res) => {
   }
 });
 
+// ---------- PTO / Team-Off / Holidays helpers ----------
+function validateDateStr(v) {
+  const p = parseYmd(String(v || '').trim());
+  if (!p) return null;
+  return `${String(p.y).padStart(4, '0')}-${String(p.mo).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+}
+
+function validateHours(v) {
+  const n = normNum(v);
+  return n !== null && n > 0 && n <= 24 ? n : null;
+}
+
+// ---------- Public Holidays ----------
+app.get('/api/holidays', async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  const params = [];
+  const where = [];
+  if (fromStr) {
+    params.push(fromStr);
+    where.push(`holiday_date >= $${params.length}::date`);
+  }
+  if (toStr) {
+    params.push(toStr);
+    where.push(`holiday_date <= $${params.length}::date`);
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, holiday_date::text, name, hours, created_at
+       FROM public.public_holidays
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY holiday_date ASC`,
+      params,
+    );
+    res.json({ ok: true, rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/holidays', async (req, res) => {
+  const {
+    holiday_date: hdRaw,
+    name: nameRaw,
+    hours: hoursRaw,
+  } = req.body || {};
+  const holiday_date = validateDateStr(hdRaw);
+  const name = normText(nameRaw);
+  const hours = validateHours(hoursRaw ?? 8);
+  if (!holiday_date)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'holiday_date is required (YYYY-MM-DD)' });
+  if (!name)
+    return res.status(400).json({ ok: false, error: 'name is required' });
+  if (hours === null)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO public.public_holidays (holiday_date, name, hours)
+       VALUES ($1::date, $2, $3)
+       ON CONFLICT (holiday_date) DO UPDATE SET name = EXCLUDED.name, hours = EXCLUDED.hours
+       RETURNING id, holiday_date::text, name, hours`,
+      [holiday_date, name, hours],
+    );
+    res.status(201).json({ ok: true, row: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/holidays/:id', async (req, res) => {
+  const id = normInt(req.params.id);
+  if (!id || id < 1)
+    return res.status(400).json({ ok: false, error: 'invalid id' });
+  try {
+    const r = await pool.query(
+      'DELETE FROM public.public_holidays WHERE id = $1 RETURNING id',
+      [id],
+    );
+    if (!r.rows.length)
+      return res.status(404).json({ ok: false, error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Team Off ----------
+app.get('/api/team-off', async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  const params = [];
+  const where = [];
+  if (fromStr) {
+    params.push(fromStr);
+    where.push(`entry_date >= $${params.length}::date`);
+  }
+  if (toStr) {
+    params.push(toStr);
+    where.push(`entry_date <= $${params.length}::date`);
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, entry_date::text, hours, notes, created_at
+       FROM public.team_off_entries
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY entry_date ASC`,
+      params,
+    );
+    res.json({ ok: true, rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/team-off', async (req, res) => {
+  const {
+    entry_date: edRaw,
+    hours: hoursRaw,
+    notes: notesRaw,
+  } = req.body || {};
+  const entry_date = validateDateStr(edRaw);
+  const hours = validateHours(hoursRaw ?? 8);
+  const notes = normText(notesRaw);
+  if (!entry_date)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'entry_date is required (YYYY-MM-DD)' });
+  if (hours === null)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO public.team_off_entries (entry_date, hours, notes)
+       VALUES ($1::date, $2, $3)
+       ON CONFLICT (entry_date) DO UPDATE SET hours = EXCLUDED.hours, notes = EXCLUDED.notes
+       RETURNING id, entry_date::text, hours, notes`,
+      [entry_date, hours, notes],
+    );
+    res.status(201).json({ ok: true, row: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/team-off/:id', async (req, res) => {
+  const id = normInt(req.params.id);
+  if (!id || id < 1)
+    return res.status(400).json({ ok: false, error: 'invalid id' });
+  try {
+    const r = await pool.query(
+      'DELETE FROM public.team_off_entries WHERE id = $1 RETURNING id',
+      [id],
+    );
+    if (!r.rows.length)
+      return res.status(404).json({ ok: false, error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Individual PTO ----------
+app.get('/api/pto', async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  const userFilter = normText(req.query.userUpn || req.query.assignedTo);
+  const params = [];
+  const where = [];
+  if (fromStr) {
+    params.push(fromStr);
+    where.push(`entry_date >= $${params.length}::date`);
+  }
+  if (toStr) {
+    params.push(toStr);
+    where.push(`entry_date <= $${params.length}::date`);
+  }
+  if (userFilter) {
+    params.push(`%${userFilter}%`);
+    where.push(
+      `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
+    );
+  }
+  try {
+    const r = await pool.query(
+      `SELECT id, user_upn, user_name, entry_date::text, hours, notes, created_at
+       FROM public.pto_entries
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY entry_date ASC, user_name ASC`,
+      params,
+    );
+    res.json({ ok: true, rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/pto', async (req, res) => {
+  const {
+    user_name: unRaw,
+    user_upn: uupnRaw,
+    entry_date: edRaw,
+    hours: hoursRaw,
+    notes: notesRaw,
+  } = req.body || {};
+  const user_name = normText(unRaw);
+  const user_upn = normText(uupnRaw) || user_name;
+  const entry_date = validateDateStr(edRaw);
+  const hours = validateHours(hoursRaw ?? 8);
+  const notes = normText(notesRaw);
+  if (!user_name && !user_upn)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'user_name or user_upn is required' });
+  if (!entry_date)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'entry_date is required (YYYY-MM-DD)' });
+  if (hours === null)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+  try {
+    const r = await pool.query(
+      `INSERT INTO public.pto_entries (user_upn, user_name, entry_date, hours, notes)
+       VALUES ($1, $2, $3::date, $4, $5)
+       RETURNING id, user_upn, user_name, entry_date::text, hours, notes`,
+      [user_upn, user_name, entry_date, hours, notes],
+    );
+    res.status(201).json({ ok: true, row: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/pto/:id', async (req, res) => {
+  const id = normInt(req.params.id);
+  if (!id || id < 1)
+    return res.status(400).json({ ok: false, error: 'invalid id' });
+  try {
+    const r = await pool.query(
+      'DELETE FROM public.pto_entries WHERE id = $1 RETURNING id',
+      [id],
+    );
+    if (!r.rows.length)
+      return res.status(404).json({ ok: false, error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Hours metrics ----------
+app.get('/api/hours/metrics', async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  if (!fromStr || !toStr)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
+  const assignedTo = normText(req.query.assignedTo);
+  try {
+    // Mon–Fri weekday count × 8
+    const wdR = await pool.query(
+      `SELECT (COUNT(*) * 8)::float AS weekday_hours
+       FROM generate_series($1::date, $2::date, '1 day'::interval) AS d
+       WHERE EXTRACT(DOW FROM d) BETWEEN 1 AND 5`,
+      [fromStr, toStr],
+    );
+    const weekdayHours = Number(wdR.rows[0]?.weekday_hours ?? 0);
+
+    // Team off + public holiday deduction
+    const offR = await pool.query(
+      `SELECT
+         COALESCE((SELECT SUM(hours) FROM public.team_off_entries WHERE entry_date BETWEEN $1::date AND $2::date), 0) +
+         COALESCE((SELECT SUM(hours) FROM public.public_holidays  WHERE holiday_date BETWEEN $1::date AND $2::date), 0)
+         AS team_off_hours`,
+      [fromStr, toStr],
+    );
+    const teamOffHours = Number(offR.rows[0]?.team_off_hours ?? 0);
+    const requiredHours = Math.max(0, weekdayHours - teamOffHours);
+
+    // Individual PTO (optionally filtered to one user by name/UPN)
+    const ptoParams = [fromStr, toStr];
+    let ptoWhere = 'entry_date BETWEEN $1::date AND $2::date';
+    if (assignedTo) {
+      ptoParams.push(`%${assignedTo}%`);
+      ptoWhere += ` AND (COALESCE(user_name,'') ILIKE $3 OR COALESCE(user_upn,'') ILIKE $3)`;
+    }
+    const ptoR = await pool.query(
+      `SELECT COALESCE(SUM(hours), 0) AS pto_hours FROM public.pto_entries WHERE ${ptoWhere}`,
+      ptoParams,
+    );
+    const individualPtoHours = Number(ptoR.rows[0]?.pto_hours ?? 0);
+
+    res.json({
+      ok: true,
+      weekdayHours,
+      teamOffHours,
+      requiredHours,
+      individualPtoHours,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Static UI ----------
 app.use('/', express.static(path.join(__dirname, 'public')));
 

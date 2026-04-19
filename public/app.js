@@ -2,6 +2,7 @@ let APP_CFG = null;
 let LAST_ROWS = [];
 let USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
+let USERS_CACHE = [];
 
 function qs(id) {
   return document.getElementById(id);
@@ -29,6 +30,7 @@ async function loadUsers() {
     const r = await fetch('/api/users');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
+    USERS_CACHE = j.users || [];
     const dl = qs('assignedToList');
     if (!dl) return;
     dl.innerHTML = j.users
@@ -246,18 +248,12 @@ function setStatus(text) {
 }
 
 function updateStats(rows) {
-  qs('m_rows').textContent = String(rows.length || 0);
-
   const totalHours = rows.reduce((acc, r) => {
     const n = Number(r.actual_hours || 0);
     return acc + (Number.isFinite(n) ? n : 0);
   }, 0);
   qs('m_hours').textContent = fmtHours(totalHours);
-
-  const from = qs('from').value;
-  const to = qs('to').value;
-  qs('m_range').textContent =
-    from && to ? `${from} to ${to} ${tzLabel()}` : '-';
+  // m_required and m_missing are updated by loadMetrics()
 }
 
 function renderReportRows(rows) {
@@ -305,6 +301,8 @@ async function loadReport() {
     setStatus('Failed to load report.');
     LAST_ROWS = [];
     updateStats(LAST_ROWS);
+    qs('m_required').textContent = '-';
+    qs('m_missing').textContent = '-';
     qs('btnExport').disabled = true;
     return { ok: false };
   }
@@ -314,6 +312,7 @@ async function loadReport() {
 
   qs('tbodyReport').innerHTML = renderReportRows(rows);
   updateStats(rows);
+  await loadMetrics(rows);
   qs('btnExport').disabled = rows.length === 0;
   setStatus(`Loaded ${rows.length} rows.`);
   return { ok: true };
@@ -375,6 +374,311 @@ function exportCsv() {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+// -------- Tab logic --------
+function switchTab(name) {
+  document
+    .querySelectorAll('.tab-btn')
+    .forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  qs('tabReport').hidden = name !== 'report';
+  qs('tabPto').hidden = name !== 'pto';
+  if (name === 'pto') {
+    populatePtoUserList();
+    loadHolidays();
+    loadTeamOff();
+    loadPtoEntries();
+  }
+}
+
+document.querySelectorAll('.tab-btn').forEach((b) => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
+
+// -------- PTO user datalist --------
+async function populatePtoUserList() {
+  const dl = qs('ptoUserList');
+  if (!dl || dl.dataset.loaded) return;
+  try {
+    const r = await fetch('/api/users');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) return;
+    USERS_CACHE = j.users || [];
+    dl.innerHTML = j.users
+      .map(
+        (u) =>
+          `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
+      )
+      .join('');
+    dl.dataset.loaded = '1';
+  } catch {}
+}
+
+// -------- Public Holidays --------
+async function loadHolidays() {
+  const tbody = qs('tbodyHolidays');
+  if (!tbody) return;
+  try {
+    const r = await fetch('/api/holidays');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
+      return;
+    }
+    renderHolidays(j.rows);
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">Error loading.</td></tr>`;
+  }
+}
+
+function renderHolidays(rows) {
+  const tbody = qs('tbodyHolidays');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">No holidays defined.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
+      <tr>
+        <td>${escapeHtml(r.holiday_date)}</td>
+        <td>${escapeHtml(r.name || '')}</td>
+        <td>${fmtHours(r.hours)}</td>
+        <td><button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button></td>
+      </tr>`,
+    )
+    .join('');
+}
+
+qs('formHoliday')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const holiday_date = qs('hol_date').value;
+  const name = qs('hol_name').value.trim();
+  const hours = parseFloat(qs('hol_hours').value);
+  if (!holiday_date || !name || !Number.isFinite(hours)) return;
+  try {
+    const r = await fetch('/api/holidays', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ holiday_date, name, hours }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    qs('formHoliday').reset();
+    await loadHolidays();
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  }
+});
+
+// -------- Team Off --------
+async function loadTeamOff() {
+  const tbody = qs('tbodyTeamOff');
+  if (!tbody) return;
+  try {
+    const r = await fetch('/api/team-off');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
+      return;
+    }
+    renderTeamOff(j.rows);
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">Error loading.</td></tr>`;
+  }
+}
+
+function renderTeamOff(rows) {
+  const tbody = qs('tbodyTeamOff');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">No team off days defined.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
+      <tr>
+        <td>${escapeHtml(r.entry_date)}</td>
+        <td>${fmtHours(r.hours)}</td>
+        <td>${escapeHtml(r.notes || '')}</td>
+        <td><button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button></td>
+      </tr>`,
+    )
+    .join('');
+}
+
+qs('formTeamOff')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const entry_date = qs('toff_date').value;
+  const hours = parseFloat(qs('toff_hours').value);
+  const notes = qs('toff_notes').value.trim();
+  if (!entry_date || !Number.isFinite(hours)) return;
+  try {
+    const r = await fetch('/api/team-off', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry_date, hours, notes }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    qs('formTeamOff').reset();
+    await loadTeamOff();
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  }
+});
+
+// -------- Individual PTO --------
+async function loadPtoEntries() {
+  const tbody = qs('tbodyPto');
+  if (!tbody) return;
+  try {
+    const r = await fetch('/api/pto');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      tbody.innerHTML = `<tr><td colspan="5" class="muted">Failed to load.</td></tr>`;
+      return;
+    }
+    renderPtoEntries(j.rows);
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Error loading.</td></tr>`;
+  }
+}
+
+function renderPtoEntries(rows) {
+  const tbody = qs('tbodyPto');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">No PTO entries defined.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
+      <tr>
+        <td>${escapeHtml(r.user_name || r.user_upn || '')}</td>
+        <td>${escapeHtml(r.entry_date)}</td>
+        <td>${fmtHours(r.hours)}</td>
+        <td>${escapeHtml(r.notes || '')}</td>
+        <td><button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button></td>
+      </tr>`,
+    )
+    .join('');
+}
+
+qs('formPto')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const typed = qs('pto_user').value.trim();
+  const entry_date = qs('pto_date').value;
+  const hours = parseFloat(qs('pto_hours').value);
+  const notes = qs('pto_notes').value.trim();
+  if (!typed || !entry_date || !Number.isFinite(hours)) return;
+  const match = USERS_CACHE.find(
+    (u) =>
+      u.name === typed ||
+      u.upn === typed ||
+      u.name?.toLowerCase() === typed.toLowerCase(),
+  );
+  const user_name = match?.name || typed;
+  const user_upn = match?.upn || typed;
+  try {
+    const r = await fetch('/api/pto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_name, user_upn, entry_date, hours, notes }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    qs('formPto').reset();
+    await loadPtoEntries();
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  }
+});
+
+// -------- Delete delegation (all three tables) --------
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.btn-del');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const type = btn.dataset.type;
+  if (!id || !type) return;
+  let url;
+  if (type === 'holiday') url = `/api/holidays/${id}`;
+  else if (type === 'team-off') url = `/api/team-off/${id}`;
+  else if (type === 'pto') url = `/api/pto/${id}`;
+  else return;
+  try {
+    const r = await fetch(url, { method: 'DELETE' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    if (type === 'holiday') await loadHolidays();
+    else if (type === 'team-off') await loadTeamOff();
+    else await loadPtoEntries();
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  }
+});
+
+// -------- Metrics --------
+async function loadMetrics(rows) {
+  const from = qs('from').value;
+  const to = qs('to').value;
+  if (!from || !to) {
+    qs('m_required').textContent = '-';
+    qs('m_missing').textContent = '-';
+    return;
+  }
+  const assignedTo = qs('assignedTo').value.trim();
+  const p = new URLSearchParams({ from, to });
+  if (assignedTo) p.set('assignedTo', assignedTo);
+  try {
+    const r = await fetch(`/api/hours/metrics?${p.toString()}`);
+    const m = await r.json().catch(() => ({}));
+    if (!r.ok || !m.ok) {
+      qs('m_required').textContent = '-';
+      qs('m_missing').textContent = '-';
+      return;
+    }
+    const totalActual = rows.reduce((acc, row) => {
+      const n = Number(row.actual_hours || 0);
+      return acc + (Number.isFinite(n) ? n : 0);
+    }, 0);
+    let requiredHours = m.requiredHours;
+    const individualPtoHours = m.individualPtoHours;
+    if (!assignedTo) {
+      const numPeople = new Set(
+        rows
+          .map((row) => row.task_assigned_upn || row.task_assigned_to)
+          .filter(Boolean),
+      ).size;
+      if (numPeople > 0) requiredHours = m.requiredHours * numPeople;
+    }
+    const missing = requiredHours - individualPtoHours - totalActual;
+    qs('m_required').textContent = fmtHours(requiredHours);
+    const missingEl = qs('m_missing');
+    missingEl.textContent = fmtHours(missing);
+    missingEl.style.color =
+      missing > 0.5
+        ? 'var(--accent-2)'
+        : missing < -0.5
+          ? 'var(--accent)'
+          : 'inherit';
+  } catch {
+    qs('m_required').textContent = '-';
+    qs('m_missing').textContent = '-';
+  }
 }
 
 qs('btnLoad').addEventListener('click', async () => {
