@@ -376,6 +376,71 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
   return { text, values };
 }
 
+// ---------- Shared summary SQL ----------
+// Params layout: [$1=fromUtc, $2=toExclusiveUtc, $3=bucket, $4=offsetMinutes, $5+=filter values]
+// filters: array of SQL fragments like "AND COALESCE(d.task_assigned_to,'') ILIKE $5"
+function buildSummarySql(filters) {
+  return `
+  WITH snaps AS (
+    SELECT DISTINCT ON (task_id, COALESCE(task_changed_date, snapshot_at))
+      task_id,
+      snapshot_at,
+      COALESCE(task_changed_date, snapshot_at) AS t,
+      task_assigned_upn,
+      task_assigned_to,
+      cost_type,
+      COALESCE(task_actual_hours, 0) AS h
+    FROM public.tfs_task_hours_snapshots
+    ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
+  ),
+  prior AS (
+    SELECT DISTINCT ON (task_id)
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
+    FROM snaps
+    WHERE t < $1::timestamptz
+    ORDER BY task_id, t DESC, snapshot_at DESC
+  ),
+  inrange AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
+    FROM snaps
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  ),
+  s AS (
+    SELECT * FROM prior
+    UNION ALL
+    SELECT * FROM inrange
+  ),
+  w AS (
+    SELECT
+      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h,
+      LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+    FROM s
+  ),
+  d AS (
+    SELECT
+      (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
+      task_assigned_upn,
+      task_assigned_to,
+      cost_type,
+      (h - COALESCE(prev_h, 0)) AS delta_h
+    FROM w
+    WHERE t >= $1::timestamptz AND t < $2::timestamptz
+  )
+  SELECT
+    bucket,
+    task_assigned_upn AS "assignedToUPN",
+    task_assigned_to  AS "assignedTo",
+    cost_type         AS "accountCode",
+    cost_type         AS "costType",
+    SUM(delta_h)      AS "hours"
+  FROM d
+  WHERE 1=1
+    ${filters.join('\n    ')}
+  GROUP BY 1,2,3,4
+  ORDER BY 1 ASC, 3 ASC;`;
+}
+
 app.post('/api/tfs-hours-sync', async (req, res) => {
   if (!requireApiKey(req, res)) return;
 
@@ -590,67 +655,7 @@ app.get('/api/hours/summary', async (req, res) => {
     filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
   }
 
-  const sql = `
-  WITH snaps AS (
-    -- Deduplicate by (task_id, effective change time) taking the latest snapshot per change
-    SELECT DISTINCT ON (task_id, COALESCE(task_changed_date, snapshot_at))
-      task_id,
-      snapshot_at,
-      COALESCE(task_changed_date, snapshot_at) AS t,
-      task_assigned_upn,
-      task_assigned_to,
-      cost_type,
-      COALESCE(task_actual_hours, 0) AS h
-    FROM public.tfs_task_hours_snapshots
-    ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
-  ),
-  prior AS (
-    SELECT DISTINCT ON (task_id)
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
-    FROM snaps
-    WHERE t < $1::timestamptz
-    ORDER BY task_id, t DESC, snapshot_at DESC
-  ),
-  inrange AS (
-    SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
-    FROM snaps
-    WHERE t >= $1::timestamptz AND t < $2::timestamptz
-  ),
-  s AS (
-    SELECT * FROM prior
-    UNION ALL
-    SELECT * FROM inrange
-  ),
-  w AS (
-    SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h,
-      LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
-    FROM s
-  ),
-  d AS (
-    SELECT
-      (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
-      task_assigned_upn,
-      task_assigned_to,
-      cost_type,
-      (h - COALESCE(prev_h, 0)) AS delta_h
-    FROM w
-    WHERE t >= $1::timestamptz AND t < $2::timestamptz
-  )
-  SELECT
-    bucket,
-    task_assigned_upn AS "assignedToUPN",
-    task_assigned_to  AS "assignedTo",
-    cost_type         AS "accountCode",
-    cost_type         AS "costType",
-    SUM(delta_h)      AS "hours"
-  FROM d
-  WHERE 1=1
-    ${filters.join('\n ')}
-  GROUP BY 1,2,3,4
-  ORDER BY 1 ASC, 3 ASC;
-`;
+  const sql = buildSummarySql(filters);
 
   try {
     const r = await pool.query(sql, params);
@@ -829,7 +834,6 @@ app.get('/api/hours/entries', async (req, res) => {
       l.ticket_title,
       l.feature_id,
       l.feature_title,
-      d.cost_type AS account_code,
       d.cost_type AS cost_type,
       COUNT(*) OVER() AS total_count
     FROM d
@@ -859,9 +863,6 @@ function csvEscape(v) {
 }
 
 app.get('/api/hours/export.csv', async (req, res) => {
-  // just call JSON endpoint internally by reusing the same query logic:
-  // easiest way: do a direct fetch in JS; but server-side is cleaner.
-  // We'll replicate the query call by hitting /api/hours/summary logic quickly:
   const bucket = (req.query.bucket || 'day').toString().trim();
   const from = (req.query.from || '').toString().trim();
   const to = (req.query.to || '').toString().trim();
@@ -870,11 +871,10 @@ app.get('/api/hours/export.csv', async (req, res) => {
     .toString()
     .trim();
 
-  // run the same SQL by invoking pool query via a small local function:
-  // simplest: duplicate minimal code:
-  const bucketRaw = bucket.toLowerCase();
   const bucketAllowed = new Set(['day', 'week', 'month']);
-  const unit = bucketAllowed.has(bucketRaw) ? bucketRaw : 'day';
+  const unit = bucketAllowed.has(bucket.toLowerCase())
+    ? bucket.toLowerCase()
+    : 'day';
 
   if (!from || !to) return res.status(400).send('from/to required');
 
@@ -907,68 +907,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
     filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
   }
 
-  const sql = `
-  WITH snaps AS (
-    -- Deduplicate by (task_id, effective change time) taking the latest snapshot per change
-    SELECT DISTINCT ON (task_id, COALESCE(task_changed_date, snapshot_at))
-      task_id,
-      snapshot_at,
-      COALESCE(task_changed_date, snapshot_at) AS t,
-      task_assigned_upn,
-      task_assigned_to,
-      cost_type,
-      COALESCE(task_actual_hours, 0) AS h
-    FROM public.tfs_task_hours_snapshots
-    ORDER BY task_id, COALESCE(task_changed_date, snapshot_at), snapshot_at DESC, run_id DESC
-  ),
-  prior AS (
-    SELECT DISTINCT ON (task_id)
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
-    FROM snaps
-    WHERE t < $1::timestamptz
-    ORDER BY task_id, t DESC, snapshot_at DESC
-  ),
-  inrange AS (
-    SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h
-    FROM snaps
-    WHERE t >= $1::timestamptz AND t < $2::timestamptz
-  ),
-  s AS (
-    SELECT * FROM prior
-    UNION ALL
-    SELECT * FROM inrange
-  ),
-  w AS (
-    SELECT
-      task_id, snapshot_at, t, task_assigned_upn, task_assigned_to, cost_type, h,
-      LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
-    FROM s
-  ),
-  d AS (
-    SELECT
-      (date_trunc($3, t + ($4 || ' minutes')::interval) - ($4 || ' minutes')::interval) AS bucket,
-
-      task_assigned_upn,
-      task_assigned_to,
-      cost_type,
-      (h - COALESCE(prev_h, 0)) AS delta_h
-    FROM w
-    WHERE t >= $1::timestamptz AND t < $2::timestamptz
-  )
-  SELECT
-    bucket,
-    task_assigned_upn AS "assignedToUPN",
-    task_assigned_to  AS "assignedTo",
-    cost_type         AS "accountCode",
-    cost_type         AS "costType",
-    SUM(delta_h)      AS "hours"
-  FROM d
-  WHERE 1=1
-    ${filters.join('\n ')}
-  GROUP BY 1,2,3,4
-  ORDER BY 1 ASC, 3 ASC;
-`;
+  const sql = buildSummarySql(filters);
 
   try {
     const r = await pool.query(sql, params);
