@@ -1,6 +1,5 @@
 let APP_CFG = null;
 let LAST_ROWS = [];
-let LAST_MODE = 'latest';
 let USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
 
@@ -216,11 +215,6 @@ function applyPreset(preset) {
   qs('to').value = toStr;
 }
 
-function isHistoryMode() {
-  const el = qs('historyMode');
-  return !!el && el.checked;
-}
-
 function fmtDateTime(v) {
   if (!v) return '-';
   const d = new Date(v);
@@ -299,9 +293,8 @@ async function loadReport() {
     `<tr><td colspan="12" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
-  const useHistory = isHistoryMode();
-  const params = buildReportParams({ limit: useHistory ? '5000' : '2000' });
-  const endpoint = useHistory ? '/api/hours/entries' : '/api/hours/latest';
+  const params = buildReportParams({ limit: '5000' });
+  const endpoint = '/api/hours/entries';
   const r = await fetch(`${endpoint}?${params.toString()}`);
   const data = await r.json().catch(() => ({}));
 
@@ -319,12 +312,11 @@ async function loadReport() {
 
   const rows = data.rows || [];
   LAST_ROWS = rows;
-  LAST_MODE = useHistory ? 'history' : 'latest';
 
   qs('tbodyReport').innerHTML = renderReportRows(rows);
   updateStats(rows);
   qs('btnExport').disabled = rows.length === 0;
-  setStatus(`Loaded ${rows.length} rows (${LAST_MODE}).`);
+  setStatus(`Loaded ${rows.length} rows.`);
   return { ok: true };
 }
 

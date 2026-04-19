@@ -235,26 +235,6 @@
       justify-content: flex-end;
     }
 
-    .toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border: 1px solid var(--stroke);
-      border-radius: 999px;
-      background: white;
-      font-size: 11px;
-      color: var(--muted);
-      text-transform: none;
-      letter-spacing: 0.06em;
-      cursor: pointer;
-      margin: 0;
-    }
-
-    .toggle input {
-      accent-color: var(--accent);
-    }
-
     .stats {
       display: grid;
       gap: 12px;
@@ -432,10 +412,6 @@
         </select>
       </div>
       <div class="actions">
-        <label class="toggle">
-          <input id="historyMode" type="checkbox" />
-          <span>History mode</span>
-        </label>
         <button id="btnLoad">Load report</button>
         <button id="btnExport" class="ghost" disabled>Export CSV</button>
       </div>
