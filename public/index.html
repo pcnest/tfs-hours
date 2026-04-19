@@ -107,8 +107,57 @@
     .filters {
       display: grid;
       gap: 16px;
-      grid-template-columns: 2fr 1.2fr 1fr;
+      grid-template-columns: 2fr 1fr 1fr 1fr;
       align-items: end;
+    }
+
+    .presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .preset-btn {
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: white;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .preset-btn:hover {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      transform: none;
+      box-shadow: none;
+    }
+
+    select {
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      width: 100%;
+      background: white;
+      font-family: var(--font-body);
+      font-size: 13px;
+      color: var(--ink);
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235c6a6b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+
+    input[list] {
+      width: 100%;
     }
 
     label {
@@ -317,6 +366,7 @@
         opacity: 0;
         transform: translateY(10px);
       }
+
       to {
         opacity: 1;
         transform: translateY(0);
@@ -325,7 +375,7 @@
 
     @media (max-width: 960px) {
       .filters {
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr 1fr;
       }
 
       .actions {
@@ -350,7 +400,8 @@
     <header class="hero">
       <div class="eyebrow">SupplyPro TFS 2017</div>
       <h1>Actual Hours Report</h1>
-      <p class="sub">Feature, ticket, and task view driven by Task change history, with a toggle for per-change rows.</p>
+      <p class="sub">Feature, ticket, and task view driven by Task change history, with a toggle for per-change rows.
+      </p>
     </header>
 
     <section class="panel filters">
@@ -361,14 +412,24 @@
           <span class="range-sep">to</span>
           <input id="to" type="date" />
         </div>
-      </div>
-      <div>
-        <label>Changed By</label>
-        <input id="changedBy" placeholder="Name or UPN" />
+        <div class="presets">
+          <button class="preset-btn" data-preset="today">Today</button>
+          <button class="preset-btn" data-preset="thisweek">This week</button>
+          <button class="preset-btn" data-preset="lastweek">Last week</button>
+          <button class="preset-btn" data-preset="thismonth">This month</button>
+          <button class="preset-btn" data-preset="last30">Last 30 days</button>
+        </div>
       </div>
       <div>
         <label>Assigned To</label>
-        <input id="assignedTo" placeholder="Name or UPN" />
+        <input id="assignedTo" list="assignedToList" placeholder="Name or UPN" autocomplete="off" />
+        <datalist id="assignedToList"></datalist>
+      </div>
+      <div>
+        <label>Cost Type</label>
+        <select id="costType">
+          <option value="">All</option>
+        </select>
       </div>
       <div class="actions">
         <label class="toggle">

@@ -1011,6 +1011,40 @@ app.get('/api/hours/export.csv', async (req, res) => {
   }
 });
 
+// ---------- Users ----------
+app.get('/api/users', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT DISTINCT
+        task_assigned_to  AS name,
+        task_assigned_upn AS upn
+      FROM public.tfs_task_hours_latest
+      WHERE task_assigned_to IS NOT NULL
+        AND task_assigned_to <> ''
+      ORDER BY task_assigned_to ASC
+    `);
+    res.json({ ok: true, users: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- Cost types ----------
+app.get('/api/cost-types', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT DISTINCT cost_type
+      FROM public.tfs_task_hours_latest
+      WHERE cost_type IS NOT NULL
+        AND cost_type <> ''
+      ORDER BY cost_type ASC
+    `);
+    res.json({ ok: true, costTypes: r.rows.map((x) => x.cost_type) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Static UI ----------
 app.use('/', express.static(path.join(__dirname, 'public')));
 

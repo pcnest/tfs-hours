@@ -1,6 +1,8 @@
 let APP_CFG = null;
 let LAST_ROWS = [];
 let LAST_MODE = 'latest';
+let USERS_LOADED = false;
+let COST_TYPES_LOADED = false;
 
 function qs(id) {
   return document.getElementById(id);
@@ -22,8 +24,38 @@ function csvEscape(v) {
   return s;
 }
 
-async function loadConfig() {
-  if (APP_CFG) return APP_CFG;
+async function loadUsers() {
+  if (USERS_LOADED) return;
+  try {
+    const r = await fetch('/api/users');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) return;
+    const dl = qs('assignedToList');
+    if (!dl) return;
+    dl.innerHTML = j.users
+      .map((u) => `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`)
+      .join('');
+    USERS_LOADED = true;
+  } catch { }
+}
+
+async function loadCostTypes() {
+  if (COST_TYPES_LOADED) return;
+  try {
+    const r = await fetch('/api/cost-types');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) return;
+    const sel = qs('costType');
+    if (!sel) return;
+    j.costTypes.forEach((ct) => {
+      const opt = document.createElement('option');
+      opt.value = ct;
+      opt.textContent = ct;
+      sel.appendChild(opt);
+    });
+    COST_TYPES_LOADED = true;
+  } catch { }
+}
   try {
     const r = await fetch('/api/config');
     const j = await r.json().catch(() => ({}));
@@ -60,8 +92,8 @@ function buildReportParams(opts = {}) {
 
   add('from', qs('from').value);
   add('to', qs('to').value);
-  add('changedBy', qs('changedBy').value);
   add('assignedTo', qs('assignedTo').value);
+  add('costType', qs('costType').value);
   add('limit', opts.limit ?? '2000');
 
   return p;
@@ -132,6 +164,46 @@ function ymdAddDays(ymd, days) {
   const d = new Date(`${ymd}T00:00:00.000Z`);
   if (isNaN(d.getTime())) return ymd;
   return new Date(d.getTime() + days * 86400 * 1000).toISOString().slice(0, 10);
+}
+
+function applyPreset(preset) {
+  const tz = reportTimeZone();
+  const off = tzOffsetMinutes();
+  const todayStr = tz
+    ? formatYmdInZone(new Date(), tz)
+    : shiftDateByOffset(new Date(), off).toISOString().slice(0, 10);
+
+  let fromStr, toStr;
+  const todayDate = new Date(`${todayStr}T00:00:00.000Z`);
+  const dow = todayDate.getUTCDay(); // 0=Sun
+
+  if (preset === 'today') {
+    fromStr = toStr = todayStr;
+  } else if (preset === 'thisweek') {
+    // Mon–Sun week
+    const mondayOffset = (dow === 0 ? -6 : 1 - dow);
+    fromStr = new Date(todayDate.getTime() + mondayOffset * 86400 * 1000).toISOString().slice(0, 10);
+    toStr = todayStr;
+  } else if (preset === 'lastweek') {
+    const mondayOffset = (dow === 0 ? -6 : 1 - dow);
+    const thisMonday = new Date(todayDate.getTime() + mondayOffset * 86400 * 1000);
+    const lastMonday = new Date(thisMonday.getTime() - 7 * 86400 * 1000);
+    const lastSunday = new Date(thisMonday.getTime() - 1 * 86400 * 1000);
+    fromStr = lastMonday.toISOString().slice(0, 10);
+    toStr = lastSunday.toISOString().slice(0, 10);
+  } else if (preset === 'thismonth') {
+    const [y, m] = todayStr.split('-').map(Number);
+    fromStr = `${String(y).padStart(4,'0')}-${String(m).padStart(2,'0')}-01`;
+    toStr = todayStr;
+  } else if (preset === 'last30') {
+    fromStr = ymdAddDays(todayStr, -29);
+    toStr = todayStr;
+  } else {
+    return;
+  }
+
+  qs('from').value = fromStr;
+  qs('to').value = toStr;
 }
 
 function isHistoryMode() {
@@ -285,7 +357,10 @@ function exportCsv() {
 
   const from = (qs('from').value || 'all').replace(/[^a-zA-Z0-9_-]/g, '-');
   const to = (qs('to').value || 'all').replace(/[^a-zA-Z0-9_-]/g, '-');
-  const fileName = `tfs_hours_report_${from}_to_${to}.csv`;
+  const who = qs('assignedTo').value.trim();
+  const ct = qs('costType').value.trim();
+  const suffix = [who, ct].filter(Boolean).map((s) => s.replace(/[^a-zA-Z0-9_-]/g, '_')).join('_');
+  const fileName = `tfs_hours_report_${from}_to_${to}${suffix ? '_' + suffix : ''}.csv`;
 
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -308,6 +383,12 @@ qs('btnExport').addEventListener('click', () => {
   exportCsv();
 });
 
+document.querySelectorAll('.preset-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    applyPreset(btn.dataset.preset);
+  });
+});
+
 (async function boot() {
   await loadConfig();
   setTzLabels();
@@ -318,5 +399,6 @@ qs('btnExport').addEventListener('click', () => {
   qs('from').value = fromStr;
   qs('to').value = toStr;
 
+  await Promise.all([loadUsers(), loadCostTypes()]);
   await loadReport();
 })();
