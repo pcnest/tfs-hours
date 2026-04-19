@@ -280,7 +280,46 @@ function renderReportRows(rows) {
     .join('');
 }
 
-function renderDailyHoursTable(rows, fromYmd, toYmd) {
+async function fetchDailyAnnotations(fromYmd, toYmd, assignedTo) {
+  const rangeP = new URLSearchParams({ from: fromYmd, to: toYmd });
+  const ptoP = new URLSearchParams({ from: fromYmd, to: toYmd });
+  if (assignedTo) ptoP.set('assignedTo', assignedTo);
+
+  const [hData, tData, pData] = await Promise.all([
+    fetch(`/api/holidays?${rangeP}`)
+      .then((r) => r.json())
+      .catch(() => ({})),
+    fetch(`/api/team-off?${rangeP}`)
+      .then((r) => r.json())
+      .catch(() => ({})),
+    fetch(`/api/pto?${ptoP}`)
+      .then((r) => r.json())
+      .catch(() => ({})),
+  ]);
+
+  // holiday_date -> name
+  const holidays = new Map();
+  for (const row of hData.rows || [])
+    holidays.set(row.holiday_date, row.name || 'Holiday');
+
+  // entry_date set
+  const teamOff = new Set();
+  for (const row of tData.rows || []) teamOff.add(row.entry_date);
+
+  // entry_date -> total PTO hours
+  const pto = new Map();
+  for (const row of pData.rows || []) {
+    const h = Number(row.hours || 0);
+    pto.set(
+      row.entry_date,
+      (pto.get(row.entry_date) || 0) + (Number.isFinite(h) ? h : 0),
+    );
+  }
+
+  return { holidays, teamOff, pto, singleUser: !!assignedTo };
+}
+
+function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
   if (!fromYmd || !toYmd) {
     return `<tr><td colspan="3" class="muted">No date range selected.</td></tr>`;
   }
@@ -303,6 +342,13 @@ function renderDailyHoursTable(rows, fromYmd, toYmd) {
     );
   }
 
+  const {
+    holidays = new Map(),
+    teamOff = new Set(),
+    pto = new Map(),
+    singleUser = false,
+  } = annotations || {};
+
   const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const html = [];
   const cur = new Date(`${fromYmd}T00:00:00.000Z`);
@@ -313,9 +359,22 @@ function renderDailyHoursTable(rows, fromYmd, toYmd) {
     const dow = cur.getUTCDay(); // 0=Sun, 6=Sat
     if (dow !== 0 && dow !== 6) {
       const total = dayTotals.get(ymd) || 0;
-      const zeroClass = total === 0 ? ' class="day-zero"' : '';
+      let hoursLabel;
+      let rowClass = ' class="day-zero"';
+      if (total > 0) {
+        hoursLabel = fmtHours(total);
+        rowClass = '';
+      } else if (holidays.has(ymd)) {
+        hoursLabel = 'Holiday';
+      } else if (teamOff.has(ymd)) {
+        hoursLabel = 'Team Off';
+      } else if (pto.has(ymd)) {
+        hoursLabel = singleUser ? `PTO - ${fmtHours(pto.get(ymd))}` : 'PTO';
+      } else {
+        hoursLabel = fmtHours(0);
+      }
       html.push(
-        `<tr${zeroClass}><td>${escapeHtml(ymd)}</td><td>${DAY_NAMES[dow]}</td><td>${fmtHours(total)}</td></tr>`,
+        `<tr${rowClass}><td>${escapeHtml(ymd)}</td><td>${DAY_NAMES[dow]}</td><td>${escapeHtml(hoursLabel)}</td></tr>`,
       );
     }
     cur.setUTCDate(cur.getUTCDate() + 1);
@@ -333,9 +392,20 @@ async function loadReport() {
     `<tr><td colspan="3" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
+  const fromYmd = qs('from').value;
+  const toYmd = qs('to').value;
+  const assignedTo = qs('assignedTo').value.trim();
+
   const params = buildReportParams({ limit: '5000' });
   const endpoint = '/api/hours/entries';
-  const r = await fetch(`${endpoint}?${params.toString()}`);
+
+  const [r, annotations] = await Promise.all([
+    fetch(`${endpoint}?${params.toString()}`),
+    fromYmd && toYmd
+      ? fetchDailyAnnotations(fromYmd, toYmd, assignedTo)
+      : Promise.resolve(null),
+  ]);
+
   const data = await r.json().catch(() => ({}));
 
   if (!r.ok || !data.ok) {
@@ -359,8 +429,9 @@ async function loadReport() {
   qs('tbodyReport').innerHTML = renderReportRows(rows);
   qs('tbodyDailyHours').innerHTML = renderDailyHoursTable(
     rows,
-    qs('from').value,
-    qs('to').value,
+    fromYmd,
+    toYmd,
+    annotations,
   );
   updateStats(rows);
   await loadMetrics(rows);
