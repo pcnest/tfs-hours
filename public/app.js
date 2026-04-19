@@ -301,8 +301,7 @@ async function loadReport() {
     setStatus('Failed to load report.');
     LAST_ROWS = [];
     updateStats(LAST_ROWS);
-    qs('m_required').textContent = '-';
-    qs('m_missing').textContent = '-';
+    resetMetricCards();
     qs('btnExport').disabled = true;
     return { ok: false };
   }
@@ -632,12 +631,19 @@ document.addEventListener('click', async (e) => {
 });
 
 // -------- Metrics --------
+function resetMetricCards() {
+  qs('m_required').textContent = '-';
+  qs('m_pto').textContent = '-';
+  qs('m_holiday').textContent = '-';
+  qs('m_missing').textContent = '-';
+  qs('m_missing').style.color = 'inherit';
+}
+
 async function loadMetrics(rows) {
   const from = qs('from').value;
   const to = qs('to').value;
   if (!from || !to) {
-    qs('m_required').textContent = '-';
-    qs('m_missing').textContent = '-';
+    resetMetricCards();
     return;
   }
   const assignedTo = qs('assignedTo').value.trim();
@@ -647,26 +653,37 @@ async function loadMetrics(rows) {
     const r = await fetch(`/api/hours/metrics?${p.toString()}`);
     const m = await r.json().catch(() => ({}));
     if (!r.ok || !m.ok) {
-      qs('m_required').textContent = '-';
-      qs('m_missing').textContent = '-';
+      resetMetricCards();
       return;
     }
+
     const totalActual = rows.reduce((acc, row) => {
       const n = Number(row.actual_hours || 0);
       return acc + (Number.isFinite(n) ? n : 0);
     }, 0);
-    let requiredHours = m.requiredHours;
+
+    let workingHours = m.weekdayHours;
+    let teamOffHours = m.teamOffHours;
     const individualPtoHours = m.individualPtoHours;
+
     if (!assignedTo) {
       const numPeople = new Set(
         rows
           .map((row) => row.task_assigned_upn || row.task_assigned_to)
           .filter(Boolean),
       ).size;
-      if (numPeople > 0) requiredHours = m.requiredHours * numPeople;
+      if (numPeople > 0) {
+        workingHours = m.weekdayHours * numPeople;
+        teamOffHours = m.teamOffHours * numPeople;
+      }
     }
-    const missing = requiredHours - individualPtoHours - totalActual;
-    qs('m_required').textContent = fmtHours(requiredHours);
+
+    const missing =
+      workingHours - teamOffHours - individualPtoHours - totalActual;
+
+    qs('m_required').textContent = fmtHours(workingHours);
+    qs('m_pto').textContent = fmtHours(individualPtoHours);
+    qs('m_holiday').textContent = fmtHours(teamOffHours);
     const missingEl = qs('m_missing');
     missingEl.textContent = fmtHours(missing);
     missingEl.style.color =
@@ -676,8 +693,7 @@ async function loadMetrics(rows) {
           ? 'var(--accent)'
           : 'inherit';
   } catch {
-    qs('m_required').textContent = '-';
-    qs('m_missing').textContent = '-';
+    resetMetricCards();
   }
 }
 
