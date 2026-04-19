@@ -16,10 +16,10 @@ const REPORT_TZ_OFFSET_MINUTES = Number(
 const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
 const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
 
-const BREVO_SMTP_USER      = process.env.BREVO_SMTP_USER      || '';
-const BREVO_SMTP_KEY       = process.env.BREVO_SMTP_KEY       || '';
-const NOTIFY_FROM_EMAIL    = process.env.NOTIFY_FROM_EMAIL    || '';
-const NOTIFY_FROM_NAME     = process.env.NOTIFY_FROM_NAME     || 'TFS Hours Report';
+const BREVO_SMTP_USER = process.env.BREVO_SMTP_USER || '';
+const BREVO_SMTP_KEY = process.env.BREVO_SMTP_KEY || '';
+const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
+const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
 const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
 
 function createMailTransporter() {
@@ -1326,119 +1326,208 @@ app.get('/api/hours/metrics', async (req, res) => {
   }
 });
 
+// ---------- Shared helper: compute per-user hours for a period ----------
+async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
+  const wdR = await pool.query(
+    `SELECT (COUNT(*) * 8)::float AS weekday_hours
+     FROM generate_series($1::date, $2::date, '1 day'::interval) AS d
+     WHERE EXTRACT(DOW FROM d) BETWEEN 1 AND 5`,
+    [fromStr, toStr],
+  );
+  const weekdayHours = Number(wdR.rows[0]?.weekday_hours ?? 0);
+
+  const offR = await pool.query(
+    `SELECT
+       COALESCE((SELECT SUM(hours) FROM public.team_off_entries  WHERE entry_date   BETWEEN $1::date AND $2::date), 0) +
+       COALESCE((SELECT SUM(hours) FROM public.public_holidays   WHERE holiday_date BETWEEN $1::date AND $2::date), 0)
+       AS shared_off_hours`,
+    [fromStr, toStr],
+  );
+  const sharedOffHours = Number(offR.rows[0]?.shared_off_hours ?? 0);
+  const requiredHours = Math.max(0, weekdayHours - sharedOffHours);
+
+  const ptoR = await pool.query(
+    `SELECT LOWER(TRIM(COALESCE(user_name, user_upn))) AS name_key,
+            COALESCE(SUM(hours), 0) AS pto_hours
+     FROM public.pto_entries
+     WHERE entry_date BETWEEN $1::date AND $2::date
+     GROUP BY 1`,
+    [fromStr, toStr],
+  );
+  const ptoByName = new Map(
+    ptoR.rows.map((r) => [r.name_key, Number(r.pto_hours)]),
+  );
+
+  const loggedR = await pool.query(
+    `WITH snaps AS (
+       SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
+         s.task_id, s.snapshot_at,
+         COALESCE(s.task_changed_date, s.snapshot_at) AS t,
+         s.task_assigned_to,
+         COALESCE(s.task_actual_hours, 0) AS h
+       FROM public.tfs_task_hours_snapshots s
+       ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
+     ),
+     prior AS (
+       SELECT DISTINCT ON (task_id) task_id, snapshot_at, t, h
+       FROM snaps WHERE t < $1::timestamptz
+       ORDER BY task_id, t DESC, snapshot_at DESC
+     ),
+     inrange AS (
+       SELECT task_id, snapshot_at, t, task_assigned_to, h
+       FROM snaps WHERE t >= $1::timestamptz AND t < $2::timestamptz
+     ),
+     combined AS (
+       SELECT task_id, snapshot_at, t, NULL::text AS task_assigned_to, h, TRUE  AS is_prior FROM prior
+       UNION ALL
+       SELECT task_id, snapshot_at, t, task_assigned_to,               h, FALSE AS is_prior FROM inrange
+     ),
+     w AS (
+       SELECT *, LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+       FROM combined
+     )
+     SELECT
+       LOWER(TRIM(task_assigned_to))               AS name_key,
+       GREATEST(SUM(h - COALESCE(prev_h, 0)), 0)  AS logged_hours
+     FROM w
+     WHERE is_prior = FALSE AND task_assigned_to IS NOT NULL
+     GROUP BY 1`,
+    [fromUtc.toISOString(), toExclusiveUtc.toISOString()],
+  );
+  const loggedByName = new Map(
+    loggedR.rows.map((r) => [r.name_key, Number(r.logged_hours)]),
+  );
+
+  const usersR = await pool.query(
+    `SELECT email, name FROM public.users WHERE email LIKE '%@%' ORDER BY name ASC`,
+  );
+
+  return {
+    weekdayHours,
+    sharedOffHours,
+    requiredHours,
+    ptoByName,
+    loggedByName,
+    users: usersR.rows,
+  };
+}
+
+// ---------- Hours preview (no emails sent) ----------
+app.get('/api/notifications/hours-preview', async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  const threshold = normNum(req.query.threshold) ?? 16;
+
+  if (!fromStr || !toStr)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
+  if (!Number.isFinite(threshold) || threshold < 0)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'threshold must be a positive number' });
+
+  const offsetMin = getReportOffsetMinutes();
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+  if (!rng)
+    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
+  try {
+    const {
+      weekdayHours,
+      sharedOffHours,
+      requiredHours,
+      ptoByName,
+      loggedByName,
+      users,
+    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
+
+    const rows = users.map((user) => {
+      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
+      const ptoHours = ptoByName.get(nameKey) ?? 0;
+      const loggedHours = loggedByName.get(nameKey) ?? 0;
+      const missing = requiredHours - ptoHours - loggedHours;
+      return {
+        name: user.name || user.email,
+        email: user.email,
+        requiredHours,
+        ptoHours,
+        loggedHours,
+        missing,
+        overThreshold: missing > threshold,
+      };
+    });
+
+    rows.sort((a, b) => b.missing - a.missing);
+    res.json({ ok: true, weekdayHours, sharedOffHours, requiredHours, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Missing hours notifications ----------
 app.post('/api/notifications/missing-hours', async (req, res) => {
   if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY) {
-    return res.status(503).json({ ok: false, error: 'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).' });
+    return res.status(503).json({
+      ok: false,
+      error:
+        'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).',
+    });
   }
   if (!NOTIFY_FROM_EMAIL) {
-    return res.status(503).json({ ok: false, error: 'NOTIFY_FROM_EMAIL not configured on server.' });
+    return res.status(503).json({
+      ok: false,
+      error: 'NOTIFY_FROM_EMAIL not configured on server.',
+    });
   }
 
-  const { from: fromRaw, to: toRaw, threshold: thresholdRaw, managerEmail: managerEmailRaw } = req.body || {};
+  const {
+    from: fromRaw,
+    to: toRaw,
+    threshold: thresholdRaw,
+    managerEmail: managerEmailRaw,
+  } = req.body || {};
 
-  const fromStr      = validateDateStr(fromRaw);
-  const toStr        = validateDateStr(toRaw);
-  const threshold    = normNum(thresholdRaw) ?? 16;
+  const fromStr = validateDateStr(fromRaw);
+  const toStr = validateDateStr(toRaw);
+  const threshold = normNum(thresholdRaw) ?? 16;
   const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
 
   if (!fromStr || !toStr)
-    return res.status(400).json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
   if (!Number.isFinite(threshold) || threshold < 0)
-    return res.status(400).json({ ok: false, error: 'threshold must be a positive number' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'threshold must be a positive number' });
 
   const offsetMin = getReportOffsetMinutes();
-  const tz        = getReportTimeZone();
-  const rng       = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
   if (!rng)
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
   const { fromUtc, toExclusiveUtc } = rng;
 
   try {
-    // 1 — Weekday hours (same for everyone)
-    const wdR = await pool.query(
-      `SELECT (COUNT(*) * 8)::float AS weekday_hours
-       FROM generate_series($1::date, $2::date, '1 day'::interval) AS d
-       WHERE EXTRACT(DOW FROM d) BETWEEN 1 AND 5`,
-      [fromStr, toStr],
-    );
-    const weekdayHours = Number(wdR.rows[0]?.weekday_hours ?? 0);
+    const {
+      weekdayHours,
+      sharedOffHours,
+      requiredHours,
+      ptoByName,
+      loggedByName,
+      users,
+    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
 
-    // 2 — Team off + holidays (same for everyone)
-    const offR = await pool.query(
-      `SELECT
-         COALESCE((SELECT SUM(hours) FROM public.team_off_entries  WHERE entry_date   BETWEEN $1::date AND $2::date), 0) +
-         COALESCE((SELECT SUM(hours) FROM public.public_holidays   WHERE holiday_date BETWEEN $1::date AND $2::date), 0)
-         AS shared_off_hours`,
-      [fromStr, toStr],
-    );
-    const sharedOffHours = Number(offR.rows[0]?.shared_off_hours ?? 0);
-    const requiredHours  = Math.max(0, weekdayHours - sharedOffHours);
-
-    // 3 — Individual PTO per user (keyed by lower-trimmed name)
-    const ptoR = await pool.query(
-      `SELECT LOWER(TRIM(COALESCE(user_name, user_upn))) AS name_key,
-              COALESCE(SUM(hours), 0) AS pto_hours
-       FROM public.pto_entries
-       WHERE entry_date BETWEEN $1::date AND $2::date
-       GROUP BY 1`,
-      [fromStr, toStr],
-    );
-    const ptoByName = new Map(ptoR.rows.map((r) => [r.name_key, Number(r.pto_hours)]));
-
-    // 4 — Actual logged hours per person (delta from snapshots)
-    const loggedR = await pool.query(
-      `WITH snaps AS (
-         SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
-           s.task_id,
-           s.snapshot_at,
-           COALESCE(s.task_changed_date, s.snapshot_at) AS t,
-           s.task_assigned_to,
-           COALESCE(s.task_actual_hours, 0)             AS h
-         FROM public.tfs_task_hours_snapshots s
-         ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
-       ),
-       prior AS (
-         SELECT DISTINCT ON (task_id) task_id, snapshot_at, t, h
-         FROM snaps WHERE t < $1::timestamptz
-         ORDER BY task_id, t DESC, snapshot_at DESC
-       ),
-       inrange AS (
-         SELECT task_id, snapshot_at, t, task_assigned_to, h
-         FROM snaps WHERE t >= $1::timestamptz AND t < $2::timestamptz
-       ),
-       combined AS (
-         SELECT task_id, snapshot_at, t, NULL::text AS task_assigned_to, h, TRUE  AS is_prior FROM prior
-         UNION ALL
-         SELECT task_id, snapshot_at, t, task_assigned_to,               h, FALSE AS is_prior FROM inrange
-       ),
-       w AS (
-         SELECT *, LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
-         FROM combined
-       )
-       SELECT
-         LOWER(TRIM(task_assigned_to))               AS name_key,
-         GREATEST(SUM(h - COALESCE(prev_h, 0)), 0)  AS logged_hours
-       FROM w
-       WHERE is_prior = FALSE AND task_assigned_to IS NOT NULL
-       GROUP BY 1`,
-      [fromUtc.toISOString(), toExclusiveUtc.toISOString()],
-    );
-    const loggedByName = new Map(loggedR.rows.map((r) => [r.name_key, Number(r.logged_hours)]));
-
-    // 5 — All users with a real email address
-    const usersR = await pool.query(
-      `SELECT email, name FROM public.users WHERE email LIKE '%@%' ORDER BY name ASC`,
-    );
-
-    // 6 — Identify offenders
+    // Identify offenders
     const offenders = [];
-    for (const user of usersR.rows) {
-      const nameKey     = user.name ? user.name.trim().toLowerCase() : '';
-      const ptoHours    = ptoByName.get(nameKey)     ?? 0;
-      const loggedHours = loggedByName.get(nameKey)  ?? 0;
-      const missing     = requiredHours - ptoHours - loggedHours;
+    for (const user of users) {
+      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
+      const ptoHours = ptoByName.get(nameKey) ?? 0;
+      const loggedHours = loggedByName.get(nameKey) ?? 0;
+      const missing = requiredHours - ptoHours - loggedHours;
       if (missing > threshold) {
         offenders.push({
           email: user.email,
@@ -1548,7 +1637,9 @@ app.post('/api/notifications/missing-hours', async (req, res) => {
           subject: `Missing Hours Digest \u2013 ${period} \u2013 ${offenders.length} user(s)`,
           html: digestHtml,
         });
-      } catch (_) { /* digest failure is non-critical */ }
+      } catch (_) {
+        /* digest failure is non-critical */
+      }
     }
 
     res.json({

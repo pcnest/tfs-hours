@@ -866,12 +866,77 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   await loadReport();
 })();
 
+// -------- Notify preview --------
+function renderNotifyPreview(rows, threshold) {
+  const wrap = qs('notifyPreviewWrap');
+  const tbody = qs('tbodyNotifyPreview');
+  if (!wrap || !tbody) return;
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">No users found.</td></tr>`;
+    wrap.hidden = false;
+    return;
+  }
+
+  tbody.innerHTML = rows
+    .map((r, i) => {
+      const over = r.missing > threshold;
+      const missCls = over ? 'over' : r.missing <= 0 ? 'ok' : '';
+      return `
+      <tr>
+        <td class="muted">${i + 1}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td style="text-align:right;">${fmtHours(r.requiredHours)}</td>
+        <td style="text-align:right;">${fmtHours(r.ptoHours)}</td>
+        <td style="text-align:right;">${fmtHours(r.loggedHours)}</td>
+        <td style="text-align:right;" class="${escapeHtml(missCls)}">${fmtHours(r.missing)}</td>
+      </tr>`;
+    })
+    .join('');
+
+  wrap.hidden = false;
+}
+
+qs('btnNotifyPreview')?.addEventListener('click', async () => {
+  const from = qs('from').value;
+  const to = qs('to').value;
+  const threshold = Number(qs('notify_threshold').value);
+  const statusEl = qs('notifyStatus');
+
+  if (!from || !to) {
+    statusEl.textContent = 'Please select a date range first.';
+    return;
+  }
+
+  statusEl.textContent = 'Loading preview\u2026';
+  qs('btnNotifyPreview').disabled = true;
+
+  try {
+    const p = new URLSearchParams({ from, to, threshold });
+    const r = await fetch(`/api/notifications/hours-preview?${p}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      statusEl.textContent = `Error: ${j.error || `HTTP ${r.status}`}`;
+    } else {
+      const over = (j.rows || []).filter((x) => x.overThreshold).length;
+      statusEl.textContent = over
+        ? `${over} user(s) exceed the ${threshold}h threshold.`
+        : `All users are within the ${threshold}h threshold.`;
+      renderNotifyPreview(j.rows || [], threshold);
+    }
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+  } finally {
+    qs('btnNotifyPreview').disabled = false;
+  }
+});
+
 qs('btnNotify')?.addEventListener('click', async () => {
-  const from      = qs('from').value;
-  const to        = qs('to').value;
+  const from = qs('from').value;
+  const to = qs('to').value;
   const threshold = qs('notify_threshold').value;
-  const manager   = qs('notify_manager').value.trim();
-  const statusEl  = qs('notifyStatus');
+  const manager = qs('notify_manager').value.trim();
+  const statusEl = qs('notifyStatus');
 
   if (!from || !to) {
     statusEl.textContent = 'Please select a date range first.';
@@ -885,15 +950,22 @@ qs('btnNotify')?.addEventListener('click', async () => {
     const r = await fetch('/api/notifications/missing-hours', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, threshold: Number(threshold), managerEmail: manager }),
+      body: JSON.stringify({
+        from,
+        to,
+        threshold: Number(threshold),
+        managerEmail: manager,
+      }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       statusEl.textContent = `Error: ${j.error || `HTTP ${r.status}`}`;
     } else if (j.sent === 0) {
-      statusEl.textContent = j.message || 'No users exceed the threshold \u2014 no emails sent.';
+      statusEl.textContent =
+        j.message || 'No users exceed the threshold \u2014 no emails sent.';
     } else {
-      statusEl.textContent = `Done \u2014 ${j.sent} of ${j.offenders} email(s) sent.` +
+      statusEl.textContent =
+        `Done \u2014 ${j.sent} of ${j.offenders} email(s) sent.` +
         (j.errors?.length ? ` (${j.errors.length} failed)` : '');
     }
   } catch (err) {

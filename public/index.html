@@ -404,6 +404,58 @@
     }
 
     /* ---- Tabs ---- */
+
+    /* ---- Notify preview table ---- */
+    .notify-preview-wrap {
+      margin-top: 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      overflow: auto;
+    }
+
+    .notify-preview-wrap table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 560px;
+    }
+
+    .notify-preview-wrap th,
+    .notify-preview-wrap td {
+      border-bottom: 1px solid #e6e6e6;
+      padding: 8px 12px;
+      font-size: 13px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .notify-preview-wrap thead th {
+      background: white;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      position: sticky;
+      top: 0;
+    }
+
+    .notify-preview-wrap tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .notify-preview-wrap tbody tr:hover {
+      background: #f8fbfa;
+    }
+
+    .notify-preview-wrap td.over {
+      color: var(--accent-2);
+      font-weight: 700;
+    }
+
+    .notify-preview-wrap td.ok {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
     .tab-nav {
       display: flex;
       gap: 8px;
@@ -680,7 +732,8 @@
 
         <section class="panel notify-panel">
           <details id="notifyDetails">
-            <summary style="cursor:pointer;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);list-style:none;display:flex;align-items:center;gap:8px;">
+            <summary
+              style="cursor:pointer;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);list-style:none;display:flex;align-items:center;gap:8px;">
               <span>&#9993;</span> Send Missing Hours Notifications
             </summary>
             <div style="margin-top:12px;">
@@ -694,13 +747,32 @@
                   <input type="email" id="notify_manager" placeholder="manager@company.com" />
                 </div>
                 <div class="field">
+                  <button type="button" id="btnNotifyPreview">Preview</button>
+                </div>
+                <div class="field">
                   <button type="button" id="btnNotify">Send Notifications</button>
                 </div>
               </div>
               <p class="muted" style="font-size:12px;margin:8px 0 4px;">
-                Uses the <strong>Report Date Range</strong> selected above. Emails all users whose missing hours exceed the threshold.
+                Uses the <strong>Report Date Range</strong> selected above. Emails all users whose missing hours exceed
+                the threshold.
               </p>
               <div id="notifyStatus" class="status muted"></div>
+              <div id="notifyPreviewWrap" class="notify-preview-wrap" hidden>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Name</th>
+                      <th>Required Hrs</th>
+                      <th>PTO</th>
+                      <th>Logged Hrs</th>
+                      <th>Missing Hrs</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tbodyNotifyPreview"></tbody>
+                </table>
+              </div>
             </div>
           </details>
         </section>
