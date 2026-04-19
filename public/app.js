@@ -420,6 +420,7 @@ async function loadReport() {
     updateStats(LAST_ROWS);
     resetMetricCards();
     qs('btnExport').disabled = true;
+    qs('btnDailyView').disabled = true;
     return { ok: false };
   }
 
@@ -436,6 +437,7 @@ async function loadReport() {
   updateStats(rows);
   await loadMetrics(rows);
   qs('btnExport').disabled = rows.length === 0;
+  qs('btnDailyView').disabled = rows.length === 0;
   setStatus(`Loaded ${rows.length} rows.`);
   return { ok: true };
 }
@@ -820,6 +822,18 @@ qs('btnLoad').addEventListener('click', async () => {
 
 qs('btnExport').addEventListener('click', () => {
   exportCsv();
+});
+
+qs('btnDailyView').addEventListener('click', () => {
+  qs('dailyModal').showModal();
+});
+
+qs('btnDailyClose').addEventListener('click', () => {
+  qs('dailyModal').close();
+});
+
+qs('dailyModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.close();
 });
 
 document.querySelectorAll('.preset-btn').forEach((btn) => {

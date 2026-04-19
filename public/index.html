@@ -541,6 +541,95 @@
       transform: none;
       box-shadow: none;
     }
+
+    /* Daily hours modal */
+    dialog#dailyModal {
+      border: none;
+      border-radius: var(--radius);
+      padding: 0;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: var(--shadow);
+      background: white;
+    }
+
+    dialog#dailyModal::backdrop {
+      background: rgba(16, 24, 24, 0.35);
+      backdrop-filter: blur(2px);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--stroke);
+    }
+
+    .modal-header h3 {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      color: var(--muted);
+      padding: 2px 6px;
+      border-radius: 6px;
+      transform: none;
+      box-shadow: none;
+      transition: background 0.15s;
+    }
+
+    .modal-close:hover {
+      background: #f0ebe0;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .modal-body {
+      padding: 0 0 8px;
+      overflow-y: auto;
+      max-height: 70vh;
+    }
+
+    .modal-body table {
+      min-width: 0;
+      width: 100%;
+    }
+
+    /* View button inside stat card */
+    .stat .btn-view {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: white;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transform: none;
+      box-shadow: none;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .stat .btn-view:hover {
+      background: var(--accent);
+      color: white;
+      transform: none;
+      box-shadow: none;
+    }
   </style>
 </head>
 
@@ -605,6 +694,7 @@
           <div class="stat">
             <div class="k">Total Logged Hours</div>
             <div class="v" id="m_hours">-</div>
+            <button type="button" class="btn-view" id="btnDailyView" disabled>View</button>
           </div>
           <div class="stat">
             <div class="k">Missing Hours</div>
@@ -613,24 +703,6 @@
         </section>
 
         <div id="status" class="status muted">Loading.</div>
-
-        <section class="table-wrap table-compact">
-          <h3 class="table-caption">Hours per Working Day</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Day</th>
-                <th>Total Hours</th>
-              </tr>
-            </thead>
-            <tbody id="tbodyDailyHours">
-              <tr>
-                <td colspan="3" class="muted">No data loaded yet.</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
 
         <section class="table-wrap">
           <table>
@@ -794,6 +866,29 @@
     </div><!-- /tabPto -->
 
   </div>
+
+  <dialog id="dailyModal">
+    <div class="modal-header">
+      <h3>Hours per Working Day</h3>
+      <button type="button" class="modal-close" id="btnDailyClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Day</th>
+            <th>Total Hours</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyDailyHours">
+          <tr>
+            <td colspan="3" class="muted">No data loaded yet.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>
