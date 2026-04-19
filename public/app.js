@@ -100,7 +100,6 @@ function buildReportParams(opts = {}) {
   add('from', qs('from').value);
   add('to', qs('to').value);
   add('assignedTo', qs('assignedTo').value);
-  add('costType', qs('costType').value);
   add('limit', opts.limit ?? '2000');
 
   return p;
@@ -258,16 +257,13 @@ function updateStats(rows) {
 
 function renderReportRows(rows) {
   if (!rows.length) {
-    return `<tr><td colspan="12" class="muted">No rows in this range.</td></tr>`;
+    return `<tr><td colspan="10" class="muted">No rows in this range.</td></tr>`;
   }
 
   return rows
     .map(
       (x) => `
       <tr>
-        <td>${renderIdTag(x.feature_id)}</td>
-        <td class="title-cell">${escapeHtml(x.feature_title || '')}</td>
-        <td>${escapeHtml(x.cost_type || '')}</td>
         <td>${escapeHtml(x.ticket_type || '')}</td>
         <td>${renderIdTag(x.ticket_id)}</td>
         <td class="title-cell">${escapeHtml(x.ticket_title || '')}</td>
@@ -275,6 +271,7 @@ function renderReportRows(rows) {
         <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
         <td>${escapeHtml(fmtDateTime(x.changed_at))}</td>
+        <td>${escapeHtml(x.cost_type || '')}</td>
         <td>${fmtHours(x.actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
@@ -285,7 +282,7 @@ function renderReportRows(rows) {
 
 async function loadReport() {
   qs('tbodyReport').innerHTML =
-    `<tr><td colspan="12" class="muted">Loading.</td></tr>`;
+    `<tr><td colspan="10" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
 
   const params = buildReportParams({ limit: '5000' });
@@ -295,7 +292,7 @@ async function loadReport() {
 
   if (!r.ok || !data.ok) {
     qs('tbodyReport').innerHTML =
-      `<tr><td colspan="12" class="muted">Error: ${escapeHtml(
+      `<tr><td colspan="10" class="muted">Error: ${escapeHtml(
         data.error || `HTTP ${r.status}`,
       )}</td></tr>`;
     setStatus('Failed to load report.');
@@ -321,9 +318,6 @@ function exportCsv() {
   if (!LAST_ROWS.length) return;
 
   const headers = [
-    'Feature ID',
-    'Feature Name',
-    'Cost Type',
     'Ticket Type',
     'Ticket ID',
     'Ticket Title',
@@ -331,6 +325,7 @@ function exportCsv() {
     'Task Title',
     'Task Activity',
     'Changed Date',
+    'Cost Type',
     'Actual Hours',
     'Assigned To',
   ];
@@ -338,9 +333,6 @@ function exportCsv() {
   const lines = [headers.join(',')];
   for (const x of LAST_ROWS) {
     const row = [
-      x.feature_id,
-      x.feature_title,
-      x.cost_type,
       x.ticket_type,
       x.ticket_id,
       x.ticket_title,
@@ -348,6 +340,7 @@ function exportCsv() {
       x.task_title,
       x.task_activity,
       fmtDateTime(x.changed_at),
+      x.cost_type,
       x.actual_hours,
       x.task_assigned_to,
     ];
@@ -357,11 +350,7 @@ function exportCsv() {
   const from = (qs('from').value || 'all').replace(/[^a-zA-Z0-9_-]/g, '-');
   const to = (qs('to').value || 'all').replace(/[^a-zA-Z0-9_-]/g, '-');
   const who = qs('assignedTo').value.trim();
-  const ct = qs('costType').value.trim();
-  const suffix = [who, ct]
-    .filter(Boolean)
-    .map((s) => s.replace(/[^a-zA-Z0-9_-]/g, '_'))
-    .join('_');
+  const suffix = who ? who.replace(/[^a-zA-Z0-9_-]/g, '_') : '';
   const fileName = `tfs_hours_report_${from}_to_${to}${suffix ? '_' + suffix : ''}.csv`;
 
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -723,6 +712,6 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   qs('from').value = fromStr;
   qs('to').value = toStr;
 
-  await Promise.all([loadUsers(), loadCostTypes()]);
+  await loadUsers();
   await loadReport();
 })();

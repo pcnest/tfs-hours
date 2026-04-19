@@ -107,12 +107,13 @@
       padding: 16px 18px;
       box-shadow: var(--shadow);
       animation: rise 0.6s ease both;
+      margin-bottom: 1.5rem;
     }
 
     .filters {
       display: grid;
       gap: 16px;
-      grid-template-columns: 2fr 1fr 1fr 1fr;
+      grid-template-columns: 2fr 1fr 1fr;
       align-items: end;
     }
 
@@ -562,12 +563,6 @@
           <input id="assignedTo" list="assignedToList" placeholder="Name or UPN" autocomplete="off" />
           <datalist id="assignedToList"></datalist>
         </div>
-        <div>
-          <label>Cost Type</label>
-          <select id="costType">
-            <option value="">All</option>
-          </select>
-        </div>
         <div class="actions">
           <button id="btnLoad">Load report</button>
           <button id="btnExport" class="ghost" disabled>Export CSV</button>
@@ -605,9 +600,6 @@
           <table>
             <thead>
               <tr>
-                <th>Feature ID</th>
-                <th>Feature Name</th>
-                <th>Cost Type</th>
                 <th>Ticket Type</th>
                 <th>Ticket ID</th>
                 <th>Ticket Title</th>
@@ -615,13 +607,14 @@
                 <th>Task Title</th>
                 <th>Task Activity</th>
                 <th>Changed Date</th>
+                <th>Cost Type</th>
                 <th>Actual Hours</th>
                 <th>Assigned To</th>
               </tr>
             </thead>
             <tbody id="tbodyReport">
               <tr>
-                <td colspan="12" class="muted">No data loaded yet.</td>
+                <td colspan="10" class="muted">No data loaded yet.</td>
               </tr>
             </tbody>
           </table>
