@@ -33,10 +33,13 @@ async function loadUsers() {
     const dl = qs('assignedToList');
     if (!dl) return;
     dl.innerHTML = j.users
-      .map((u) => `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`)
+      .map(
+        (u) =>
+          `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
+      )
       .join('');
     USERS_LOADED = true;
-  } catch { }
+  } catch {}
 }
 
 async function loadCostTypes() {
@@ -54,8 +57,11 @@ async function loadCostTypes() {
       sel.appendChild(opt);
     });
     COST_TYPES_LOADED = true;
-  } catch { }
+  } catch {}
 }
+
+async function loadConfig() {
+  if (APP_CFG) return APP_CFG;
   try {
     const r = await fetch('/api/config');
     const j = await r.json().catch(() => ({}));
@@ -181,19 +187,23 @@ function applyPreset(preset) {
     fromStr = toStr = todayStr;
   } else if (preset === 'thisweek') {
     // Mon–Sun week
-    const mondayOffset = (dow === 0 ? -6 : 1 - dow);
-    fromStr = new Date(todayDate.getTime() + mondayOffset * 86400 * 1000).toISOString().slice(0, 10);
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    fromStr = new Date(todayDate.getTime() + mondayOffset * 86400 * 1000)
+      .toISOString()
+      .slice(0, 10);
     toStr = todayStr;
   } else if (preset === 'lastweek') {
-    const mondayOffset = (dow === 0 ? -6 : 1 - dow);
-    const thisMonday = new Date(todayDate.getTime() + mondayOffset * 86400 * 1000);
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const thisMonday = new Date(
+      todayDate.getTime() + mondayOffset * 86400 * 1000,
+    );
     const lastMonday = new Date(thisMonday.getTime() - 7 * 86400 * 1000);
     const lastSunday = new Date(thisMonday.getTime() - 1 * 86400 * 1000);
     fromStr = lastMonday.toISOString().slice(0, 10);
     toStr = lastSunday.toISOString().slice(0, 10);
   } else if (preset === 'thismonth') {
     const [y, m] = todayStr.split('-').map(Number);
-    fromStr = `${String(y).padStart(4,'0')}-${String(m).padStart(2,'0')}-01`;
+    fromStr = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
     toStr = todayStr;
   } else if (preset === 'last30') {
     fromStr = ymdAddDays(todayStr, -29);
@@ -359,7 +369,10 @@ function exportCsv() {
   const to = (qs('to').value || 'all').replace(/[^a-zA-Z0-9_-]/g, '-');
   const who = qs('assignedTo').value.trim();
   const ct = qs('costType').value.trim();
-  const suffix = [who, ct].filter(Boolean).map((s) => s.replace(/[^a-zA-Z0-9_-]/g, '_')).join('_');
+  const suffix = [who, ct]
+    .filter(Boolean)
+    .map((s) => s.replace(/[^a-zA-Z0-9_-]/g, '_'))
+    .join('_');
   const fileName = `tfs_hours_report_${from}_to_${to}${suffix ? '_' + suffix : ''}.csv`;
 
   const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
