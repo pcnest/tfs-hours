@@ -234,18 +234,40 @@ function rangeFromToUtc(fromStr, toStr, offsetMinutes, timeZone) {
 
 // ---------- Password helpers ----------
 function verifyLegacyPassword(pw, encoded) {
-  // Format: base64(16-byte-salt):base64(SHA256(salt_bytes || pw_bytes))
   const parts = String(encoded || '').split(':');
   if (parts.length !== 2) return false;
   try {
-    const salt = Buffer.from(parts[0], 'base64');
+    const saltBase64 = parts[0];
+    const salt = Buffer.from(saltBase64, 'base64');
     const expected = Buffer.from(parts[1], 'base64');
-    const hash = crypto
-      .createHash('sha256')
-      .update(salt)
-      .update(Buffer.from(pw, 'utf8'))
-      .digest();
-    return crypto.timingSafeEqual(expected, hash);
+    const pwBuf = Buffer.from(pw, 'utf8');
+
+    // Try all common SHA256+salt orderings used by legacy Node auth implementations
+    const candidates = [
+      // variant 1: SHA256(salt_bytes + pw_bytes)
+      crypto.createHash('sha256').update(salt).update(pwBuf).digest(),
+      // variant 2: SHA256(pw_bytes + salt_bytes)
+      crypto.createHash('sha256').update(pwBuf).update(salt).digest(),
+      // variant 3: SHA256(saltBase64String + pw)
+      crypto
+        .createHash('sha256')
+        .update(saltBase64 + pw)
+        .digest(),
+      // variant 4: SHA256(pw + saltBase64String)
+      crypto
+        .createHash('sha256')
+        .update(pw + saltBase64)
+        .digest(),
+      // variant 5: HMAC-SHA256(pw, salt_bytes)
+      crypto.createHmac('sha256', salt).update(pwBuf).digest(),
+      // variant 6: HMAC-SHA256(pw, saltBase64String)
+      crypto.createHmac('sha256', saltBase64).update(pwBuf).digest(),
+    ];
+
+    return candidates.some(
+      (h) =>
+        h.length === expected.length && crypto.timingSafeEqual(h, expected),
+    );
   } catch {
     return false;
   }
