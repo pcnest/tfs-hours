@@ -636,6 +636,88 @@
       box-shadow: none;
     }
 
+    .btn-approve,
+    .btn-deny {
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: white;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transform: none;
+      box-shadow: none;
+      margin-right: 4px;
+    }
+
+    .btn-approve {
+      color: #1f7a6b;
+      border-color: #1f7a6b;
+    }
+
+    .btn-approve:hover {
+      background: #1f7a6b;
+      color: white;
+    }
+
+    .btn-deny {
+      color: var(--accent-2);
+    }
+
+    .btn-deny:hover {
+      background: var(--accent-2);
+      color: white;
+      border-color: var(--accent-2);
+    }
+
+    .pto-status {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .pto-status-pending {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .pto-status-lead_approved {
+      background: #cfe2ff;
+      color: #084298;
+    }
+
+    .pto-status-approved {
+      background: #d1e7dd;
+      color: #0a3622;
+    }
+
+    .pto-status-denied {
+      background: #f8d7da;
+      color: #58151c;
+    }
+
+    .pto-action-filter {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .pto-action-filter label {
+      font-size: 13px;
+      color: var(--muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     /* Daily hours modal */
     dialog#dailyModal {
       border: none;
@@ -896,7 +978,7 @@
               <input type="date" id="hol_date" required />
             </div>
             <div class="field field-grow">
-              <label for="hol_name">Name</label>
+              <label for="hol_name">Holiday</label>
               <input type="text" id="hol_name" placeholder="e.g. Christmas Day" required />
             </div>
             <div class="field field-sm">
@@ -1008,6 +1090,12 @@
             </div>
           </div>
         </form>
+        <div class="pto-action-filter" id="ptoActionFilterWrap" hidden>
+          <label>
+            <input type="checkbox" id="chkActionRequired" />
+            Show my action items only
+          </label>
+        </div>
         <div class="pto-table-wrap">
           <table class="pto-table">
             <thead>
@@ -1017,12 +1105,13 @@
                 <th>Hours</th>
                 <th>Leave Type</th>
                 <th>Notes</th>
+                <th>Status</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="tbodyPto">
               <tr>
-                <td colspan="6" class="muted">Loading&#8230;</td>
+                <td colspan="7" class="muted">Loading&#8230;</td>
               </tr>
             </tbody>
           </table>

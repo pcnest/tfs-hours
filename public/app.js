@@ -521,13 +521,15 @@ function switchTab(name) {
     loadTeamOff();
     loadPtoEntries();
     // Apply role-based visibility each time the tab opens
-    const isPrivileged =
-      window.CURRENT_USER?.role === 'admin' ||
-      window.CURRENT_USER?.role === 'pm';
+    const role = window.CURRENT_USER?.role;
+    const isPrivileged = role === 'admin' || role === 'pm';
+    const canAction = role === 'lead' || role === 'pm';
     const ptoUserWrap = qs('pto_user_wrap');
     if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
     const ptoViewWrap = qs('pto_view_wrap');
     if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
+    const ptoActionFilterWrap = qs('ptoActionFilterWrap');
+    if (ptoActionFilterWrap) ptoActionFilterWrap.hidden = !canAction;
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
       if (ptoUser)
@@ -685,39 +687,96 @@ qs('formTeamOff')?.addEventListener('submit', async (e) => {
 });
 
 // -------- Individual PTO --------
+
+const PTO_STATUS_LABELS = {
+  pending: 'Pending',
+  lead_approved: 'Lead Approved',
+  approved: 'Approved',
+  denied: 'Denied',
+};
+
+function ptoBadge(status) {
+  const label = PTO_STATUS_LABELS[status] || status || '';
+  const cls = `pto-status pto-status-${CSS.escape ? CSS.escape(status || '') : (status || '').replace(/[^a-z_]/gi, '')}`;
+  return `<span class="${cls}">${escapeHtml(label)}</span>`;
+}
+
 async function loadPtoEntries(userFilter = '') {
   const tbody = qs('tbodyPto');
   if (!tbody) return;
+  const actionRequired = qs('chkActionRequired')?.checked || false;
   try {
     const p = new URLSearchParams();
     if (userFilter) p.set('assignedTo', userFilter);
+    if (actionRequired) p.set('actionRequired', 'true');
     const r = await apiFetch(
       `/api/pto${p.toString() ? '?' + p.toString() : ''}`,
     );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="6" class="muted">Failed to load.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load.</td></tr>`;
       return;
     }
     renderPtoEntries(j.rows);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted">Error loading.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">Error loading.</td></tr>`;
   }
 }
 
 function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
-  const isPrivileged =
-    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
+  const role = window.CURRENT_USER?.role;
+  const myEmail = (window.CURRENT_USER?.email || '').toLowerCase();
+  const isPrivileged = role === 'admin' || role === 'pm';
+  const isLead = role === 'lead';
+
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="muted">No PTO entries defined.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">No PTO entries defined.</td></tr>`;
     return;
   }
+
   tbody.innerHTML = rows
     .map((r) => {
-      const delBtn = isPrivileged
+      // Delete: only for own pending entries (dev/qa) or privileged on pending entries
+      const canDelete =
+        r.status === 'pending' &&
+        (isPrivileged || (r.user_upn || '').toLowerCase() === myEmail);
+      const delBtn = canDelete
         ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
         : '';
+
+      // Approve/Deny buttons
+      let actionBtns = '';
+      const filerUpn = (r.user_upn || '').toLowerCase();
+      if (
+        isLead &&
+        ['dev', 'qa'].includes(r.filer_role) &&
+        r.status === 'pending' &&
+        filerUpn !== myEmail
+      ) {
+        actionBtns =
+          `<button class="btn-approve" data-id="${r.id}" data-action="approve">Approve</button>` +
+          `<button class="btn-deny"    data-id="${r.id}" data-action="deny">Deny</button>`;
+      } else if (role === 'pm') {
+        const devQaReady =
+          ['dev', 'qa'].includes(r.filer_role) && r.status === 'lead_approved';
+        const leadReady = r.filer_role === 'lead' && r.status === 'pending';
+        const pmReady =
+          r.filer_role === 'pm' &&
+          r.status === 'pending' &&
+          filerUpn !== myEmail;
+        if (devQaReady || leadReady || pmReady) {
+          actionBtns =
+            `<button class="btn-approve" data-id="${r.id}" data-action="approve">Approve</button>` +
+            `<button class="btn-deny"    data-id="${r.id}" data-action="deny">Deny</button>`;
+        }
+      }
+
+      const actionCell = `${actionBtns}${delBtn}`;
+      const denialTip = r.denial_note
+        ? ` title="${escapeHtml(r.denial_note)}"`
+        : '';
+
       return `
       <tr>
         <td>${escapeHtml(r.user_name || r.user_upn || '')}</td>
@@ -725,11 +784,47 @@ function renderPtoEntries(rows) {
         <td>${fmtHours(r.hours)}</td>
         <td>${escapeHtml(r.leave_type || '')}</td>
         <td>${escapeHtml(r.notes || '')}</td>
-        <td>${delBtn}</td>
+        <td${denialTip}>${ptoBadge(r.status)}</td>
+        <td>${actionCell}</td>
       </tr>`;
     })
     .join('');
 }
+
+async function ptoAction(id, action) {
+  let note = null;
+  if (action === 'deny') {
+    note = window.prompt('Reason for denial (optional):') ?? '';
+    if (note === null) return; // user cancelled
+  }
+  try {
+    const r = await apiFetch(`/api/pto/${id}/${action}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    await loadPtoEntries();
+  } catch (err) {
+    alert(`Error: ${err.message}`);
+  }
+}
+
+// Delegated click for approve/deny buttons
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action="approve"],[data-action="deny"]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const action = btn.dataset.action;
+  if (!id || !action) return;
+  await ptoAction(id, action);
+});
+
+qs('chkActionRequired')?.addEventListener('change', () => loadPtoEntries());
 
 qs('formPto')?.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -777,7 +872,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
         ptoUser.value =
           window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
     }
-    if (receiptMsg) alert(`PTO entry saved.${receiptMsg}`);
+    alert(`PTO submitted and pending approval.${receiptMsg}`);
     await loadPtoEntries();
   } catch (err) {
     alert(`Error: ${err.message}`);
@@ -787,9 +882,6 @@ qs('formPto')?.addEventListener('submit', async (e) => {
 qs('btnPtoView')?.addEventListener('click', () => {
   const user = qs('pto_user').value.trim();
   loadPtoEntries(user);
-  // Clear the input after filtering so the datalist shows all users next time
-  // (browser filters datalist options to match current input text, so we
-  // reset it here to avoid it appearing to only contain the selected user).
   qs('pto_user').value = '';
 });
 
@@ -918,6 +1010,8 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
 // -------- Role UI --------
 function setRoleUI(role) {
   const isPrivileged = role === 'admin' || role === 'pm';
+  const isLead = role === 'lead';
+  const canAction = isLead || role === 'pm'; // roles that can approve/deny
 
   // Non-privileged: hide Send Missing Hours Notifications panel
   const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
@@ -944,6 +1038,10 @@ function setRoleUI(role) {
   if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
   const ptoViewWrap = qs('pto_view_wrap');
   if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
+
+  // Lead and PM: show "action items" filter checkbox
+  const ptoActionFilterWrap = qs('ptoActionFilterWrap');
+  if (ptoActionFilterWrap) ptoActionFilterWrap.hidden = !canAction;
 }
 
 (async function boot() {
@@ -975,7 +1073,12 @@ function setRoleUI(role) {
     return;
   }
 
-  window.CURRENT_USER = { email: me.email, name: me.name, role: me.role };
+  window.CURRENT_USER = {
+    email: me.email,
+    name: me.name,
+    role: me.role,
+    team: me.team || null,
+  };
 
   // Populate user chip in header
   const chip = qs('userChip');

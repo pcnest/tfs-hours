@@ -334,7 +334,7 @@ async function requireAuth(req, res, next) {
   if (!tok) return res.status(401).json({ ok: false, error: 'unauthorized' });
   try {
     const r = await pool.query(
-      `SELECT s.email, s.user_id, u.role, u.name
+      `SELECT s.email, s.user_id, u.role, u.name, u.team
        FROM sessions s
        JOIN public.users u ON u.email = s.email
        WHERE s.token = $1`,
@@ -346,6 +346,7 @@ async function requireAuth(req, res, next) {
     req.userId = r.rows[0].user_id;
     req.userRole = r.rows[0].role || 'dev';
     req.userName = r.rows[0].name;
+    req.userTeam = r.rows[0].team || null;
     next();
   } catch (e) {
     console.error('requireAuth error:', e);
@@ -357,6 +358,43 @@ function requireManagerOrAbove(req, res, next) {
   if (req.userRole !== 'admin' && req.userRole !== 'pm')
     return res.status(403).json({ ok: false, error: 'forbidden' });
   next();
+}
+
+function requireLeadOrPm(req, res, next) {
+  if (req.userRole !== 'lead' && req.userRole !== 'pm')
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  next();
+}
+
+/**
+ * Returns list of approver emails based on filer's role and team.
+ * Gracefully falls back to ALL leads/PMs when team is null.
+ */
+async function getApproverEmails(filerRole, filerTeam, filerEmail) {
+  let q, params;
+  if (filerRole === 'dev' || filerRole === 'qa') {
+    if (filerTeam) {
+      q = `SELECT email FROM public.users WHERE role = 'lead' AND team = $1`;
+      params = [filerTeam];
+    } else {
+      q = `SELECT email FROM public.users WHERE role = 'lead'`;
+      params = [];
+    }
+  } else if (filerRole === 'lead') {
+    q = `SELECT email FROM public.users WHERE role = 'pm'`;
+    params = [];
+  } else if (filerRole === 'pm') {
+    q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(email) != LOWER($1)`;
+    params = [filerEmail];
+  } else {
+    return [];
+  }
+  try {
+    const r = await pool.query(q, params);
+    return r.rows.map((row) => row.email);
+  } catch {
+    return [];
+  }
 }
 
 // ---------- Auth routes ----------
@@ -431,7 +469,29 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
     email: req.userEmail,
     name: req.userName,
     role: req.userRole,
+    team: req.userTeam,
   });
+});
+
+// ---------- User team assignment (admin only) ----------
+app.patch('/api/users/:email/team', requireAuth, async (req, res) => {
+  if (req.userRole !== 'admin')
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  const targetEmail = normText(req.params.email);
+  const team = normText(req.body?.team) || null;
+  if (!targetEmail)
+    return res.status(400).json({ ok: false, error: 'email required' });
+  try {
+    const r = await pool.query(
+      `UPDATE public.users SET team = $1 WHERE LOWER(email) = LOWER($2) RETURNING email, team`,
+      [team, targetEmail],
+    );
+    if (!r.rows.length)
+      return res.status(404).json({ ok: false, error: 'user not found' });
+    res.json({ ok: true, email: r.rows[0].email, team: r.rows[0].team });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 });
 
 // ---------- Ingest ----------
@@ -1415,47 +1475,6 @@ app.delete(
 );
 
 // ---------- Individual PTO ----------
-app.get('/api/pto', requireAuth, async (req, res) => {
-  const fromStr = validateDateStr(req.query.from);
-  const toStr = validateDateStr(req.query.to);
-  const userFilter = normText(req.query.userUpn || req.query.assignedTo);
-  const params = [];
-  const where = [];
-  if (fromStr) {
-    params.push(fromStr);
-    where.push(`entry_date >= $${params.length}::date`);
-  }
-  if (toStr) {
-    params.push(toStr);
-    where.push(`entry_date <= $${params.length}::date`);
-  }
-  if (userFilter) {
-    params.push(`%${userFilter}%`);
-    where.push(
-      `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
-    );
-  }
-  // Dev role: enforce own-data filter
-  if (req.userRole === 'dev') {
-    params.push(`%${req.userEmail}%`);
-    where.push(
-      `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
-    );
-  }
-  try {
-    const r = await pool.query(
-      `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at
-       FROM public.pto_entries
-       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-       ORDER BY entry_date ASC, user_name ASC`,
-      params,
-    );
-    res.json({ ok: true, rows: r.rows });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
 const VALID_LEAVE_TYPES = new Set([
   'Personal',
   'Emergency',
@@ -1463,6 +1482,126 @@ const VALID_LEAVE_TYPES = new Set([
   'Maternity',
   'Bereavement',
 ]);
+
+/** Roles that must enforce own-data filtering (cannot view/file for others) */
+const OWN_DATA_ROLES = new Set(['dev', 'qa']);
+
+app.get('/api/pto', requireAuth, async (req, res) => {
+  const fromStr = validateDateStr(req.query.from);
+  const toStr = validateDateStr(req.query.to);
+  const userFilter = normText(req.query.userUpn || req.query.assignedTo);
+  const actionRequired = req.query.actionRequired === 'true';
+
+  const SELECT = `
+    SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at,
+           status, filer_role, approved_by_lead, lead_actioned_at,
+           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note
+    FROM public.pto_entries`;
+
+  try {
+    // Own-data roles: dev, qa — see only their own entries
+    if (OWN_DATA_ROLES.has(req.userRole)) {
+      const params = [];
+      const where = [];
+      if (fromStr) {
+        params.push(fromStr);
+        where.push(`entry_date >= $${params.length}::date`);
+      }
+      if (toStr) {
+        params.push(toStr);
+        where.push(`entry_date <= $${params.length}::date`);
+      }
+      params.push(`%${req.userEmail}%`);
+      where.push(
+        `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
+      );
+      const r = await pool.query(
+        `${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY entry_date ASC, user_name ASC`,
+        params,
+      );
+      return res.json({ ok: true, rows: r.rows });
+    }
+
+    // Lead: own entries UNION team's pending dev/qa entries
+    if (req.userRole === 'lead') {
+      const params = [];
+      const dateWhere = [];
+      if (fromStr) {
+        params.push(fromStr);
+        dateWhere.push(`entry_date >= $${params.length}::date`);
+      }
+      if (toStr) {
+        params.push(toStr);
+        dateWhere.push(`entry_date <= $${params.length}::date`);
+      }
+      const dateClause = dateWhere.length
+        ? 'AND ' + dateWhere.join(' AND ')
+        : '';
+
+      params.push(req.userEmail);
+      const ownIdx = params.length;
+
+      let teamClause;
+      if (req.userTeam) {
+        params.push(req.userTeam);
+        teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND user_upn IN (
+          SELECT email FROM public.users WHERE team = $${params.length}
+        )`;
+      } else {
+        teamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
+      }
+
+      if (actionRequired) {
+        // Only show actionable: team's pending dev/qa entries
+        const r = await pool.query(
+          `${SELECT} WHERE ${teamClause} ${dateClause} ORDER BY entry_date ASC, user_name ASC`,
+          params,
+        );
+        return res.json({ ok: true, rows: r.rows });
+      }
+
+      const r = await pool.query(
+        `${SELECT} WHERE (LOWER(COALESCE(user_upn,'')) = LOWER($${ownIdx}) ${dateClause})
+           OR (${teamClause} ${dateClause})
+         ORDER BY entry_date ASC, user_name ASC`,
+        params,
+      );
+      return res.json({ ok: true, rows: r.rows });
+    }
+
+    // PM and admin: full access with optional filters
+    const params = [];
+    const where = [];
+    if (fromStr) {
+      params.push(fromStr);
+      where.push(`entry_date >= $${params.length}::date`);
+    }
+    if (toStr) {
+      params.push(toStr);
+      where.push(`entry_date <= $${params.length}::date`);
+    }
+    if (userFilter) {
+      params.push(`%${userFilter}%`);
+      where.push(
+        `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
+      );
+    }
+    if (actionRequired && req.userRole === 'pm') {
+      params.push(req.userEmail);
+      const pmEmail = params.length;
+      where.push(
+        `((status = 'lead_approved') OR (status = 'pending' AND filer_role IN ('lead','pm') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
+      );
+    }
+    const r = await pool.query(
+      `${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY entry_date ASC, user_name ASC`,
+      params,
+    );
+    res.json({ ok: true, rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 app.post('/api/pto', requireAuth, async (req, res) => {
   const {
@@ -1483,11 +1622,13 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       ? leave_type_raw
       : 'Personal';
   const notes = normText(notesRaw);
-  // Dev role: can only file PTO for themselves
-  if (req.userRole === 'dev') {
+
+  // Own-data roles: dev, qa — can only file PTO for themselves
+  if (OWN_DATA_ROLES.has(req.userRole)) {
     user_upn = req.userEmail;
     if (!user_name) user_name = req.userName;
   }
+
   if (!user_name && !user_upn)
     return res
       .status(400)
@@ -1500,61 +1641,380 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     return res
       .status(400)
       .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+
+  // admin PTOs are auto-approved (no approval chain)
+  const initialStatus = req.userRole === 'admin' ? 'approved' : 'pending';
+  const filerRole = req.userRole;
+
   try {
     const r = await pool.query(
-      `INSERT INTO public.pto_entries (user_upn, user_name, entry_date, hours, leave_type, notes)
-       VALUES ($1, $2, $3::date, $4, $5, $6)
-       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes`,
-      [user_upn, user_name, entry_date, hours, leave_type, notes],
+      `INSERT INTO public.pto_entries
+         (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8)
+       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role`,
+      [
+        user_upn,
+        user_name,
+        entry_date,
+        hours,
+        leave_type,
+        notes,
+        initialStatus,
+        filerRole,
+      ],
     );
-    // Feature 3: Generate PDF receipt and email
+    const savedRow = r.rows[0];
+
+    // Send approval notification email and PDF receipt (async, non-blocking to response)
     let pdfEmailSent = false;
-    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
-      try {
-        const submittedAt = new Date().toUTCString();
-        const pdfBuf = await generatePtoPdf({
-          userName: user_name || user_upn,
-          entryDate: entry_date,
-          hours,
-          leaveType: leave_type,
-          notes: notes || '',
-          submittedAt,
-        });
-        const toList = [req.userEmail];
-        if (NOTIFY_MANAGER_EMAIL && NOTIFY_MANAGER_EMAIL !== req.userEmail)
-          toList.push(NOTIFY_MANAGER_EMAIL);
-        const transporter = createMailTransporter();
-        await transporter.sendMail({
-          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-          to: toList.join(', '),
-          subject: `PTO Receipt \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
-          text: `PTO filed for ${user_name || user_upn}: ${entry_date}, ${hours}h${notes ? ', ' + notes : ''}.`,
-          attachments: [
-            {
-              filename: `pto_receipt_${entry_date}.pdf`,
-              content: pdfBuf,
-              contentType: 'application/pdf',
-            },
-          ],
-        });
-        pdfEmailSent = true;
-      } catch (pdfErr) {
-        console.error('PTO PDF email error:', pdfErr);
-      }
+    if (
+      BREVO_SMTP_USER &&
+      BREVO_SMTP_KEY &&
+      NOTIFY_FROM_EMAIL &&
+      initialStatus === 'pending'
+    ) {
+      (async () => {
+        try {
+          const approverEmails = await getApproverEmails(
+            filerRole,
+            req.userTeam,
+            req.userEmail,
+          );
+          if (approverEmails.length) {
+            const transporter = createMailTransporter();
+            const info = await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: approverEmails.join(', '),
+              cc: req.userEmail,
+              subject: `PTO Approval Needed \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
+              html: `<p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a PTO request and it needs your approval.</p>
+<table border="0" cellpadding="6" style="font-family:sans-serif;font-size:13px">
+  <tr><td><strong>Date</strong></td><td>${escapeEmailHtml(entry_date)}</td></tr>
+  <tr><td><strong>Hours</strong></td><td>${fmtH(hours)}</td></tr>
+  <tr><td><strong>Leave Type</strong></td><td>${escapeEmailHtml(leave_type)}</td></tr>
+  <tr><td><strong>Notes</strong></td><td>${escapeEmailHtml(notes || '—')}</td></tr>
+</table>
+<p>Please log in to the TFS Hours app to approve or deny this request.</p>`,
+              text: `PTO approval needed for ${user_name || user_upn}: ${entry_date}, ${fmtH(hours)}h, ${leave_type}${notes ? ', ' + notes : ''}.`,
+            });
+            // Store message-id for reply threading
+            const msgId = info.messageId || null;
+            if (msgId) {
+              await pool.query(
+                `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
+                [msgId, savedRow.id],
+              );
+            }
+          }
+        } catch (emailErr) {
+          console.error('PTO approval notification error:', emailErr);
+        }
+      })();
     }
-    res.status(201).json({ ok: true, row: r.rows[0], pdfEmailSent });
+
+    // PDF receipt to filer only
+    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      (async () => {
+        try {
+          const submittedAt = new Date().toUTCString();
+          const pdfBuf = await generatePtoPdf({
+            userName: user_name || user_upn,
+            entryDate: entry_date,
+            hours,
+            leaveType: leave_type,
+            notes: notes || '',
+            submittedAt,
+          });
+          const transporter = createMailTransporter();
+          await transporter.sendMail({
+            from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+            to: req.userEmail,
+            subject: `PTO Receipt \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
+            text: `PTO filed for ${user_name || user_upn}: ${entry_date}, ${hours}h${notes ? ', ' + notes : ''}.`,
+            attachments: [
+              {
+                filename: `pto_receipt_${entry_date}.pdf`,
+                content: pdfBuf,
+                contentType: 'application/pdf',
+              },
+            ],
+          });
+          pdfEmailSent = true;
+        } catch (pdfErr) {
+          console.error('PTO PDF email error:', pdfErr);
+        }
+      })();
+    }
+
+    res.status(201).json({ ok: true, row: savedRow, pdfEmailSent });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+// ---------- PTO Approval / Denial ----------
+
+/**
+ * Checks whether the requesting user is allowed to act (approve/deny) on a PTO entry.
+ * Returns null if allowed, or an error string if not.
+ */
+function checkApprovalAccess(entry, actorRole, actorEmail, actorTeam) {
+  const { status, filer_role, user_upn } = entry;
+  if (actorRole === 'lead') {
+    if (!['dev', 'qa'].includes(filer_role))
+      return 'leads can only action dev/qa PTO';
+    if (status !== 'pending') return 'entry is not pending lead approval';
+    // Team check: if actor has a team, filer must be in the same team
+    // (validated via the DB query below — skip here; we check team membership in the route)
+    return null;
+  }
+  if (actorRole === 'pm') {
+    const devQaReady =
+      ['dev', 'qa'].includes(filer_role) && status === 'lead_approved';
+    const leadReady = filer_role === 'lead' && status === 'pending';
+    const pmReady =
+      filer_role === 'pm' &&
+      status === 'pending' &&
+      user_upn.toLowerCase() !== actorEmail.toLowerCase();
+    if (!devQaReady && !leadReady && !pmReady)
+      return 'entry is not in an approvable state for this PM';
+    return null;
+  }
+  return 'only lead or pm can approve/deny PTO';
+}
+
+app.patch(
+  '/api/pto/:id/approve',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    const id = normInt(req.params.id);
+    if (!id || id < 1)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    try {
+      const entryRes = await pool.query(
+        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
+              status, filer_role, email_message_id
+       FROM public.pto_entries WHERE id = $1`,
+        [id],
+      );
+      if (!entryRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      const entry = entryRes.rows[0];
+
+      const accessError = checkApprovalAccess(
+        entry,
+        req.userRole,
+        req.userEmail,
+        req.userTeam,
+      );
+      if (accessError)
+        return res.status(403).json({ ok: false, error: accessError });
+
+      // For lead: verify filer is in the lead's team (if team is set)
+      if (req.userRole === 'lead' && req.userTeam) {
+        const teamCheck = await pool.query(
+          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
+          [entry.user_upn, req.userTeam],
+        );
+        if (!teamCheck.rows.length)
+          return res
+            .status(403)
+            .json({ ok: false, error: 'filer is not in your team' });
+      }
+
+      let updatedRow;
+      if (req.userRole === 'lead') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+         SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
+         WHERE id = $2
+         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                   status, filer_role, email_message_id`,
+          [req.userEmail, id],
+        );
+        updatedRow = r.rows[0];
+      } else {
+        // PM final approval
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+         SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
+         WHERE id = $2
+         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                   status, filer_role, email_message_id`,
+          [req.userEmail, id],
+        );
+        updatedRow = r.rows[0];
+      }
+
+      // Send notification emails (non-blocking)
+      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            const transporter = createMailTransporter();
+            const replyHeaders = entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {};
+            const filerEmail = entry.user_upn;
+            const displayName = escapeEmailHtml(
+              entry.user_name || entry.user_upn,
+            );
+            const entryDate = escapeEmailHtml(entry.entry_date);
+
+            if (req.userRole === 'lead') {
+              // Notify all PMs + filer
+              const pmEmails = await getApproverEmails('lead', null, null);
+              const toList = [...new Set([...pmEmails, filerEmail])].filter(
+                Boolean,
+              );
+              if (toList.length) {
+                await transporter.sendMail({
+                  from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                  to: toList.join(', '),
+                  subject: `PTO Lead-Approved \u2013 ${displayName} \u2013 ${entryDate}`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> on ${entryDate} has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
+<p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
+                  headers: replyHeaders,
+                });
+              }
+            } else {
+              // PM final approval: notify filer + leads in filer's team
+              let leadEmails = [];
+              if (
+                ['dev', 'qa'].includes(entry.filer_role) ||
+                entry.filer_role === 'lead'
+              ) {
+                // Find filer's team
+                const filerUser = await pool.query(
+                  `SELECT team FROM public.users WHERE LOWER(email) = LOWER($1)`,
+                  [filerEmail],
+                );
+                const filerTeam = filerUser.rows[0]?.team || null;
+                leadEmails = await getApproverEmails('dev', filerTeam, null);
+              }
+              const toList = [...new Set([filerEmail, ...leadEmails])].filter(
+                Boolean,
+              );
+              if (toList.length) {
+                await transporter.sendMail({
+                  from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                  to: toList.join(', '),
+                  subject: `PTO Approved \u2013 ${displayName} \u2013 ${entryDate}`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> on ${entryDate} has been <strong>fully approved</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} fully approved by ${req.userName || req.userEmail}.`,
+                  headers: replyHeaders,
+                });
+              }
+            }
+          } catch (emailErr) {
+            console.error('PTO approval email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, row: updatedRow });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/pto/:id/deny',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    const id = normInt(req.params.id);
+    if (!id || id < 1)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    const denialNote = normText(req.body?.note) || null;
+    try {
+      const entryRes = await pool.query(
+        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
+              status, filer_role, email_message_id
+       FROM public.pto_entries WHERE id = $1`,
+        [id],
+      );
+      if (!entryRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      const entry = entryRes.rows[0];
+
+      const accessError = checkApprovalAccess(
+        entry,
+        req.userRole,
+        req.userEmail,
+        req.userTeam,
+      );
+      if (accessError)
+        return res.status(403).json({ ok: false, error: accessError });
+
+      // For lead: verify filer is in the lead's team (if team is set)
+      if (req.userRole === 'lead' && req.userTeam) {
+        const teamCheck = await pool.query(
+          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
+          [entry.user_upn, req.userTeam],
+        );
+        if (!teamCheck.rows.length)
+          return res
+            .status(403)
+            .json({ ok: false, error: 'filer is not in your team' });
+      }
+
+      const r = await pool.query(
+        `UPDATE public.pto_entries
+       SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
+       WHERE id = $3
+       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                 status, filer_role, email_message_id, denied_by, denial_note`,
+        [req.userEmail, denialNote, id],
+      );
+      const updatedRow = r.rows[0];
+
+      // Notify filer of denial (non-blocking)
+      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            const transporter = createMailTransporter();
+            const replyHeaders = entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {};
+            await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: entry.user_upn,
+              subject: `PTO Denied \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(entry.entry_date)}`,
+              html: `<p>Your PTO request for <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
+<p>You may resubmit a new PTO request if needed.</p>`,
+              text: `Your PTO for ${entry.entry_date} was denied by ${req.userName || req.userEmail}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+              headers: replyHeaders,
+            });
+          } catch (emailErr) {
+            console.error('PTO denial email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, row: updatedRow });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
 app.delete('/api/pto/:id', requireAuth, async (req, res) => {
   const id = normInt(req.params.id);
   if (!id || id < 1)
     return res.status(400).json({ ok: false, error: 'invalid id' });
   try {
-    // Dev role: can only delete own PTO entries
-    if (req.userRole === 'dev') {
+    // Own-data roles: dev, qa — can only delete own PTO entries
+    if (OWN_DATA_ROLES.has(req.userRole)) {
       const check = await pool.query(
         `SELECT id FROM public.pto_entries WHERE id = $1
          AND (LOWER(COALESCE(user_upn,'')) = LOWER($2) OR LOWER(COALESCE(user_name,'')) = LOWER($3))`,
@@ -1563,6 +2023,18 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
       if (!check.rows.length)
         return res.status(403).json({ ok: false, error: 'forbidden' });
     }
+    // Only allow deletion of pending entries
+    const statusCheck = await pool.query(
+      `SELECT id, status FROM public.pto_entries WHERE id = $1`,
+      [id],
+    );
+    if (!statusCheck.rows.length)
+      return res.status(404).json({ ok: false, error: 'not found' });
+    if (statusCheck.rows[0].status !== 'pending')
+      return res
+        .status(400)
+        .json({ ok: false, error: 'only pending PTO entries can be deleted' });
+
     const r = await pool.query(
       'DELETE FROM public.pto_entries WHERE id = $1 RETURNING id',
       [id],
