@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TFS Hours — Sign In</title>
+  <style>
+    :root {
+      --bg: #f7f2e8;
+      --bg-2: #e6f2ec;
+      --ink: #1f2b2c;
+      --muted: #5c6a6b;
+      --accent: #1f7a6b;
+      --accent-2: #c8742b;
+      --panel: rgba(255, 255, 255, 0.9);
+      --stroke: rgba(31, 43, 44, 0.14);
+      --shadow: 0 26px 50px rgba(16, 24, 24, 0.14);
+      --radius: 18px;
+      --font-display: "Palatino Linotype", "Book Antiqua", serif;
+      --font-body: "Trebuchet MS", "Lucida Sans Unicode", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 28px;
+      font-family: var(--font-body);
+      color: var(--ink);
+      background: radial-gradient(circle at 10% 0%, #fff4df 0%, var(--bg) 35%, var(--bg-2) 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: auto;
+      width: 420px;
+      height: 420px;
+      border-radius: 999px;
+      filter: blur(0);
+      opacity: 0.25;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    body::before {
+      top: -120px;
+      right: -120px;
+      background: radial-gradient(circle at 30% 30%, #f7b56a, transparent 70%);
+    }
+
+    body::after {
+      bottom: -180px;
+      left: -120px;
+      background: radial-gradient(circle at 40% 40%, #4ba28d, transparent 65%);
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 420px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero {
+      display: grid;
+      gap: 4px;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 32px;
+      font-weight: 700;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 28px 28px 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel h2 {
+      margin: 0 0 20px;
+      font-family: var(--font-display);
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+
+    label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    input {
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      background: white;
+      font-family: var(--font-body);
+      font-size: 14px;
+      color: var(--ink);
+      width: 100%;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(31, 122, 107, 0.12);
+    }
+
+    button[type="submit"] {
+      width: 100%;
+      padding: 12px 16px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: var(--accent);
+      color: white;
+      font-family: var(--font-body);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      margin-top: 4px;
+    }
+
+    button[type="submit"]:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(31, 122, 107, 0.2);
+    }
+
+    button[type="submit"]:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--accent-2);
+      min-height: 18px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div class="eyebrow">SupplyPro TFS 2017</div>
+      <h1>TFS Hours Report</h1>
+    </header>
+
+    <section class="panel">
+      <h2>Sign In</h2>
+      <form id="loginForm" autocomplete="on" novalidate>
+        <div class="field">
+          <label for="email">Email</label>
+          <input type="email" id="email" name="email" autocomplete="email" required placeholder="you@company.com" />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" id="btnLogin">Sign In</button>
+        <div id="status" class="status"></div>
+      </form>
+    </section>
+  </div>
+
+  <script>
+    // If already authenticated, skip login
+    (async () => {
+      const t = localStorage.getItem('tfsHoursToken');
+      if (!t) return;
+      try {
+        const r = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${t}` } });
+        if (r.ok) { window.location.replace('/'); }
+      } catch { /* ignore */ }
+    })();
+
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const statusEl = document.getElementById('status');
+      const btn = document.getElementById('btnLogin');
+
+      statusEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = 'Signing in\u2026';
+
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.ok) {
+          statusEl.textContent = j.error || 'Sign in failed. Please try again.';
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+          return;
+        }
+        localStorage.setItem('tfsHoursToken', j.token);
+        window.location.replace('/');
+      } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    });
+  </script>
+</body>
+
+</html>

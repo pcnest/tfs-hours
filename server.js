@@ -2,6 +2,8 @@ const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -229,6 +231,173 @@ function rangeFromToUtc(fromStr, toStr, offsetMinutes, timeZone) {
     return null;
   return { fromUtc, toExclusiveUtc };
 }
+
+// ---------- Password helpers ----------
+function verifyLegacyPassword(pw, encoded) {
+  // Format: base64(16-byte-salt):base64(SHA256(salt_bytes || pw_bytes))
+  const parts = String(encoded || '').split(':');
+  if (parts.length !== 2) return false;
+  try {
+    const salt = Buffer.from(parts[0], 'base64');
+    const expected = Buffer.from(parts[1], 'base64');
+    const hash = crypto
+      .createHash('sha256')
+      .update(salt)
+      .update(Buffer.from(pw, 'utf8'))
+      .digest();
+    return crypto.timingSafeEqual(expected, hash);
+  } catch {
+    return false;
+  }
+}
+
+async function hashPassword(pw) {
+  const salt = crypto.randomBytes(16);
+  const hash = await new Promise((resolve, reject) => {
+    crypto.scrypt(
+      Buffer.from(pw, 'utf8'),
+      salt,
+      32,
+      { N: 16384, r: 8, p: 1 },
+      (err, key) => (err ? reject(err) : resolve(key)),
+    );
+  });
+  return `scrypt:${salt.toString('base64')}:${hash.toString('base64')}`;
+}
+
+async function verifyPassword(pw, encoded) {
+  const s = String(encoded || '');
+  if (s.startsWith('scrypt:')) {
+    const parts = s.split(':');
+    if (parts.length !== 3) return false;
+    try {
+      const salt = Buffer.from(parts[1], 'base64');
+      const expected = Buffer.from(parts[2], 'base64');
+      const derived = await new Promise((resolve, reject) => {
+        crypto.scrypt(
+          Buffer.from(pw, 'utf8'),
+          salt,
+          32,
+          { N: 16384, r: 8, p: 1 },
+          (err, key) => (err ? reject(err) : resolve(key)),
+        );
+      });
+      return crypto.timingSafeEqual(expected, derived);
+    } catch {
+      return false;
+    }
+  }
+  return verifyLegacyPassword(pw, s);
+}
+
+// ---------- Auth middleware ----------
+async function requireAuth(req, res, next) {
+  const authHeader = req.header('Authorization') || '';
+  const tok = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : null;
+  if (!tok) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  try {
+    const r = await pool.query(
+      `SELECT s.email, s.user_id, u.role, u.name
+       FROM sessions s
+       JOIN public.users u ON u.email = s.email
+       WHERE s.token = $1`,
+      [tok],
+    );
+    if (!r.rows.length)
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    req.userEmail = r.rows[0].email;
+    req.userId = r.rows[0].user_id;
+    req.userRole = r.rows[0].role || 'dev';
+    req.userName = r.rows[0].name;
+    next();
+  } catch (e) {
+    console.error('requireAuth error:', e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+}
+
+function requireManagerOrAbove(req, res, next) {
+  if (req.userRole !== 'admin' && req.userRole !== 'manager')
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  next();
+}
+
+// ---------- Auth routes ----------
+app.post('/api/auth/login', async (req, res) => {
+  const email = normText(req.body?.email);
+  const pw = String(req.body?.password || '');
+  if (!email || !pw)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'email and password required' });
+  try {
+    const r = await pool.query(
+      'SELECT email, pw, role, name, id FROM public.users WHERE LOWER(email) = LOWER($1)',
+      [email],
+    );
+    if (!r.rows.length) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return res.status(401).json({ ok: false, error: 'invalid credentials' });
+    }
+    const user = r.rows[0];
+    const ok = await verifyPassword(pw, user.pw);
+    if (!ok)
+      return res.status(401).json({ ok: false, error: 'invalid credentials' });
+    // Silently re-hash legacy passwords with scrypt
+    if (!String(user.pw || '').startsWith('scrypt:')) {
+      try {
+        const newHash = await hashPassword(pw);
+        await pool.query('UPDATE public.users SET pw = $1 WHERE email = $2', [
+          newHash,
+          user.email,
+        ]);
+      } catch {
+        /* non-critical */
+      }
+    }
+    const tok = crypto.randomBytes(32).toString('hex');
+    await pool.query(
+      'INSERT INTO sessions (token, email, user_id) VALUES ($1, $2, $3)',
+      [tok, user.email, user.id],
+    );
+    res.json({
+      ok: true,
+      token: tok,
+      email: user.email,
+      name: user.name,
+      role: user.role || 'dev',
+    });
+  } catch (e) {
+    console.error('LOGIN ERROR:', e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  const authHeader = req.header('Authorization') || '';
+  const tok = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : null;
+  if (tok) {
+    try {
+      await pool.query('DELETE FROM sessions WHERE token = $1', [tok]);
+    } catch {
+      /* ignore */
+    }
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({
+    ok: true,
+    email: req.userEmail,
+    name: req.userName,
+    role: req.userRole,
+  });
+});
 
 // ---------- Ingest ----------
 function buildUpsertLatest(rows) {
@@ -521,7 +690,7 @@ app.post('/api/tfs-hours-sync', async (req, res) => {
   }
 });
 
-app.get('/api/hours/latest', async (req, res) => {
+app.get('/api/hours/latest', requireAuth, async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD
   const changedBy = (req.query.changedBy || '').toString().trim();
@@ -622,7 +791,7 @@ app.get('/api/hours/latest', async (req, res) => {
 });
 
 // ---------- Hours summary (delta-based; supports negative corrections) ----------
-app.get('/api/hours/summary', async (req, res) => {
+app.get('/api/hours/summary', requireAuth, async (req, res) => {
   const bucketRaw = (req.query.bucket || 'day').toString().trim().toLowerCase();
   const bucketAllowed = new Set(['day', 'week', 'month']);
   const bucket = bucketAllowed.has(bucketRaw) ? bucketRaw : 'day';
@@ -703,7 +872,7 @@ app.get('/api/hours/summary', async (req, res) => {
 });
 
 // ---------- Entries (by Date Changed) ----------
-app.get('/api/hours/entries', async (req, res) => {
+app.get('/api/hours/entries', requireAuth, async (req, res) => {
   const fromStr = (req.query.from || '').toString().trim(); // YYYY-MM-DD
   const toStr = (req.query.to || '').toString().trim(); // YYYY-MM-DD inclusive
   if (!fromStr || !toStr) {
@@ -747,6 +916,15 @@ app.get('/api/hours/entries', async (req, res) => {
     idx += 1;
     params.push(costType);
     filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
+  }
+
+  // Dev role: enforce own-data filter
+  if (req.userRole === 'dev') {
+    idx += 1;
+    params.push(`%${req.userEmail}%`);
+    filters.push(
+      `AND (COALESCE(d.task_assigned_upn,'') ILIKE $${idx} OR COALESCE(d.task_assigned_to,'') ILIKE $${idx})`,
+    );
   }
 
   idx += 1;
@@ -893,7 +1071,7 @@ function csvEscape(v) {
   return s;
 }
 
-app.get('/api/hours/export.csv', async (req, res) => {
+app.get('/api/hours/export.csv', requireAuth, async (req, res) => {
   const bucket = (req.query.bucket || 'day').toString().trim();
   const from = (req.query.from || '').toString().trim();
   const to = (req.query.to || '').toString().trim();
@@ -982,7 +1160,7 @@ app.get('/api/hours/export.csv', async (req, res) => {
 });
 
 // ---------- Users ----------
-app.get('/api/users', async (req, res) => {
+app.get('/api/users', requireAuth, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT DISTINCT
@@ -1000,7 +1178,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 // ---------- Cost types ----------
-app.get('/api/cost-types', async (req, res) => {
+app.get('/api/cost-types', requireAuth, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT DISTINCT cost_type
@@ -1028,7 +1206,7 @@ function validateHours(v) {
 }
 
 // ---------- Public Holidays ----------
-app.get('/api/holidays', async (req, res) => {
+app.get('/api/holidays', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
   const toStr = validateDateStr(req.query.to);
   const params = [];
@@ -1055,58 +1233,68 @@ app.get('/api/holidays', async (req, res) => {
   }
 });
 
-app.post('/api/holidays', async (req, res) => {
-  const {
-    holiday_date: hdRaw,
-    name: nameRaw,
-    hours: hoursRaw,
-  } = req.body || {};
-  const holiday_date = validateDateStr(hdRaw);
-  const name = normText(nameRaw);
-  const hours = validateHours(hoursRaw ?? 8);
-  if (!holiday_date)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'holiday_date is required (YYYY-MM-DD)' });
-  if (!name)
-    return res.status(400).json({ ok: false, error: 'name is required' });
-  if (hours === null)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
-  try {
-    const r = await pool.query(
-      `INSERT INTO public.public_holidays (holiday_date, name, hours)
+app.post(
+  '/api/holidays',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const {
+      holiday_date: hdRaw,
+      name: nameRaw,
+      hours: hoursRaw,
+    } = req.body || {};
+    const holiday_date = validateDateStr(hdRaw);
+    const name = normText(nameRaw);
+    const hours = validateHours(hoursRaw ?? 8);
+    if (!holiday_date)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'holiday_date is required (YYYY-MM-DD)' });
+    if (!name)
+      return res.status(400).json({ ok: false, error: 'name is required' });
+    if (hours === null)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+    try {
+      const r = await pool.query(
+        `INSERT INTO public.public_holidays (holiday_date, name, hours)
        VALUES ($1::date, $2, $3)
        ON CONFLICT (holiday_date) DO UPDATE SET name = EXCLUDED.name, hours = EXCLUDED.hours
        RETURNING id, holiday_date::text, name, hours`,
-      [holiday_date, name, hours],
-    );
-    res.status(201).json({ ok: true, row: r.rows[0] });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+        [holiday_date, name, hours],
+      );
+      res.status(201).json({ ok: true, row: r.rows[0] });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
-app.delete('/api/holidays/:id', async (req, res) => {
-  const id = normInt(req.params.id);
-  if (!id || id < 1)
-    return res.status(400).json({ ok: false, error: 'invalid id' });
-  try {
-    const r = await pool.query(
-      'DELETE FROM public.public_holidays WHERE id = $1 RETURNING id',
-      [id],
-    );
-    if (!r.rows.length)
-      return res.status(404).json({ ok: false, error: 'not found' });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+app.delete(
+  '/api/holidays/:id',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const id = normInt(req.params.id);
+    if (!id || id < 1)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    try {
+      const r = await pool.query(
+        'DELETE FROM public.public_holidays WHERE id = $1 RETURNING id',
+        [id],
+      );
+      if (!r.rows.length)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
 // ---------- Team Off ----------
-app.get('/api/team-off', async (req, res) => {
+app.get('/api/team-off', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
   const toStr = validateDateStr(req.query.to);
   const params = [];
@@ -1133,56 +1321,66 @@ app.get('/api/team-off', async (req, res) => {
   }
 });
 
-app.post('/api/team-off', async (req, res) => {
-  const {
-    entry_date: edRaw,
-    hours: hoursRaw,
-    notes: notesRaw,
-  } = req.body || {};
-  const entry_date = validateDateStr(edRaw);
-  const hours = validateHours(hoursRaw ?? 8);
-  const notes = normText(notesRaw);
-  if (!entry_date)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'entry_date is required (YYYY-MM-DD)' });
-  if (hours === null)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
-  try {
-    const r = await pool.query(
-      `INSERT INTO public.team_off_entries (entry_date, hours, notes)
+app.post(
+  '/api/team-off',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const {
+      entry_date: edRaw,
+      hours: hoursRaw,
+      notes: notesRaw,
+    } = req.body || {};
+    const entry_date = validateDateStr(edRaw);
+    const hours = validateHours(hoursRaw ?? 8);
+    const notes = normText(notesRaw);
+    if (!entry_date)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'entry_date is required (YYYY-MM-DD)' });
+    if (hours === null)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+    try {
+      const r = await pool.query(
+        `INSERT INTO public.team_off_entries (entry_date, hours, notes)
        VALUES ($1::date, $2, $3)
        ON CONFLICT (entry_date) DO UPDATE SET hours = EXCLUDED.hours, notes = EXCLUDED.notes
        RETURNING id, entry_date::text, hours, notes`,
-      [entry_date, hours, notes],
-    );
-    res.status(201).json({ ok: true, row: r.rows[0] });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+        [entry_date, hours, notes],
+      );
+      res.status(201).json({ ok: true, row: r.rows[0] });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
-app.delete('/api/team-off/:id', async (req, res) => {
-  const id = normInt(req.params.id);
-  if (!id || id < 1)
-    return res.status(400).json({ ok: false, error: 'invalid id' });
-  try {
-    const r = await pool.query(
-      'DELETE FROM public.team_off_entries WHERE id = $1 RETURNING id',
-      [id],
-    );
-    if (!r.rows.length)
-      return res.status(404).json({ ok: false, error: 'not found' });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+app.delete(
+  '/api/team-off/:id',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const id = normInt(req.params.id);
+    if (!id || id < 1)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    try {
+      const r = await pool.query(
+        'DELETE FROM public.team_off_entries WHERE id = $1 RETURNING id',
+        [id],
+      );
+      if (!r.rows.length)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
 // ---------- Individual PTO ----------
-app.get('/api/pto', async (req, res) => {
+app.get('/api/pto', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
   const toStr = validateDateStr(req.query.to);
   const userFilter = normText(req.query.userUpn || req.query.assignedTo);
@@ -1202,6 +1400,13 @@ app.get('/api/pto', async (req, res) => {
       `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
     );
   }
+  // Dev role: enforce own-data filter
+  if (req.userRole === 'dev') {
+    params.push(`%${req.userEmail}%`);
+    where.push(
+      `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
+    );
+  }
   try {
     const r = await pool.query(
       `SELECT id, user_upn, user_name, entry_date::text, hours, notes, created_at
@@ -1216,7 +1421,7 @@ app.get('/api/pto', async (req, res) => {
   }
 });
 
-app.post('/api/pto', async (req, res) => {
+app.post('/api/pto', requireAuth, async (req, res) => {
   const {
     user_name: unRaw,
     user_upn: uupnRaw,
@@ -1224,11 +1429,16 @@ app.post('/api/pto', async (req, res) => {
     hours: hoursRaw,
     notes: notesRaw,
   } = req.body || {};
-  const user_name = normText(unRaw);
-  const user_upn = normText(uupnRaw) || user_name;
+  let user_name = normText(unRaw);
+  let user_upn = normText(uupnRaw) || user_name;
   const entry_date = validateDateStr(edRaw);
   const hours = validateHours(hoursRaw ?? 8);
   const notes = normText(notesRaw);
+  // Dev role: can only file PTO for themselves
+  if (req.userRole === 'dev') {
+    user_upn = req.userEmail;
+    if (!user_name) user_name = req.userName;
+  }
   if (!user_name && !user_upn)
     return res
       .status(400)
@@ -1248,17 +1458,61 @@ app.post('/api/pto', async (req, res) => {
        RETURNING id, user_upn, user_name, entry_date::text, hours, notes`,
       [user_upn, user_name, entry_date, hours, notes],
     );
-    res.status(201).json({ ok: true, row: r.rows[0] });
+    // Feature 3: Generate PDF receipt and email
+    let pdfEmailSent = false;
+    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      try {
+        const submittedAt = new Date().toUTCString();
+        const pdfBuf = await generatePtoPdf({
+          userName: user_name || user_upn,
+          entryDate: entry_date,
+          hours,
+          notes: notes || '',
+          submittedAt,
+        });
+        const toList = [req.userEmail];
+        if (NOTIFY_MANAGER_EMAIL && NOTIFY_MANAGER_EMAIL !== req.userEmail)
+          toList.push(NOTIFY_MANAGER_EMAIL);
+        const transporter = createMailTransporter();
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: toList.join(', '),
+          subject: `PTO Receipt \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
+          text: `PTO filed for ${user_name || user_upn}: ${entry_date}, ${hours}h${notes ? ', ' + notes : ''}.`,
+          attachments: [
+            {
+              filename: `pto_receipt_${entry_date}.pdf`,
+              content: pdfBuf,
+              contentType: 'application/pdf',
+            },
+          ],
+        });
+        pdfEmailSent = true;
+      } catch (pdfErr) {
+        console.error('PTO PDF email error:', pdfErr);
+      }
+    }
+    res.status(201).json({ ok: true, row: r.rows[0], pdfEmailSent });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-app.delete('/api/pto/:id', async (req, res) => {
+app.delete('/api/pto/:id', requireAuth, async (req, res) => {
   const id = normInt(req.params.id);
   if (!id || id < 1)
     return res.status(400).json({ ok: false, error: 'invalid id' });
   try {
+    // Dev role: can only delete own PTO entries
+    if (req.userRole === 'dev') {
+      const check = await pool.query(
+        `SELECT id FROM public.pto_entries WHERE id = $1
+         AND (LOWER(COALESCE(user_upn,'')) = LOWER($2) OR LOWER(COALESCE(user_name,'')) = LOWER($3))`,
+        [id, req.userEmail, req.userName || ''],
+      );
+      if (!check.rows.length)
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
     const r = await pool.query(
       'DELETE FROM public.pto_entries WHERE id = $1 RETURNING id',
       [id],
@@ -1271,8 +1525,51 @@ app.delete('/api/pto/:id', async (req, res) => {
   }
 });
 
+// ---------- PTO PDF receipt ----------
+function generatePtoPdf({ userName, entryDate, hours, notes, submittedAt }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 60 });
+    const chunks = [];
+    doc.on('data', (ch) => chunks.push(ch));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc
+      .fontSize(22)
+      .font('Helvetica-Bold')
+      .fillColor('#1f2b2c')
+      .text('TFS Hours — PTO Receipt', { align: 'center' });
+    doc.moveDown(0.4);
+    doc
+      .fontSize(11)
+      .font('Helvetica')
+      .fillColor('#5c6a6b')
+      .text('This document confirms a paid time-off request.', {
+        align: 'center',
+      });
+    doc.moveDown(1.2);
+    const fields = [
+      ['Employee', userName],
+      ['PTO Date', entryDate],
+      ['Hours', String(hours)],
+      ['Notes', notes || '—'],
+      ['Submitted', submittedAt],
+      ['System', 'TFS Hours Report'],
+    ];
+    for (const [label, value] of fields) {
+      doc
+        .fontSize(11)
+        .font('Helvetica-Bold')
+        .fillColor('#1f2b2c')
+        .text(`${label}:`, { continued: true });
+      doc.font('Helvetica').text(`  ${value}`);
+      doc.moveDown(0.4);
+    }
+    doc.end();
+  });
+}
+
 // ---------- Hours metrics ----------
-app.get('/api/hours/metrics', async (req, res) => {
+app.get('/api/hours/metrics', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
   const toStr = validateDateStr(req.query.to);
   if (!fromStr || !toStr)
@@ -1401,154 +1698,173 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
 }
 
 // ---------- Hours preview (no emails sent) ----------
-app.get('/api/notifications/hours-preview', async (req, res) => {
-  const fromStr = validateDateStr(req.query.from);
-  const toStr = validateDateStr(req.query.to);
-  const threshold = normNum(req.query.threshold) ?? 16;
+app.get(
+  '/api/notifications/hours-preview',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const fromStr = validateDateStr(req.query.from);
+    const toStr = validateDateStr(req.query.to);
+    const threshold = normNum(req.query.threshold) ?? 16;
 
-  if (!fromStr || !toStr)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
-  if (!Number.isFinite(threshold) || threshold < 0)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'threshold must be a positive number' });
+    if (!fromStr || !toStr)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
+    if (!Number.isFinite(threshold) || threshold < 0)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'threshold must be a positive number' });
 
-  const offsetMin = getReportOffsetMinutes();
-  const tz = getReportTimeZone();
-  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-  if (!rng)
-    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+    const offsetMin = getReportOffsetMinutes();
+    const tz = getReportTimeZone();
+    const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+    if (!rng)
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
-  try {
-    const {
-      weekdayHours,
-      sharedOffHours,
-      requiredHours,
-      ptoByName,
-      loggedByName,
-      users,
-    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
-
-    const rows = users.map((user) => {
-      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
-      const ptoHours = ptoByName.get(nameKey) ?? 0;
-      const loggedHours = loggedByName.get(nameKey) ?? 0;
-      const missing = requiredHours - ptoHours - loggedHours;
-      return {
-        name: user.name || user.email,
-        email: user.email,
+    try {
+      const {
         weekdayHours,
         sharedOffHours,
         requiredHours,
-        ptoHours,
-        loggedHours,
-        missing,
-        overThreshold: missing > threshold,
-      };
-    });
+        ptoByName,
+        loggedByName,
+        users,
+      } = await computeUserHours(
+        fromStr,
+        toStr,
+        rng.fromUtc,
+        rng.toExclusiveUtc,
+      );
 
-    rows.sort((a, b) => b.missing - a.missing);
-    res.json({ ok: true, weekdayHours, sharedOffHours, requiredHours, rows });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// ---------- Missing hours notifications ----------
-app.post('/api/notifications/missing-hours', async (req, res) => {
-  if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY) {
-    return res.status(503).json({
-      ok: false,
-      error:
-        'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).',
-    });
-  }
-  if (!NOTIFY_FROM_EMAIL) {
-    return res.status(503).json({
-      ok: false,
-      error: 'NOTIFY_FROM_EMAIL not configured on server.',
-    });
-  }
-
-  const {
-    from: fromRaw,
-    to: toRaw,
-    threshold: thresholdRaw,
-    managerEmail: managerEmailRaw,
-  } = req.body || {};
-
-  const fromStr = validateDateStr(fromRaw);
-  const toStr = validateDateStr(toRaw);
-  const threshold = normNum(thresholdRaw) ?? 16;
-  const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
-
-  if (!fromStr || !toStr)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
-  if (!Number.isFinite(threshold) || threshold < 0)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'threshold must be a positive number' });
-
-  const offsetMin = getReportOffsetMinutes();
-  const tz = getReportTimeZone();
-  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-  if (!rng)
-    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
-
-  const { fromUtc, toExclusiveUtc } = rng;
-
-  try {
-    const {
-      weekdayHours,
-      sharedOffHours,
-      requiredHours,
-      ptoByName,
-      loggedByName,
-      users,
-    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
-
-    // Identify offenders
-    const offenders = [];
-    for (const user of users) {
-      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
-      const ptoHours = ptoByName.get(nameKey) ?? 0;
-      const loggedHours = loggedByName.get(nameKey) ?? 0;
-      const missing = requiredHours - ptoHours - loggedHours;
-      if (missing > threshold) {
-        offenders.push({
-          email: user.email,
+      const rows = users.map((user) => {
+        const nameKey = user.name ? user.name.trim().toLowerCase() : '';
+        const ptoHours = ptoByName.get(nameKey) ?? 0;
+        const loggedHours = loggedByName.get(nameKey) ?? 0;
+        const missing = requiredHours - ptoHours - loggedHours;
+        return {
           name: user.name || user.email,
+          email: user.email,
           weekdayHours,
           sharedOffHours,
           requiredHours,
           ptoHours,
           loggedHours,
           missing,
-        });
-      }
-    }
+          overThreshold: missing > threshold,
+        };
+      });
 
-    if (offenders.length === 0) {
-      return res.json({
-        ok: true,
-        sent: 0,
-        offenders: 0,
-        message: `No users have missing hours above ${threshold}h for this period.`,
+      rows.sort((a, b) => b.missing - a.missing);
+      res.json({ ok: true, weekdayHours, sharedOffHours, requiredHours, rows });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+// ---------- Missing hours notifications ----------
+app.post(
+  '/api/notifications/missing-hours',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY) {
+      return res.status(503).json({
+        ok: false,
+        error:
+          'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).',
+      });
+    }
+    if (!NOTIFY_FROM_EMAIL) {
+      return res.status(503).json({
+        ok: false,
+        error: 'NOTIFY_FROM_EMAIL not configured on server.',
       });
     }
 
-    // 7 — Send individual emails
-    const transporter = createMailTransporter();
-    const period = `${fromStr} to ${toStr}`;
-    let sent = 0;
-    const errors = [];
+    const {
+      from: fromRaw,
+      to: toRaw,
+      threshold: thresholdRaw,
+      managerEmail: managerEmailRaw,
+    } = req.body || {};
 
-    for (const u of offenders) {
-      const html = `
+    const fromStr = validateDateStr(fromRaw);
+    const toStr = validateDateStr(toRaw);
+    const threshold = normNum(thresholdRaw) ?? 16;
+    const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
+
+    if (!fromStr || !toStr)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'from and to are required (YYYY-MM-DD)' });
+    if (!Number.isFinite(threshold) || threshold < 0)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'threshold must be a positive number' });
+
+    const offsetMin = getReportOffsetMinutes();
+    const tz = getReportTimeZone();
+    const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+    if (!rng)
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
+    const { fromUtc, toExclusiveUtc } = rng;
+
+    try {
+      const {
+        weekdayHours,
+        sharedOffHours,
+        requiredHours,
+        ptoByName,
+        loggedByName,
+        users,
+      } = await computeUserHours(
+        fromStr,
+        toStr,
+        rng.fromUtc,
+        rng.toExclusiveUtc,
+      );
+
+      // Identify offenders
+      const offenders = [];
+      for (const user of users) {
+        const nameKey = user.name ? user.name.trim().toLowerCase() : '';
+        const ptoHours = ptoByName.get(nameKey) ?? 0;
+        const loggedHours = loggedByName.get(nameKey) ?? 0;
+        const missing = requiredHours - ptoHours - loggedHours;
+        if (missing > threshold) {
+          offenders.push({
+            email: user.email,
+            name: user.name || user.email,
+            weekdayHours,
+            sharedOffHours,
+            requiredHours,
+            ptoHours,
+            loggedHours,
+            missing,
+          });
+        }
+      }
+
+      if (offenders.length === 0) {
+        return res.json({
+          ok: true,
+          sent: 0,
+          offenders: 0,
+          message: `No users have missing hours above ${threshold}h for this period.`,
+        });
+      }
+
+      // 7 — Send individual emails
+      const transporter = createMailTransporter();
+      const period = `${fromStr} to ${toStr}`;
+      let sent = 0;
+      const errors = [];
+
+      for (const u of offenders) {
+        const html = `
         <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:520px;">
           <p>Hi <strong>${escapeEmailHtml(u.name)}</strong>,</p>
           <p>This is a reminder that you have
@@ -1575,25 +1891,25 @@ app.post('/api/notifications/missing-hours', async (req, res) => {
           <p>Please log your hours in TFS at your earliest convenience.</p>
           <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
         </div>`;
-      try {
-        await transporter.sendMail({
-          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-          to: u.email,
-          ...(managerEmail ? { cc: managerEmail } : {}),
-          subject: `Missing Hours Alert \u2013 ${period}`,
-          html,
-        });
-        sent++;
-      } catch (e) {
-        errors.push({ email: u.email, error: String(e?.message || e) });
+        try {
+          await transporter.sendMail({
+            from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+            to: u.email,
+            ...(managerEmail ? { cc: managerEmail } : {}),
+            subject: `Missing Hours Alert \u2013 ${period}`,
+            html,
+          });
+          sent++;
+        } catch (e) {
+          errors.push({ email: u.email, error: String(e?.message || e) });
+        }
       }
-    }
 
-    // 8 — Manager digest (separate summary email)
-    if (managerEmail) {
-      const tableRows = offenders
-        .map(
-          (u) => `
+      // 8 — Manager digest (separate summary email)
+      if (managerEmail) {
+        const tableRows = offenders
+          .map(
+            (u) => `
         <tr>
           <td>${escapeEmailHtml(u.name)}</td>
           <td>${escapeEmailHtml(u.email)}</td>
@@ -1602,9 +1918,9 @@ app.post('/api/notifications/missing-hours', async (req, res) => {
           <td style="text-align:center;">${fmtH(u.loggedHours)}</td>
           <td style="text-align:center;color:#c8742b;font-weight:bold;">${fmtH(u.missing)}</td>
         </tr>`,
-        )
-        .join('');
-      const digestHtml = `
+          )
+          .join('');
+        const digestHtml = `
         <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
           <p><strong>${offenders.length} user(s)</strong> have missing hours
              &gt; ${fmtH(threshold)}h for <strong>${escapeEmailHtml(period)}</strong>:</p>
@@ -1620,29 +1936,30 @@ app.post('/api/notifications/missing-hours', async (req, res) => {
           </table>
           <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
         </div>`;
-      try {
-        await transporter.sendMail({
-          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-          to: managerEmail,
-          subject: `Missing Hours Digest \u2013 ${period} \u2013 ${offenders.length} user(s)`,
-          html: digestHtml,
-        });
-      } catch (_) {
-        /* digest failure is non-critical */
+        try {
+          await transporter.sendMail({
+            from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+            to: managerEmail,
+            subject: `Missing Hours Digest \u2013 ${period} \u2013 ${offenders.length} user(s)`,
+            html: digestHtml,
+          });
+        } catch (_) {
+          /* digest failure is non-critical */
+        }
       }
-    }
 
-    res.json({
-      ok: true,
-      sent,
-      offenders: offenders.length,
-      ...(errors.length ? { errors } : {}),
-    });
-  } catch (e) {
-    console.error('NOTIFY ERROR:', e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
+      res.json({
+        ok: true,
+        sent,
+        offenders: offenders.length,
+        ...(errors.length ? { errors } : {}),
+      });
+    } catch (e) {
+      console.error('NOTIFY ERROR:', e);
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
 // ---------- Static UI ----------
 app.use('/', express.static(path.join(__dirname, 'public')));

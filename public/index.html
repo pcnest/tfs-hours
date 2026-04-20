@@ -403,6 +403,29 @@
       }
     }
 
+    /* ---- User chip ---- */
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    .user-chip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      white-space: nowrap;
+      padding-top: 6px;
+    }
+
+    .user-chip #userChipName {
+      font-weight: 600;
+      color: var(--ink);
+    }
+
     /* ---- Tabs ---- */
 
     /* ---- Notify preview table ---- */
@@ -688,10 +711,19 @@
 <body>
   <div class="app">
     <header class="hero">
-      <div class="eyebrow">SupplyPro TFS 2017</div>
-      <h1>TFS Hours Report</h1>
-      <p class="sub">Feature, ticket, and task view driven by Task change history, with a toggle for per-change rows.
-      </p>
+      <div class="hero-top">
+        <div>
+          <div class="eyebrow">SupplyPro TFS 2017</div>
+          <h1>TFS Hours Report</h1>
+          <p class="sub">Feature, ticket, and task view driven by Task change history, with a toggle for per-change
+            rows.
+          </p>
+        </div>
+        <div id="userChip" class="user-chip" hidden>
+          <span id="userChipName"></span>
+          <button type="button" id="btnLogout" class="ghost" style="font-size:12px;padding:6px 14px;">Logout</button>
+        </div>
+      </div>
     </header>
 
     <nav class="tab-nav">

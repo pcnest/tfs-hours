@@ -4,6 +4,22 @@ let USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
 let USERS_CACHE = [];
 
+function token() {
+  return localStorage.getItem('tfsHoursToken');
+}
+
+async function apiFetch(url, opts = {}) {
+  const t = token();
+  const headers = { ...(opts.headers || {}) };
+  if (t) headers['Authorization'] = `Bearer ${t}`;
+  const res = await fetch(url, { ...opts, headers });
+  if (res.status === 401) {
+    localStorage.removeItem('tfsHoursToken');
+    window.location.replace('/login.html');
+  }
+  return res;
+}
+
 function qs(id) {
   return document.getElementById(id);
 }
@@ -27,7 +43,7 @@ function csvEscape(v) {
 async function loadUsers() {
   if (USERS_LOADED) return;
   try {
-    const r = await fetch('/api/users');
+    const r = await apiFetch('/api/users');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
     USERS_CACHE = j.users || [];
@@ -46,7 +62,7 @@ async function loadUsers() {
 async function loadCostTypes() {
   if (COST_TYPES_LOADED) return;
   try {
-    const r = await fetch('/api/cost-types');
+    const r = await apiFetch('/api/cost-types');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
     const sel = qs('costType');
@@ -286,13 +302,13 @@ async function fetchDailyAnnotations(fromYmd, toYmd, assignedTo) {
   if (assignedTo) ptoP.set('assignedTo', assignedTo);
 
   const [hData, tData, pData] = await Promise.all([
-    fetch(`/api/holidays?${rangeP}`)
+    apiFetch(`/api/holidays?${rangeP}`)
       .then((r) => r.json())
       .catch(() => ({})),
-    fetch(`/api/team-off?${rangeP}`)
+    apiFetch(`/api/team-off?${rangeP}`)
       .then((r) => r.json())
       .catch(() => ({})),
-    fetch(`/api/pto?${ptoP}`)
+    apiFetch(`/api/pto?${ptoP}`)
       .then((r) => r.json())
       .catch(() => ({})),
   ]);
@@ -400,7 +416,7 @@ async function loadReport() {
   const endpoint = '/api/hours/entries';
 
   const [r, annotations] = await Promise.all([
-    fetch(`${endpoint}?${params.toString()}`),
+    apiFetch(`${endpoint}?${params.toString()}`),
     fromYmd && toYmd
       ? fetchDailyAnnotations(fromYmd, toYmd, assignedTo)
       : Promise.resolve(null),
@@ -504,6 +520,14 @@ function switchTab(name) {
     loadHolidays();
     loadTeamOff();
     loadPtoEntries();
+    // Dev: pre-fill PTO user with own name and lock it
+    if (window.CURRENT_USER?.role === 'dev') {
+      const ptoUser = qs('pto_user');
+      if (ptoUser) {
+        ptoUser.value = window.CURRENT_USER.name || window.CURRENT_USER.email;
+        ptoUser.readOnly = true;
+      }
+    }
   }
 }
 
@@ -516,7 +540,7 @@ async function populatePtoUserList() {
   const dl = qs('ptoUserList');
   if (!dl || dl.dataset.loaded) return;
   try {
-    const r = await fetch('/api/users');
+    const r = await apiFetch('/api/users');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
     USERS_CACHE = j.users || [];
@@ -535,7 +559,7 @@ async function loadHolidays() {
   const tbody = qs('tbodyHolidays');
   if (!tbody) return;
   try {
-    const r = await fetch('/api/holidays');
+    const r = await apiFetch('/api/holidays');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
@@ -573,7 +597,7 @@ qs('formHoliday')?.addEventListener('submit', async (e) => {
   const hours = parseFloat(qs('hol_hours').value);
   if (!holiday_date || !name || !Number.isFinite(hours)) return;
   try {
-    const r = await fetch('/api/holidays', {
+    const r = await apiFetch('/api/holidays', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ holiday_date, name, hours }),
@@ -595,7 +619,7 @@ async function loadTeamOff() {
   const tbody = qs('tbodyTeamOff');
   if (!tbody) return;
   try {
-    const r = await fetch('/api/team-off');
+    const r = await apiFetch('/api/team-off');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
@@ -633,7 +657,7 @@ qs('formTeamOff')?.addEventListener('submit', async (e) => {
   const notes = qs('toff_notes').value.trim();
   if (!entry_date || !Number.isFinite(hours)) return;
   try {
-    const r = await fetch('/api/team-off', {
+    const r = await apiFetch('/api/team-off', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ entry_date, hours, notes }),
@@ -655,7 +679,7 @@ async function loadPtoEntries() {
   const tbody = qs('tbodyPto');
   if (!tbody) return;
   try {
-    const r = await fetch('/api/pto');
+    const r = await apiFetch('/api/pto');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       tbody.innerHTML = `<tr><td colspan="5" class="muted">Failed to load.</td></tr>`;
@@ -669,21 +693,27 @@ async function loadPtoEntries() {
 
 function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
+  const isDev = window.CURRENT_USER?.role === 'dev';
+  const currentEmail = (window.CURRENT_USER?.email || '').toLowerCase();
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="5" class="muted">No PTO entries defined.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
-    .map(
-      (r) => `
+    .map((r) => {
+      const isOwn = !isDev || (r.user_upn || '').toLowerCase() === currentEmail;
+      const delBtn = isOwn
+        ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
+        : '';
+      return `
       <tr>
         <td>${escapeHtml(r.user_name || r.user_upn || '')}</td>
         <td>${escapeHtml(r.entry_date)}</td>
         <td>${fmtHours(r.hours)}</td>
         <td>${escapeHtml(r.notes || '')}</td>
-        <td><button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button></td>
-      </tr>`,
-    )
+        <td>${delBtn}</td>
+      </tr>`;
+    })
     .join('');
 }
 
@@ -703,7 +733,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   const user_name = match?.name || typed;
   const user_upn = match?.upn || typed;
   try {
-    const r = await fetch('/api/pto', {
+    const r = await apiFetch('/api/pto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_name, user_upn, entry_date, hours, notes }),
@@ -713,7 +743,16 @@ qs('formPto')?.addEventListener('submit', async (e) => {
       alert(`Error: ${j.error || r.status}`);
       return;
     }
+    const receiptMsg = j.pdfEmailSent ? ' PDF receipt emailed to you.' : '';
     qs('formPto').reset();
+    if (window.CURRENT_USER?.role === 'dev') {
+      const ptoUser = qs('pto_user');
+      if (ptoUser) {
+        ptoUser.value = window.CURRENT_USER.name || window.CURRENT_USER.email;
+        ptoUser.readOnly = true;
+      }
+    }
+    if (receiptMsg) alert(`PTO entry saved.${receiptMsg}`);
     await loadPtoEntries();
   } catch (err) {
     alert(`Error: ${err.message}`);
@@ -733,7 +772,7 @@ document.addEventListener('click', async (e) => {
   else if (type === 'pto') url = `/api/pto/${id}`;
   else return;
   try {
-    const r = await fetch(url, { method: 'DELETE' });
+    const r = await apiFetch(url, { method: 'DELETE' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       alert(`Error: ${j.error || r.status}`);
@@ -767,7 +806,7 @@ async function loadMetrics(rows) {
   const p = new URLSearchParams({ from, to });
   if (assignedTo) p.set('assignedTo', assignedTo);
   try {
-    const r = await fetch(`/api/hours/metrics?${p.toString()}`);
+    const r = await apiFetch(`/api/hours/metrics?${p.toString()}`);
     const m = await r.json().catch(() => ({}));
     if (!r.ok || !m.ok) {
       resetMetricCards();
@@ -842,9 +881,68 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   });
 });
 
+// -------- Role UI --------
+function setRoleUI(role) {
+  const isDev = role === 'dev';
+  const isManager = role === 'manager';
+
+  // Notify panel: hidden for dev role
+  const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
+  if (notifyPanel) notifyPanel.hidden = isDev;
+
+  if (isManager) {
+    // Hide all write forms and delete actions for manager (view-only)
+    const formHoliday = qs('formHoliday');
+    if (formHoliday) formHoliday.hidden = true;
+    const formTeamOff = qs('formTeamOff');
+    if (formTeamOff) formTeamOff.hidden = true;
+    const formPto = qs('formPto');
+    if (formPto) formPto.hidden = true;
+    const btnNotify = qs('btnNotify');
+    if (btnNotify) btnNotify.hidden = true;
+  }
+}
+
 (async function boot() {
+  // Auth gate: verify session before rendering the app
+  const t = token();
+  if (!t) {
+    window.location.replace('/login.html');
+    return;
+  }
+
+  let me;
+  try {
+    const meRes = await fetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${t}` },
+    });
+    if (!meRes.ok) {
+      localStorage.removeItem('tfsHoursToken');
+      window.location.replace('/login.html');
+      return;
+    }
+    me = await meRes.json();
+    if (!me.ok) {
+      localStorage.removeItem('tfsHoursToken');
+      window.location.replace('/login.html');
+      return;
+    }
+  } catch {
+    window.location.replace('/login.html');
+    return;
+  }
+
+  window.CURRENT_USER = { email: me.email, name: me.name, role: me.role };
+
+  // Populate user chip in header
+  const chip = qs('userChip');
+  const chipName = qs('userChipName');
+  if (chip) chip.hidden = false;
+  if (chipName) chipName.textContent = me.name || me.email;
+
   await loadConfig();
   setTzLabels();
+  setRoleUI(me.role);
 
   // Pre-fill manager email from server config
   if (APP_CFG?.notifyManagerEmail) {
@@ -865,6 +963,16 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
   await loadUsers();
   await loadReport();
 })();
+
+qs('btnLogout')?.addEventListener('click', async () => {
+  try {
+    await apiFetch('/api/auth/logout', { method: 'POST' });
+  } catch {
+    /* ignore */
+  }
+  localStorage.removeItem('tfsHoursToken');
+  window.location.replace('/login.html');
+});
 
 // -------- Notify preview --------
 function renderNotifyPreview(rows, threshold) {
@@ -914,7 +1022,7 @@ qs('btnNotifyPreview')?.addEventListener('click', async () => {
 
   try {
     const p = new URLSearchParams({ from, to, threshold });
-    const r = await fetch(`/api/notifications/hours-preview?${p}`);
+    const r = await apiFetch(`/api/notifications/hours-preview?${p}`);
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       statusEl.textContent = `Error: ${j.error || `HTTP ${r.status}`}`;
@@ -948,7 +1056,7 @@ qs('btnNotify')?.addEventListener('click', async () => {
   qs('btnNotify').disabled = true;
 
   try {
-    const r = await fetch('/api/notifications/missing-hours', {
+    const r = await apiFetch('/api/notifications/missing-hours', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
