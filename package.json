@@ -10,6 +10,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "nodemailer": "^8.0.5",
+    "pdfkit": "^0.18.0",
     "pg": "^8.12.0"
   }
 }
