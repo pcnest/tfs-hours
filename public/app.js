@@ -575,6 +575,8 @@ async function loadHolidays() {
 
 function renderHolidays(rows) {
   const tbody = qs('tbodyHolidays');
+  const isPrivileged =
+    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="4" class="muted">No holidays defined.</td></tr>`;
     return;
@@ -586,7 +588,7 @@ function renderHolidays(rows) {
         <td>${escapeHtml(r.holiday_date)}</td>
         <td>${escapeHtml(r.name || '')}</td>
         <td>${fmtHours(r.hours)}</td>
-        <td><button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button></td>
+        <td>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button>` : ''}</td>
       </tr>`,
     )
     .join('');
@@ -635,6 +637,8 @@ async function loadTeamOff() {
 
 function renderTeamOff(rows) {
   const tbody = qs('tbodyTeamOff');
+  const isPrivileged =
+    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="4" class="muted">No team off days defined.</td></tr>`;
     return;
@@ -646,7 +650,7 @@ function renderTeamOff(rows) {
         <td>${escapeHtml(r.entry_date)}</td>
         <td>${fmtHours(r.hours)}</td>
         <td>${escapeHtml(r.notes || '')}</td>
-        <td><button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button></td>
+        <td>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button>` : ''}</td>
       </tr>`,
     )
     .join('');
