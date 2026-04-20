@@ -892,6 +892,10 @@ function setRoleUI(role) {
   const btnExport = qs('btnExport');
   if (btnExport) btnExport.hidden = !isPrivileged;
 
+  // Non-privileged: hide Assigned To filter (report is always own data)
+  const assignedToWrap = qs('assignedTo')?.closest('div');
+  if (assignedToWrap) assignedToWrap.hidden = !isPrivileged;
+
   // Non-privileged: hide Work/Federal Holidays and Team Off sections entirely
   if (!isPrivileged) {
     const holidaySection = qs('formHoliday')?.closest('section');
@@ -935,12 +939,20 @@ function setRoleUI(role) {
   // Populate user chip in header
   const chip = qs('userChip');
   const chipName = qs('userChipName');
+  const chipRole = qs('userChipRole');
   if (chip) chip.hidden = false;
   if (chipName) chipName.textContent = me.name || me.email;
+  if (chipRole) chipRole.textContent = me.role;
 
   await loadConfig();
   setTzLabels();
   setRoleUI(me.role);
+
+  // Non-privileged: lock Assigned To filter to logged-in user
+  if (me.role !== 'admin' && me.role !== 'pm') {
+    const assignedToEl = qs('assignedTo');
+    if (assignedToEl) assignedToEl.value = me.name || me.email;
+  }
 
   // Pre-fill manager email from server config
   if (APP_CFG?.notifyManagerEmail) {

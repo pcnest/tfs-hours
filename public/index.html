@@ -426,6 +426,19 @@
       color: var(--ink);
     }
 
+    .role-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--stroke);
+      background: var(--bg);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+    }
+
     /* ---- Tabs ---- */
 
     /* ---- Notify preview table ---- */
@@ -721,6 +734,7 @@
         </div>
         <div id="userChip" class="user-chip" hidden>
           <span id="userChipName"></span>
+          <span id="userChipRole" class="role-badge"></span>
           <button type="button" id="btnLogout" class="ghost" style="font-size:12px;padding:6px 14px;">Logout</button>
         </div>
       </div>
