@@ -25,6 +25,12 @@
       box-sizing: border-box;
     }
 
+    /* Prevent CSS display properties (e.g. display:grid on .field) from
+       overriding the [hidden] attribute, which must always win. */
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       padding: 28px;

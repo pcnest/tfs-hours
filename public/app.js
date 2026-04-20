@@ -787,6 +787,10 @@ qs('formPto')?.addEventListener('submit', async (e) => {
 qs('btnPtoView')?.addEventListener('click', () => {
   const user = qs('pto_user').value.trim();
   loadPtoEntries(user);
+  // Clear the input after filtering so the datalist shows all users next time
+  // (browser filters datalist options to match current input text, so we
+  // reset it here to avoid it appearing to only contain the selected user).
+  qs('pto_user').value = '';
 });
 
 // -------- Delete delegation (all three tables) --------
