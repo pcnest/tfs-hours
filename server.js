@@ -354,7 +354,7 @@ async function requireAuth(req, res, next) {
 }
 
 function requireManagerOrAbove(req, res, next) {
-  if (req.userRole !== 'admin' && req.userRole !== 'manager')
+  if (req.userRole !== 'admin' && req.userRole !== 'pm')
     return res.status(403).json({ ok: false, error: 'forbidden' });
   next();
 }

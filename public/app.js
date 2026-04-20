@@ -693,16 +693,15 @@ async function loadPtoEntries() {
 
 function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
-  const isDev = window.CURRENT_USER?.role === 'dev';
-  const currentEmail = (window.CURRENT_USER?.email || '').toLowerCase();
+  const isPrivileged =
+    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="5" class="muted">No PTO entries defined.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
     .map((r) => {
-      const isOwn = !isDev || (r.user_upn || '').toLowerCase() === currentEmail;
-      const delBtn = isOwn
+      const delBtn = isPrivileged
         ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
         : '';
       return `
@@ -883,23 +882,22 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
 
 // -------- Role UI --------
 function setRoleUI(role) {
-  const isDev = role === 'dev';
-  const isManager = role === 'manager';
+  const isPrivileged = role === 'admin' || role === 'pm';
 
-  // Notify panel: hidden for dev role
+  // Non-privileged: hide Send Missing Hours Notifications panel
   const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
-  if (notifyPanel) notifyPanel.hidden = isDev;
+  if (notifyPanel) notifyPanel.hidden = !isPrivileged;
 
-  if (isManager) {
-    // Hide all write forms and delete actions for manager (view-only)
-    const formHoliday = qs('formHoliday');
-    if (formHoliday) formHoliday.hidden = true;
-    const formTeamOff = qs('formTeamOff');
-    if (formTeamOff) formTeamOff.hidden = true;
-    const formPto = qs('formPto');
-    if (formPto) formPto.hidden = true;
-    const btnNotify = qs('btnNotify');
-    if (btnNotify) btnNotify.hidden = true;
+  // Non-privileged: hide Export CSV button
+  const btnExport = qs('btnExport');
+  if (btnExport) btnExport.hidden = !isPrivileged;
+
+  // Non-privileged: hide Work/Federal Holidays and Team Off sections entirely
+  if (!isPrivileged) {
+    const holidaySection = qs('formHoliday')?.closest('section');
+    if (holidaySection) holidaySection.hidden = true;
+    const teamOffSection = qs('formTeamOff')?.closest('section');
+    if (teamOffSection) teamOffSection.hidden = true;
   }
 }
 
