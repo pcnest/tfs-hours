@@ -896,12 +896,12 @@ function setRoleUI(role) {
   const assignedToWrap = qs('assignedTo')?.closest('div');
   if (assignedToWrap) assignedToWrap.hidden = !isPrivileged;
 
-  // Non-privileged: hide Work/Federal Holidays and Team Off sections entirely
+  // Non-privileged: hide add forms in Work/Federal Holidays and Team Off (tables remain visible)
   if (!isPrivileged) {
-    const holidaySection = qs('formHoliday')?.closest('section');
-    if (holidaySection) holidaySection.hidden = true;
-    const teamOffSection = qs('formTeamOff')?.closest('section');
-    if (teamOffSection) teamOffSection.hidden = true;
+    const formHoliday = qs('formHoliday');
+    if (formHoliday) formHoliday.hidden = true;
+    const formTeamOff = qs('formTeamOff');
+    if (formTeamOff) formTeamOff.hidden = true;
   }
 }
 
