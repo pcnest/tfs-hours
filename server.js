@@ -1358,39 +1358,27 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
     ptoR.rows.map((r) => [r.name_key, Number(r.pto_hours)]),
   );
 
+  // Sum actual_hours for each distinct (task, changed_date) snapshot within the
+  // range — identical to what /api/hours/entries returns and what the stat cards
+  // sum via loadMetrics(), so the preview table values match the UI cards exactly.
   const loggedR = await pool.query(
-    `WITH snaps AS (
+    `SELECT
+       LOWER(TRIM(task_assigned_to)) AS name_key,
+       SUM(h)                        AS logged_hours
+     FROM (
        SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
-         s.task_id, s.snapshot_at,
-         COALESCE(s.task_changed_date, s.snapshot_at) AS t,
          s.task_assigned_to,
          COALESCE(s.task_actual_hours, 0) AS h
        FROM public.tfs_task_hours_snapshots s
-       ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
-     ),
-     prior AS (
-       SELECT DISTINCT ON (task_id) task_id, snapshot_at, t, h
-       FROM snaps WHERE t < $1::timestamptz
-       ORDER BY task_id, t DESC, snapshot_at DESC
-     ),
-     inrange AS (
-       SELECT task_id, snapshot_at, t, task_assigned_to, h
-       FROM snaps WHERE t >= $1::timestamptz AND t < $2::timestamptz
-     ),
-     combined AS (
-       SELECT task_id, snapshot_at, t, NULL::text AS task_assigned_to, h, TRUE  AS is_prior FROM prior
-       UNION ALL
-       SELECT task_id, snapshot_at, t, task_assigned_to,               h, FALSE AS is_prior FROM inrange
-     ),
-     w AS (
-       SELECT *, LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
-       FROM combined
-     )
-     SELECT
-       LOWER(TRIM(task_assigned_to))               AS name_key,
-       GREATEST(SUM(h - COALESCE(prev_h, 0)), 0)  AS logged_hours
-     FROM w
-     WHERE is_prior = FALSE AND task_assigned_to IS NOT NULL
+       WHERE COALESCE(s.task_changed_date, s.snapshot_at) >= $1::timestamptz
+         AND COALESCE(s.task_changed_date, s.snapshot_at) < $2::timestamptz
+         AND s.task_assigned_to IS NOT NULL
+       ORDER BY s.task_id,
+                COALESCE(s.task_changed_date, s.snapshot_at),
+                s.snapshot_at DESC,
+                s.run_id DESC
+     ) sub
+     WHERE h > 0
      GROUP BY 1`,
     [fromUtc.toISOString(), toExclusiveUtc.toISOString()],
   );
