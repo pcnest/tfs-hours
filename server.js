@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
@@ -23,6 +24,8 @@ const BREVO_SMTP_KEY = process.env.BREVO_SMTP_KEY || '';
 const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
 const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
 const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
+// Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
+const PTO_APPROVAL_ENABLED = process.env.PTO_APPROVAL_ENABLED !== 'false';
 
 function createMailTransporter() {
   return nodemailer.createTransport({
@@ -1642,8 +1645,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       .status(400)
       .json({ ok: false, error: 'hours must be between 0.5 and 24' });
 
-  // admin PTOs are auto-approved (no approval chain)
-  const initialStatus = req.userRole === 'admin' ? 'approved' : 'pending';
+  // admin PTOs are auto-approved; workflow can also be disabled globally via PTO_APPROVAL_ENABLED=false
+  const initialStatus =
+    req.userRole === 'admin' || !PTO_APPROVAL_ENABLED ? 'approved' : 'pending';
   const filerRole = req.userRole;
 
   try {
@@ -1682,20 +1686,32 @@ app.post('/api/pto', requireAuth, async (req, res) => {
           );
           if (approverEmails.length) {
             const transporter = createMailTransporter();
+            const _fmtEntryDate = (() => {
+              const d = new Date(entry_date + 'T00:00:00');
+              const day = String(d.getDate()).padStart(2, '0');
+              const month = d.toLocaleDateString('en-US', { month: 'long' });
+              const year = d.getFullYear();
+              const weekday = d.toLocaleDateString('en-US', {
+                weekday: 'long',
+              });
+              return `${day} ${month} ${year}, ${weekday}`;
+            })();
             const info = await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: approverEmails.join(', '),
               cc: req.userEmail,
-              subject: `PTO Approval Needed \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
-              html: `<p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a PTO request and it needs your approval.</p>
-<table border="0" cellpadding="6" style="font-family:sans-serif;font-size:13px">
-  <tr><td><strong>Date</strong></td><td>${escapeEmailHtml(entry_date)}</td></tr>
-  <tr><td><strong>Hours</strong></td><td>${fmtH(hours)}</td></tr>
-  <tr><td><strong>Leave Type</strong></td><td>${escapeEmailHtml(leave_type)}</td></tr>
-  <tr><td><strong>Notes</strong></td><td>${escapeEmailHtml(notes || '—')}</td></tr>
-</table>
-<p>Please log in to the TFS Hours app to approve or deny this request.</p>`,
-              text: `PTO approval needed for ${user_name || user_upn}: ${entry_date}, ${fmtH(hours)}h, ${leave_type}${notes ? ', ' + notes : ''}.`,
+              subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${entry_date}`,
+              html: `<p>Hi @Team,</p>
+<p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
+  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
+</p>
+<p>Please see attached Leave Request form for reference.</p>
+<p>Thank you for your review.</p>`,
+              text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see attached Leave Request form for reference.\n\nThank you for your review.`,
             });
             // Store message-id for reply threading
             const msgId = info.messageId || null;
@@ -1788,6 +1804,10 @@ app.patch(
   requireAuth,
   requireLeadOrPm,
   async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
     const id = normInt(req.params.id);
     if (!id || id < 1)
       return res.status(400).json({ ok: false, error: 'invalid id' });
@@ -1928,6 +1948,10 @@ app.patch(
   requireAuth,
   requireLeadOrPm,
   async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
     const id = normInt(req.params.id);
     if (!id || id < 1)
       return res.status(400).json({ ok: false, error: 'invalid id' });
@@ -2057,43 +2081,103 @@ function generatePtoPdf({
   submittedAt,
 }) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'LETTER', margin: 60 });
+    const margin = 60;
+    const doc = new PDFDocument({ size: 'LETTER', margin });
     const chunks = [];
     doc.on('data', (ch) => chunks.push(ch));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
+
+    const pageWidth = doc.page.width;
+
+    // --- Logo (optional) ---
+    const logoPath = path.join(__dirname, 'public', 'company-logo.png');
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, { fit: [180, 90], align: 'center' });
+      doc.moveDown(1);
+    } else {
+      doc.moveDown(0.5);
+    }
+
+    // --- Title ---
     doc
-      .fontSize(22)
+      .fontSize(13)
       .font('Helvetica-Bold')
-      .fillColor('#1f2b2c')
-      .text('TFS Hours — PTO Receipt', { align: 'center' });
-    doc.moveDown(0.4);
-    doc
-      .fontSize(11)
-      .font('Helvetica')
-      .fillColor('#5c6a6b')
-      .text('This document confirms a paid time-off request.', {
-        align: 'center',
-      });
-    doc.moveDown(1.2);
+      .fillColor('#000000')
+      .text('APPLICATION FOR LEAVE OF ABSENCE', { align: 'center' });
+    doc.moveDown(1.8);
+
+    // --- Date formatters ---
+    function fmtDate(ds) {
+      const d = new Date(ds + 'T00:00:00');
+      if (isNaN(d)) return String(ds);
+      return (
+        d.toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        }) + ` (${REPORT_TZ_LABEL})`
+      );
+    }
+    function fmtSubmitted(s) {
+      const d = new Date(s);
+      if (isNaN(d)) return String(s);
+      return (
+        d.toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        }) + ` (${REPORT_TZ_LABEL})`
+      );
+    }
+
+    // --- Days calculation ---
+    const rawDays = Number(hours) / 8;
+    const daysStr = Number.isInteger(rawDays)
+      ? String(rawDays)
+      : rawDays.toFixed(1);
+
+    // --- Fields ---
     const fields = [
-      ['Employee', userName],
-      ['PTO Date', entryDate],
-      ['Hours', String(hours)],
+      ['Employee Name', userName || '—'],
+      ['Date Requested', fmtSubmitted(submittedAt)],
+      ['Date of Leave(s)', fmtDate(entryDate)],
       ['Leave Type', leaveType || '—'],
-      ['Notes', notes || '—'],
-      ['Submitted', submittedAt],
-      ['System', 'TFS Hours Report'],
+      ['Total Number of Days Applied', daysStr],
+      ['Reason for Leave', notes || '—'],
     ];
+
+    doc.fontSize(11).fillColor('#000000');
     for (const [label, value] of fields) {
       doc
-        .fontSize(11)
         .font('Helvetica-Bold')
-        .fillColor('#1f2b2c')
-        .text(`${label}:`, { continued: true });
-      doc.font('Helvetica').text(`  ${value}`);
+        .text(`${label}: `, { continued: true })
+        .font('Helvetica')
+        .text(value);
       doc.moveDown(0.4);
     }
+
+    doc.moveDown(1.8);
+
+    // --- Dashed divider ---
+    doc
+      .moveTo(margin, doc.y)
+      .lineTo(pageWidth - margin, doc.y)
+      .strokeColor('#888888')
+      .lineWidth(0.5)
+      .dash(4, { space: 3 })
+      .stroke()
+      .undash();
+
+    doc.moveDown(1);
+
+    // --- Signature line ---
+    doc
+      .fontSize(11)
+      .font('Helvetica-Bold')
+      .fillColor('#000000')
+      .text('Checked and approved by:');
+
     doc.end();
   });
 }
