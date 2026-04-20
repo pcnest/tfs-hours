@@ -520,10 +520,14 @@ function switchTab(name) {
     loadHolidays();
     loadTeamOff();
     loadPtoEntries();
-    // Non-privileged: pre-fill PTO user field with logged-in user
+    // Apply role-based visibility each time the tab opens
     const isPrivileged =
       window.CURRENT_USER?.role === 'admin' ||
       window.CURRENT_USER?.role === 'pm';
+    const ptoUserWrap = qs('pto_user_wrap');
+    if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
+    const ptoViewWrap = qs('pto_view_wrap');
+    if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
       if (ptoUser)
@@ -648,8 +652,8 @@ function renderTeamOff(rows) {
       (r) => `
       <tr>
         <td>${escapeHtml(r.entry_date)}</td>
-        <td>${fmtHours(r.hours)}</td>
         <td>${escapeHtml(r.notes || '')}</td>
+        <td>${fmtHours(r.hours)}</td>
         <td>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button>` : ''}</td>
       </tr>`,
     )
