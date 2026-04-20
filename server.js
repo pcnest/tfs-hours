@@ -1444,7 +1444,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   }
   try {
     const r = await pool.query(
-      `SELECT id, user_upn, user_name, entry_date::text, hours, notes, created_at
+      `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at
        FROM public.pto_entries
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY entry_date ASC, user_name ASC`,
@@ -1456,18 +1456,32 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   }
 });
 
+const VALID_LEAVE_TYPES = new Set([
+  'Personal',
+  'Emergency',
+  'Sick',
+  'Maternity',
+  'Bereavement',
+]);
+
 app.post('/api/pto', requireAuth, async (req, res) => {
   const {
     user_name: unRaw,
     user_upn: uupnRaw,
     entry_date: edRaw,
     hours: hoursRaw,
+    leave_type: ltRaw,
     notes: notesRaw,
   } = req.body || {};
   let user_name = normText(unRaw);
   let user_upn = normText(uupnRaw) || user_name;
   const entry_date = validateDateStr(edRaw);
   const hours = validateHours(hoursRaw ?? 8);
+  const leave_type_raw = normText(ltRaw);
+  const leave_type =
+    leave_type_raw && VALID_LEAVE_TYPES.has(leave_type_raw)
+      ? leave_type_raw
+      : 'Personal';
   const notes = normText(notesRaw);
   // Dev role: can only file PTO for themselves
   if (req.userRole === 'dev') {
@@ -1488,10 +1502,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       .json({ ok: false, error: 'hours must be between 0.5 and 24' });
   try {
     const r = await pool.query(
-      `INSERT INTO public.pto_entries (user_upn, user_name, entry_date, hours, notes)
-       VALUES ($1, $2, $3::date, $4, $5)
-       RETURNING id, user_upn, user_name, entry_date::text, hours, notes`,
-      [user_upn, user_name, entry_date, hours, notes],
+      `INSERT INTO public.pto_entries (user_upn, user_name, entry_date, hours, leave_type, notes)
+       VALUES ($1, $2, $3::date, $4, $5, $6)
+       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes`,
+      [user_upn, user_name, entry_date, hours, leave_type, notes],
     );
     // Feature 3: Generate PDF receipt and email
     let pdfEmailSent = false;
@@ -1502,6 +1516,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
           userName: user_name || user_upn,
           entryDate: entry_date,
           hours,
+          leaveType: leave_type,
           notes: notes || '',
           submittedAt,
         });
@@ -1561,7 +1576,14 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
 });
 
 // ---------- PTO PDF receipt ----------
-function generatePtoPdf({ userName, entryDate, hours, notes, submittedAt }) {
+function generatePtoPdf({
+  userName,
+  entryDate,
+  hours,
+  leaveType,
+  notes,
+  submittedAt,
+}) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 60 });
     const chunks = [];
@@ -1586,6 +1608,7 @@ function generatePtoPdf({ userName, entryDate, hours, notes, submittedAt }) {
       ['Employee', userName],
       ['PTO Date', entryDate],
       ['Hours', String(hours)],
+      ['Leave Type', leaveType || '—'],
       ['Notes', notes || '—'],
       ['Submitted', submittedAt],
       ['System', 'TFS Hours Report'],

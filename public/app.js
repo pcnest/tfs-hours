@@ -520,13 +520,15 @@ function switchTab(name) {
     loadHolidays();
     loadTeamOff();
     loadPtoEntries();
-    // Dev: pre-fill PTO user with own name and lock it
-    if (window.CURRENT_USER?.role === 'dev') {
+    // Non-privileged: pre-fill PTO user field with logged-in user
+    const isPrivileged =
+      window.CURRENT_USER?.role === 'admin' ||
+      window.CURRENT_USER?.role === 'pm';
+    if (!isPrivileged) {
       const ptoUser = qs('pto_user');
-      if (ptoUser) {
-        ptoUser.value = window.CURRENT_USER.name || window.CURRENT_USER.email;
-        ptoUser.readOnly = true;
-      }
+      if (ptoUser)
+        ptoUser.value =
+          window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
     }
   }
 }
@@ -675,19 +677,23 @@ qs('formTeamOff')?.addEventListener('submit', async (e) => {
 });
 
 // -------- Individual PTO --------
-async function loadPtoEntries() {
+async function loadPtoEntries(userFilter = '') {
   const tbody = qs('tbodyPto');
   if (!tbody) return;
   try {
-    const r = await apiFetch('/api/pto');
+    const p = new URLSearchParams();
+    if (userFilter) p.set('assignedTo', userFilter);
+    const r = await apiFetch(
+      `/api/pto${p.toString() ? '?' + p.toString() : ''}`,
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="5" class="muted">Failed to load.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="muted">Failed to load.</td></tr>`;
       return;
     }
     renderPtoEntries(j.rows);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">Error loading.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">Error loading.</td></tr>`;
   }
 }
 
@@ -696,7 +702,7 @@ function renderPtoEntries(rows) {
   const isPrivileged =
     window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">No PTO entries defined.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">No PTO entries defined.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
@@ -709,6 +715,7 @@ function renderPtoEntries(rows) {
         <td>${escapeHtml(r.user_name || r.user_upn || '')}</td>
         <td>${escapeHtml(r.entry_date)}</td>
         <td>${fmtHours(r.hours)}</td>
+        <td>${escapeHtml(r.leave_type || '')}</td>
         <td>${escapeHtml(r.notes || '')}</td>
         <td>${delBtn}</td>
       </tr>`;
@@ -718,9 +725,14 @@ function renderPtoEntries(rows) {
 
 qs('formPto')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const typed = qs('pto_user').value.trim();
+  const isPrivileged =
+    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
+  const typed = isPrivileged
+    ? qs('pto_user').value.trim()
+    : window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
   const entry_date = qs('pto_date').value;
   const hours = parseFloat(qs('pto_hours').value);
+  const leave_type = qs('pto_leave_type').value;
   const notes = qs('pto_notes').value.trim();
   if (!typed || !entry_date || !Number.isFinite(hours)) return;
   const match = USERS_CACHE.find(
@@ -735,7 +747,14 @@ qs('formPto')?.addEventListener('submit', async (e) => {
     const r = await apiFetch('/api/pto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_name, user_upn, entry_date, hours, notes }),
+      body: JSON.stringify({
+        user_name,
+        user_upn,
+        entry_date,
+        hours,
+        leave_type,
+        notes,
+      }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
@@ -744,18 +763,22 @@ qs('formPto')?.addEventListener('submit', async (e) => {
     }
     const receiptMsg = j.pdfEmailSent ? ' PDF receipt emailed to you.' : '';
     qs('formPto').reset();
-    if (window.CURRENT_USER?.role === 'dev') {
+    if (!isPrivileged) {
       const ptoUser = qs('pto_user');
-      if (ptoUser) {
-        ptoUser.value = window.CURRENT_USER.name || window.CURRENT_USER.email;
-        ptoUser.readOnly = true;
-      }
+      if (ptoUser)
+        ptoUser.value =
+          window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
     }
     if (receiptMsg) alert(`PTO entry saved.${receiptMsg}`);
     await loadPtoEntries();
   } catch (err) {
     alert(`Error: ${err.message}`);
   }
+});
+
+qs('btnPtoView')?.addEventListener('click', () => {
+  const user = qs('pto_user').value.trim();
+  loadPtoEntries(user);
 });
 
 // -------- Delete delegation (all three tables) --------
@@ -903,6 +926,12 @@ function setRoleUI(role) {
     const formTeamOff = qs('formTeamOff');
     if (formTeamOff) formTeamOff.hidden = true;
   }
+
+  // Non-privileged: hide PTO User field and View button (own data only)
+  const ptoUserWrap = qs('pto_user_wrap');
+  if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
+  const ptoViewWrap = qs('pto_view_wrap');
+  if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
 }
 
 (async function boot() {
