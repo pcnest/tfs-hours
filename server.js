@@ -290,6 +290,7 @@ async function hashPassword(pw) {
 async function verifyPassword(pw, encoded) {
   const s = String(encoded || '');
   if (s.startsWith('scrypt:')) {
+    // tfs-hours native format: scrypt:saltB64:hashB64
     const parts = s.split(':');
     if (parts.length !== 3) return false;
     try {
@@ -307,6 +308,18 @@ async function verifyPassword(pw, encoded) {
       return crypto.timingSafeEqual(expected, derived);
     } catch {
       return false;
+    }
+  }
+  // tfs-daily-updates shared format: saltB64:hashB64 (scrypt, no prefix)
+  const parts = s.split(':');
+  if (parts.length === 2) {
+    try {
+      const salt = Buffer.from(parts[0], 'base64');
+      const expected = Buffer.from(parts[1], 'base64');
+      const calc = crypto.scryptSync(pw, salt, 32);
+      if (crypto.timingSafeEqual(calc, expected)) return true;
+    } catch {
+      // fall through to legacy
     }
   }
   return verifyLegacyPassword(pw, s);
