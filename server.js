@@ -1923,7 +1923,7 @@ app.patch(
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
                   subject: `PTO Approved \u2013 ${displayName} \u2013 ${entryDate}`,
-                  html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+                  html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} fully approved by ${req.userName || req.userEmail}.`,
                   headers: replyHeaders,
