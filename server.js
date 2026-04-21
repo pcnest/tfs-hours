@@ -1669,66 +1669,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     );
     const savedRow = r.rows[0];
 
-    // Send approval notification email and PDF receipt (async, non-blocking to response)
+    // Send email (async, non-blocking to response):
+    //   - pending:  approval notification with PDF attached → to approvers, CC filer
+    //   - approved: auto-approve receipt with PDF attached  → to filer only
     let pdfEmailSent = false;
-    if (
-      BREVO_SMTP_USER &&
-      BREVO_SMTP_KEY &&
-      NOTIFY_FROM_EMAIL &&
-      initialStatus === 'pending'
-    ) {
-      (async () => {
-        try {
-          const approverEmails = await getApproverEmails(
-            filerRole,
-            req.userTeam,
-            req.userEmail,
-          );
-          if (approverEmails.length) {
-            const transporter = createMailTransporter();
-            const _fmtEntryDate = (() => {
-              const d = new Date(entry_date + 'T00:00:00');
-              const day = String(d.getDate()).padStart(2, '0');
-              const month = d.toLocaleDateString('en-US', { month: 'long' });
-              const year = d.getFullYear();
-              const weekday = d.toLocaleDateString('en-US', {
-                weekday: 'long',
-              });
-              return `${day} ${month} ${year}, ${weekday}`;
-            })();
-            const info = await transporter.sendMail({
-              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-              to: approverEmails.join(', '),
-              cc: req.userEmail,
-              subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${entry_date}`,
-              html: `<p>Hi @Team,</p>
-<p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
-<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
-  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
-  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
-  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
-  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
-</p>
-<p>Please see attached Leave Request form for reference.</p>
-<p>Thank you for your review.</p>`,
-              text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see attached Leave Request form for reference.\n\nThank you for your review.`,
-            });
-            // Store message-id for reply threading
-            const msgId = info.messageId || null;
-            if (msgId) {
-              await pool.query(
-                `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
-                [msgId, savedRow.id],
-              );
-            }
-          }
-        } catch (emailErr) {
-          console.error('PTO approval notification error:', emailErr);
-        }
-      })();
-    }
-
-    // PDF receipt to filer only
     if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
       (async () => {
         try {
@@ -1741,23 +1685,78 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             notes: notes || '',
             submittedAt,
           });
+          const pdfAttachment = {
+            filename: `pto_receipt_${entry_date}.pdf`,
+            content: pdfBuf,
+            contentType: 'application/pdf',
+          };
           const transporter = createMailTransporter();
-          await transporter.sendMail({
-            from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-            to: req.userEmail,
-            subject: `PTO Receipt \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
-            text: `PTO filed for ${user_name || user_upn}: ${entry_date}, ${hours}h${notes ? ', ' + notes : ''}.`,
-            attachments: [
-              {
-                filename: `pto_receipt_${entry_date}.pdf`,
-                content: pdfBuf,
-                contentType: 'application/pdf',
-              },
-            ],
-          });
-          pdfEmailSent = true;
-        } catch (pdfErr) {
-          console.error('PTO PDF email error:', pdfErr);
+          const _fmtEntryDate = (() => {
+            const d = new Date(entry_date + 'T00:00:00');
+            const day = String(d.getDate()).padStart(2, '0');
+            const month = d.toLocaleDateString('en-US', { month: 'long' });
+            const year = d.getFullYear();
+            const weekday = d.toLocaleDateString('en-US', { weekday: 'long' });
+            return `${day} ${month} ${year}, ${weekday}`;
+          })();
+
+          if (initialStatus === 'pending') {
+            // Approval notification with PDF → approvers + CC filer
+            const approverEmails = await getApproverEmails(
+              filerRole,
+              req.userTeam,
+              req.userEmail,
+            );
+            if (approverEmails.length) {
+              const info = await transporter.sendMail({
+                from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                to: approverEmails.join(', '),
+                cc: req.userEmail,
+                subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${entry_date}`,
+                html: `<p>Hi @Team,</p>
+<p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
+  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
+</p>
+<p>Please see the attached Leave Request form for reference.</p>
+<p>Thank you for your review.</p>`,
+                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
+                attachments: [pdfAttachment],
+              });
+              // Store message-id for reply threading
+              const msgId = info.messageId || null;
+              if (msgId) {
+                await pool.query(
+                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
+                  [msgId, savedRow.id],
+                );
+              }
+              pdfEmailSent = true;
+            }
+          } else {
+            // Auto-approved (admin or PTO_APPROVAL_ENABLED=false) → receipt to filer only
+            await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: req.userEmail,
+              subject: `PTO Approved \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
+              html: `<p>Hi ${escapeEmailHtml(user_name || user_upn)},</p>
+<p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
+</p>
+<p>Please see the attached Leave Request form for your records.</p>`,
+              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
+              attachments: [pdfAttachment],
+            });
+            pdfEmailSent = true;
+          }
+        } catch (emailErr) {
+          console.error('PTO email error:', emailErr);
         }
       })();
     }
@@ -2105,13 +2104,35 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
   const transporter = createMailTransporter();
   const fakeMessageId = '<test-preview@tfs-hours>';
 
-  // 1. Approval notification (what approvers receive when PTO is submitted)
+  // Generate PDF once — reused in email 1
+  let pdfBuf;
+  try {
+    pdfBuf = await generatePtoPdf({
+      userName: user_name,
+      entryDate: entry_date,
+      hours,
+      leaveType: leave_type,
+      notes,
+      submittedAt: new Date().toUTCString(),
+    });
+  } catch (e) {
+    return res
+      .status(500)
+      .json({ ok: false, error: `PDF generation failed: ${e.message}` });
+  }
+  const pdfAttachment = {
+    filename: `pto_receipt_${entry_date}.pdf`,
+    content: pdfBuf,
+    contentType: 'application/pdf',
+  };
+
+  // 1. Approval notification with PDF attached (what approvers receive when PTO is submitted; filer is CC'd)
   try {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
       subject: `[TEST] LEAVE REQUEST \u2013 ${user_name} \u2013 ${leave_type} Leave on ${entry_date}`,
-      html: `<p><em style="color:#888">[TEST \u2014 approval notification sent to approvers]</em></p>
+      html: `<p><em style="color:#888">[TEST \u2014 approval notification sent to approvers; filer is CC]</em></p>
 <p>Hi @Team,</p>
 <p><strong>${escapeEmailHtml(user_name)}</strong> has filed a Leave Request and it needs your approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
@@ -2120,41 +2141,37 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
 </p>
-<p>Please see attached Leave Request form for reference.</p>
+<p>Please see the attached Leave Request form for reference.</p>
 <p>Thank you for your review.</p>`,
       text: `[TEST] Hi @Team,\n\n${user_name} has filed a Leave Request.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason: ${notes}`,
+      attachments: [pdfAttachment],
     });
-    results.push('approval-notification: sent');
+    results.push('approval-notification (with PDF): sent');
   } catch (e) {
     results.push(`approval-notification: FAILED \u2014 ${e.message}`);
   }
 
-  // 2. PDF receipt (what the filer receives)
+  // 2. Auto-approve receipt (what filer gets when PTO_APPROVAL_ENABLED=false or admin files own PTO)
   try {
-    const pdfBuf = await generatePtoPdf({
-      userName: user_name,
-      entryDate: entry_date,
-      hours,
-      leaveType: leave_type,
-      notes,
-      submittedAt: new Date().toUTCString(),
-    });
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Receipt \u2013 ${user_name} \u2013 ${entry_date}`,
-      text: `[TEST \u2014 PDF receipt sent to filer]\n\nPTO filed for ${user_name}: ${entry_date}, ${hours}h, ${leave_type}.`,
-      attachments: [
-        {
-          filename: `pto_receipt_${entry_date}.pdf`,
-          content: pdfBuf,
-          contentType: 'application/pdf',
-        },
-      ],
+      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 auto-approve receipt sent to filer]</em></p>
+<p>Hi ${escapeEmailHtml(user_name)},</p>
+<p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
+</p>
+<p>Please see the attached Leave Request form for your records.</p>`,
+      text: `[TEST] Hi ${user_name},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes}`,
+      attachments: [pdfAttachment],
     });
-    results.push('pdf-receipt: sent');
+    results.push('auto-approve-receipt (with PDF): sent');
   } catch (e) {
-    results.push(`pdf-receipt: FAILED \u2014 ${e.message}`);
+    results.push(`auto-approve-receipt: FAILED \u2014 ${e.message}`);
   }
 
   // 3. Lead-approved notification (what PMs + filer receive after lead approves)
@@ -2233,7 +2250,9 @@ function generatePtoPdf({
     // --- Logo (optional) ---
     const logoPath = path.join(__dirname, 'public', 'company-logo.png');
     if (fs.existsSync(logoPath)) {
-      doc.image(logoPath, { fit: [180, 90], align: 'center' });
+      const logoW = 180;
+      const logoX = (pageWidth - logoW) / 2;
+      doc.image(logoPath, logoX, doc.y, { fit: [logoW, 90] });
       doc.moveDown(1);
     } else {
       doc.moveDown(0.5);
