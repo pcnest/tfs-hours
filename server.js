@@ -2071,6 +2071,146 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ---------- PTO email/PDF preview (admin only, remove after testing) ----------
+app.post('/api/pto/test-email', requireAuth, async (req, res) => {
+  if (req.userRole !== 'admin')
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY || !NOTIFY_FROM_EMAIL)
+    return res.status(503).json({ ok: false, error: 'email not configured' });
+
+  const user_name =
+    normText(req.body?.user_name) || req.userName || 'Test User';
+  const entry_date =
+    validateDateStr(req.body?.entry_date) ||
+    new Date().toISOString().slice(0, 10);
+  const hours = validateHours(req.body?.hours ?? 8) ?? 8;
+  const leave_type_raw = normText(req.body?.leave_type);
+  const leave_type =
+    leave_type_raw && VALID_LEAVE_TYPES.has(leave_type_raw)
+      ? leave_type_raw
+      : 'Personal';
+  const notes = normText(req.body?.notes) || 'Test leave notes.';
+  const dest = req.userEmail; // all test emails go only to the admin
+
+  const _fmtEntryDate = (() => {
+    const d = new Date(entry_date + 'T00:00:00');
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = d.toLocaleDateString('en-US', { month: 'long' });
+    const year = d.getFullYear();
+    const weekday = d.toLocaleDateString('en-US', { weekday: 'long' });
+    return `${day} ${month} ${year}, ${weekday}`;
+  })();
+
+  const results = [];
+  const transporter = createMailTransporter();
+  const fakeMessageId = '<test-preview@tfs-hours>';
+
+  // 1. Approval notification (what approvers receive when PTO is submitted)
+  try {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] LEAVE REQUEST \u2013 ${user_name} \u2013 ${leave_type} Leave on ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 approval notification sent to approvers]</em></p>
+<p>Hi @Team,</p>
+<p><strong>${escapeEmailHtml(user_name)}</strong> has filed a Leave Request and it needs your approval.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
+  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
+</p>
+<p>Please see attached Leave Request form for reference.</p>
+<p>Thank you for your review.</p>`,
+      text: `[TEST] Hi @Team,\n\n${user_name} has filed a Leave Request.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason: ${notes}`,
+    });
+    results.push('approval-notification: sent');
+  } catch (e) {
+    results.push(`approval-notification: FAILED \u2014 ${e.message}`);
+  }
+
+  // 2. PDF receipt (what the filer receives)
+  try {
+    const pdfBuf = await generatePtoPdf({
+      userName: user_name,
+      entryDate: entry_date,
+      hours,
+      leaveType: leave_type,
+      notes,
+      submittedAt: new Date().toUTCString(),
+    });
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] PTO Receipt \u2013 ${user_name} \u2013 ${entry_date}`,
+      text: `[TEST \u2014 PDF receipt sent to filer]\n\nPTO filed for ${user_name}: ${entry_date}, ${hours}h, ${leave_type}.`,
+      attachments: [
+        {
+          filename: `pto_receipt_${entry_date}.pdf`,
+          content: pdfBuf,
+          contentType: 'application/pdf',
+        },
+      ],
+    });
+    results.push('pdf-receipt: sent');
+  } catch (e) {
+    results.push(`pdf-receipt: FAILED \u2014 ${e.message}`);
+  }
+
+  // 3. Lead-approved notification (what PMs + filer receive after lead approves)
+  try {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] PTO Lead-Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 sent to PMs + filer after lead approves]</em></p>
+<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>approved by Test Lead</strong> (lead).</p>
+<p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} approved by lead. Awaiting PM final approval.`,
+      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
+    });
+    results.push('lead-approved-notification: sent');
+  } catch (e) {
+    results.push(`lead-approved-notification: FAILED \u2014 ${e.message}`);
+  }
+
+  // 4. Final PM approval notification (what filer + leads receive)
+  try {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 sent to filer + leads after PM gives final approval]</em></p>
+<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>fully approved</strong> by Test PM.</p>`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} fully approved by Test PM.`,
+      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
+    });
+    results.push('final-approval-notification: sent');
+  } catch (e) {
+    results.push(`final-approval-notification: FAILED \u2014 ${e.message}`);
+  }
+
+  // 5. Denial notification (what filer receives when denied)
+  try {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] PTO Denied \u2013 ${user_name} \u2013 ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 sent to filer on denial]</em></p>
+<p>Your PTO request for <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>denied</strong> by Test Lead.</p>
+<p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
+<p>You may resubmit a new PTO request if needed.</p>`,
+      text: `[TEST] Your PTO for ${entry_date} was denied. Reason: ${notes}`,
+      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
+    });
+    results.push('denial-notification: sent');
+  } catch (e) {
+    results.push(`denial-notification: FAILED \u2014 ${e.message}`);
+  }
+
+  res.json({ ok: true, sentTo: dest, results });
+});
+
 // ---------- PTO PDF receipt ----------
 function generatePtoPdf({
   userName,
