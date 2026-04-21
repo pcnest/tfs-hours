@@ -735,9 +735,88 @@ function renderPtoEntries(rows) {
     return;
   }
 
-  tbody.innerHTML = rows
-    .map((r) => {
-      // Delete: only for own pending entries (dev/qa) or privileged on pending entries
+  // Group rows: batch rows (shared batch_id) render as a single combined row.
+  // Preserve server order (entry_date ASC); batch rows will always be contiguous.
+  const items = [];
+  const batchMap = new Map();
+  for (const r of rows) {
+    if (r.batch_id) {
+      if (!batchMap.has(r.batch_id)) {
+        const group = [];
+        batchMap.set(r.batch_id, group);
+        items.push({ type: 'batch', batchId: r.batch_id, rows: group });
+      }
+      batchMap.get(r.batch_id).push(r);
+    } else {
+      items.push({ type: 'single', row: r });
+    }
+  }
+
+  tbody.innerHTML = items
+    .map((item) => {
+      if (item.type === 'batch') {
+        const br = item.rows;
+        const first = br[0];
+        const last = br[br.length - 1];
+        const totalHours = br.reduce((s, x) => s + Number(x.hours), 0);
+        const dateLabel =
+          first.entry_date === last.entry_date
+            ? escapeHtml(first.entry_date)
+            : `${escapeHtml(first.entry_date)} \u2013 ${escapeHtml(last.entry_date)}`;
+        const daysLabel = `${br.length} day${br.length !== 1 ? 's' : ''}`;
+
+        const filerUpn = (first.user_upn || '').toLowerCase();
+        let actionBtns = '';
+        if (
+          isLead &&
+          ['dev', 'qa'].includes(first.filer_role) &&
+          first.status === 'pending' &&
+          filerUpn !== myEmail
+        ) {
+          actionBtns =
+            `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>` +
+            `<button class="btn-deny"    data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
+        } else if (role === 'pm') {
+          const devQaReady =
+            ['dev', 'qa'].includes(first.filer_role) &&
+            first.status === 'lead_approved';
+          const leadReady =
+            first.filer_role === 'lead' && first.status === 'pending';
+          const pmReady =
+            first.filer_role === 'pm' &&
+            first.status === 'pending' &&
+            filerUpn !== myEmail;
+          if (devQaReady || leadReady || pmReady) {
+            actionBtns =
+              `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>` +
+              `<button class="btn-deny"    data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
+          }
+        }
+
+        const canDelete =
+          first.status === 'pending' && (isPrivileged || filerUpn === myEmail);
+        const delBtn = canDelete
+          ? `<button class="btn-del" data-batch-id="${item.batchId}" data-type="pto-batch">Delete</button>`
+          : '';
+
+        const denialTip = first.denial_note
+          ? ` title="${escapeHtml(first.denial_note)}"`
+          : '';
+
+        return `
+      <tr>
+        <td>${escapeHtml(first.user_name || first.user_upn || '')}</td>
+        <td>${dateLabel} <span class="muted" style="font-size:.85em">(${daysLabel})</span></td>
+        <td>${fmtHours(totalHours)}</td>
+        <td>${escapeHtml(first.leave_type || '')}</td>
+        <td>${escapeHtml(first.notes || '')}</td>
+        <td${denialTip}>${ptoBadge(first.status)}</td>
+        <td>${actionBtns}${delBtn}</td>
+      </tr>`;
+      }
+
+      // Single row
+      const r = item.row;
       const canDelete =
         r.status === 'pending' &&
         (isPrivileged || (r.user_upn || '').toLowerCase() === myEmail);
@@ -745,7 +824,6 @@ function renderPtoEntries(rows) {
         ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
         : '';
 
-      // Approve/Deny buttons
       let actionBtns = '';
       const filerUpn = (r.user_upn || '').toLowerCase();
       if (
@@ -791,14 +869,17 @@ function renderPtoEntries(rows) {
     .join('');
 }
 
-async function ptoAction(id, action) {
+async function ptoAction(id, batchId, action) {
   let note = null;
   if (action === 'deny') {
     note = window.prompt('Reason for denial (optional):') ?? '';
     if (note === null) return; // user cancelled
   }
+  const url = batchId
+    ? `/api/pto/batch/${batchId}/${action}`
+    : `/api/pto/${id}/${action}`;
   try {
-    const r = await apiFetch(`/api/pto/${id}/${action}`, {
+    const r = await apiFetch(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note }),
@@ -814,14 +895,15 @@ async function ptoAction(id, action) {
   }
 }
 
-// Delegated click for approve/deny buttons
+// Delegated click for approve/deny buttons (single and batch)
 document.addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-action="approve"],[data-action="deny"]');
   if (!btn) return;
-  const id = btn.dataset.id;
+  const id = btn.dataset.id || null;
+  const batchId = btn.dataset.batchId || null;
   const action = btn.dataset.action;
-  if (!id || !action) return;
-  await ptoAction(id, action);
+  if ((!id && !batchId) || !action) return;
+  await ptoAction(id, batchId, action);
 });
 
 qs('chkActionRequired')?.addEventListener('change', () => loadPtoEntries());
@@ -833,11 +915,17 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   const typed = isPrivileged
     ? qs('pto_user').value.trim()
     : window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
-  const entry_date = qs('pto_date').value;
+  const entry_date_from = qs('pto_date').value;
+  const entry_date_to_raw = qs('pto_date_to')?.value || '';
+  const entry_date_to =
+    entry_date_to_raw && entry_date_to_raw >= entry_date_from
+      ? entry_date_to_raw
+      : entry_date_from;
+  const isRange = entry_date_to !== entry_date_from;
   const hours = parseFloat(qs('pto_hours').value);
   const leave_type = qs('pto_leave_type').value;
   const notes = qs('pto_notes').value.trim();
-  if (!typed || !entry_date || !Number.isFinite(hours)) return;
+  if (!typed || !entry_date_from || !Number.isFinite(hours)) return;
   const match = USERS_CACHE.find(
     (u) =>
       u.name === typed ||
@@ -847,17 +935,28 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   const user_name = match?.name || typed;
   const user_upn = match?.upn || typed;
   try {
+    const body = isRange
+      ? {
+          user_name,
+          user_upn,
+          entry_date_from,
+          entry_date_to,
+          hours,
+          leave_type,
+          notes,
+        }
+      : {
+          user_name,
+          user_upn,
+          entry_date: entry_date_from,
+          hours,
+          leave_type,
+          notes,
+        };
     const r = await apiFetch('/api/pto', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_name,
-        user_upn,
-        entry_date,
-        hours,
-        leave_type,
-        notes,
-      }),
+      body: JSON.stringify(body),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
@@ -872,7 +971,11 @@ qs('formPto')?.addEventListener('submit', async (e) => {
         ptoUser.value =
           window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
     }
-    alert(`PTO submitted and pending approval.${receiptMsg}`);
+    const rangeMsg =
+      isRange && j.rows?.length
+        ? ` (${j.rows.length} working day${j.rows.length !== 1 ? 's' : ''})`
+        : '';
+    alert(`PTO submitted${rangeMsg} and pending approval.${receiptMsg}`);
     await loadPtoEntries();
   } catch (err) {
     alert(`Error: ${err.message}`);
@@ -890,13 +993,16 @@ document.addEventListener('click', async (e) => {
   const btn = e.target.closest('.btn-del');
   if (!btn) return;
   const id = btn.dataset.id;
+  const batchId = btn.dataset.batchId;
   const type = btn.dataset.type;
-  if (!id || !type) return;
+  if (!type) return;
   let url;
   if (type === 'holiday') url = `/api/holidays/${id}`;
   else if (type === 'team-off') url = `/api/team-off/${id}`;
   else if (type === 'pto') url = `/api/pto/${id}`;
+  else if (type === 'pto-batch') url = `/api/pto/batch/${batchId}`;
   else return;
+  if (!url || (!id && !batchId)) return;
   try {
     const r = await apiFetch(url, { method: 'DELETE' });
     const j = await r.json().catch(() => ({}));

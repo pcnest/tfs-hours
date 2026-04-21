@@ -1498,7 +1498,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   const SELECT = `
     SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at,
            status, filer_role, approved_by_lead, lead_actioned_at,
-           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note
+           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note, batch_id
     FROM public.pto_entries`;
 
   try {
@@ -1606,10 +1606,34 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   }
 });
 
+// Max working days allowed per date-range PTO submission
+const PTO_MAX_WORKING_DAYS = 15;
+
+/** Return an array of YYYY-MM-DD strings for each weekday (Mon–Fri) between fromStr and toStr (inclusive). */
+function weekdaysInRange(fromStr, toStr) {
+  const dates = [];
+  const cur = new Date(fromStr + 'T00:00:00');
+  const end = new Date(toStr + 'T00:00:00');
+  while (cur <= end) {
+    const dow = cur.getDay(); // 0=Sun, 6=Sat
+    if (dow !== 0 && dow !== 6) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, '0');
+      const d = String(cur.getDate()).padStart(2, '0');
+      dates.push(`${y}-${m}-${d}`);
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return dates;
+}
+
 app.post('/api/pto', requireAuth, async (req, res) => {
   const {
     user_name: unRaw,
     user_upn: uupnRaw,
+    // Range fields (preferred); fall back to single entry_date for backward compat
+    entry_date_from: edFromRaw,
+    entry_date_to: edToRaw,
     entry_date: edRaw,
     hours: hoursRaw,
     leave_type: ltRaw,
@@ -1617,7 +1641,11 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   } = req.body || {};
   let user_name = normText(unRaw);
   let user_upn = normText(uupnRaw) || user_name;
-  const entry_date = validateDateStr(edRaw);
+
+  // Resolve date(s): prefer entry_date_from/to, fall back to entry_date
+  const dateFrom = validateDateStr(edFromRaw || edRaw);
+  const dateTo = validateDateStr(edToRaw || edFromRaw || edRaw);
+
   const hours = validateHours(hoursRaw ?? 8);
   const leave_type_raw = normText(ltRaw);
   const leave_type =
@@ -1636,38 +1664,104 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     return res
       .status(400)
       .json({ ok: false, error: 'user_name or user_upn is required' });
-  if (!entry_date)
+  if (!dateFrom)
     return res
       .status(400)
-      .json({ ok: false, error: 'entry_date is required (YYYY-MM-DD)' });
+      .json({
+        ok: false,
+        error: 'entry_date (or entry_date_from) is required (YYYY-MM-DD)',
+      });
+  if (dateTo < dateFrom)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'entry_date_to must be >= entry_date_from' });
   if (hours === null)
     return res
       .status(400)
       .json({ ok: false, error: 'hours must be between 0.5 and 24' });
 
+  const isRange = dateTo !== dateFrom;
+  const weekdays = isRange ? weekdaysInRange(dateFrom, dateTo) : [dateFrom];
+
+  if (weekdays.length === 0)
+    return res
+      .status(400)
+      .json({
+        ok: false,
+        error: 'date range contains no working days (Mon–Fri)',
+      });
+  if (weekdays.length > PTO_MAX_WORKING_DAYS)
+    return res.status(400).json({
+      ok: false,
+      error: `date range exceeds the maximum of ${PTO_MAX_WORKING_DAYS} working days`,
+    });
+
   // admin PTOs are auto-approved; workflow can also be disabled globally via PTO_APPROVAL_ENABLED=false
   const initialStatus =
     req.userRole === 'admin' || !PTO_APPROVAL_ENABLED ? 'approved' : 'pending';
   const filerRole = req.userRole;
+  const batchId = isRange ? crypto.randomUUID() : null;
 
   try {
-    const r = await pool.query(
-      `INSERT INTO public.pto_entries
-         (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role)
-       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8)
-       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role`,
-      [
-        user_upn,
-        user_name,
-        entry_date,
-        hours,
-        leave_type,
-        notes,
-        initialStatus,
-        filerRole,
-      ],
-    );
-    const savedRow = r.rows[0];
+    let savedRows;
+
+    if (isRange) {
+      // Insert all weekday rows in a single transaction
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const insertedRows = [];
+        for (const d of weekdays) {
+          const r = await client.query(
+            `INSERT INTO public.pto_entries
+               (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role, batch_id)
+             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)
+             RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role, batch_id`,
+            [
+              user_upn,
+              user_name,
+              d,
+              hours,
+              leave_type,
+              notes,
+              initialStatus,
+              filerRole,
+              batchId,
+            ],
+          );
+          insertedRows.push(r.rows[0]);
+        }
+        await client.query('COMMIT');
+        savedRows = insertedRows;
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+    } else {
+      // Single-date: existing behaviour, batch_id = NULL
+      const r = await pool.query(
+        `INSERT INTO public.pto_entries
+           (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8)
+         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role`,
+        [
+          user_upn,
+          user_name,
+          dateFrom,
+          hours,
+          leave_type,
+          notes,
+          initialStatus,
+          filerRole,
+        ],
+      );
+      savedRows = [r.rows[0]];
+    }
+
+    const savedRow = savedRows[0];
+    const totalHours = hours * savedRows.length;
 
     // Send email (async, non-blocking to response):
     //   - pending:  approval notification with PDF attached → to approvers, CC filer
@@ -1679,20 +1773,38 @@ app.post('/api/pto', requireAuth, async (req, res) => {
           const submittedAt = new Date().toUTCString();
           const pdfBuf = await generatePtoPdf({
             userName: user_name || user_upn,
-            entryDate: entry_date,
+            entryDate: dateFrom,
+            entryDateTo: isRange ? dateTo : null,
+            totalDays: savedRows.length,
             hours,
             leaveType: leave_type,
             notes: notes || '',
             submittedAt,
           });
+          const pdfFilename = isRange
+            ? `pto_receipt_${dateFrom}_to_${dateTo}.pdf`
+            : `pto_receipt_${dateFrom}.pdf`;
           const pdfAttachment = {
-            filename: `pto_receipt_${entry_date}.pdf`,
+            filename: pdfFilename,
             content: pdfBuf,
             contentType: 'application/pdf',
           };
           const transporter = createMailTransporter();
-          const _fmtEntryDate = (() => {
-            const d = new Date(entry_date + 'T00:00:00');
+
+          // Human-readable date label for email body
+          const _fmtDateLabel = (() => {
+            if (isRange) {
+              const f = new Date(dateFrom + 'T00:00:00');
+              const t = new Date(dateTo + 'T00:00:00');
+              const fmtShort = (d) =>
+                d.toLocaleDateString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                });
+              return `${fmtShort(f)} \u2013 ${fmtShort(t)} (${savedRows.length} day${savedRows.length !== 1 ? 's' : ''}, ${fmtH(totalHours)} hrs)`;
+            }
+            const d = new Date(dateFrom + 'T00:00:00');
             const day = String(d.getDate()).padStart(2, '0');
             const month = d.toLocaleDateString('en-US', { month: 'long' });
             const year = d.getFullYear();
@@ -1708,49 +1820,58 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               req.userEmail,
             );
             if (approverEmails.length) {
+              const dateLabel = isRange ? `${dateFrom} to ${dateTo}` : dateFrom;
               const info = await transporter.sendMail({
                 from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                 to: approverEmails.join(', '),
                 cc: req.userEmail,
-                subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${entry_date}`,
+                subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`,
                 html: `<p>Hi @Team,</p>
 <p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
-  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
-  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtDateLabel)}<br>
+  <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
 <p>Please see the attached Leave Request form for reference.</p>
 <p>Thank you for your review.</p>`,
-                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
+                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
                 attachments: [pdfAttachment],
               });
-              // Store message-id for reply threading
+              // Store the same message-id on all rows for reply threading
               const msgId = info.messageId || null;
               if (msgId) {
-                await pool.query(
-                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
-                  [msgId, savedRow.id],
-                );
+                if (batchId) {
+                  await pool.query(
+                    `UPDATE public.pto_entries SET email_message_id = $1 WHERE batch_id = $2`,
+                    [msgId, batchId],
+                  );
+                } else {
+                  await pool.query(
+                    `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
+                    [msgId, savedRow.id],
+                  );
+                }
               }
               pdfEmailSent = true;
             }
           } else {
             // Auto-approved (admin or PTO_APPROVAL_ENABLED=false) → receipt to filer only
+            const dateLabel = isRange ? `${dateFrom} to ${dateTo}` : dateFrom;
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: req.userEmail,
-              subject: `PTO Approved \u2013 ${user_name || user_upn} \u2013 ${entry_date}`,
+              subject: `PTO Approved \u2013 ${user_name || user_upn} \u2013 ${dateLabel}`,
               html: `<p>Hi ${escapeEmailHtml(user_name || user_upn)},</p>
-<p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
+<p>Your Leave Request for <strong>${escapeEmailHtml(_fmtDateLabel)}</strong> has been <strong>automatically approved</strong>.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
-  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
 <p>Please see the attached Leave Request form for your records.</p>`,
-              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
+              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
               attachments: [pdfAttachment],
             });
             pdfEmailSent = true;
@@ -1761,7 +1882,314 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       })();
     }
 
-    res.status(201).json({ ok: true, row: savedRow, pdfEmailSent });
+    res
+      .status(201)
+      .json({
+        ok: true,
+        row: savedRow,
+        rows: savedRows,
+        batchId,
+        pdfEmailSent,
+      });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- PTO Batch Approval / Denial / Delete ----------
+// NOTE: these routes MUST remain above /api/pto/:id/approve|deny|DELETE so Express
+// does not treat "batch" as an :id value.
+
+app.patch(
+  '/api/pto/batch/:batchId/approve',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
+    const { batchId } = req.params;
+    if (!batchId)
+      return res.status(400).json({ ok: false, error: 'invalid batchId' });
+    try {
+      const batchRes = await pool.query(
+        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
+                status, filer_role, email_message_id
+         FROM public.pto_entries WHERE batch_id = $1
+         ORDER BY entry_date ASC`,
+        [batchId],
+      );
+      if (!batchRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'batch not found' });
+
+      const entry = batchRes.rows[0]; // use first row for access checks
+      const accessError = checkApprovalAccess(
+        entry,
+        req.userRole,
+        req.userEmail,
+        req.userTeam,
+      );
+      if (accessError)
+        return res.status(403).json({ ok: false, error: accessError });
+
+      // For lead: verify filer is in the lead's team
+      if (req.userRole === 'lead' && req.userTeam) {
+        const teamCheck = await pool.query(
+          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
+          [entry.user_upn, req.userTeam],
+        );
+        if (!teamCheck.rows.length)
+          return res
+            .status(403)
+            .json({ ok: false, error: 'filer is not in your team' });
+      }
+
+      let updatedRows;
+      if (req.userRole === 'lead') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+           SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
+           WHERE batch_id = $2
+           RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                     status, filer_role, email_message_id, batch_id`,
+          [req.userEmail, batchId],
+        );
+        updatedRows = r.rows;
+      } else {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+           SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
+           WHERE batch_id = $2
+           RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                     status, filer_role, email_message_id, batch_id`,
+          [req.userEmail, batchId],
+        );
+        updatedRows = r.rows;
+      }
+
+      // Send one notification email covering the whole range (non-blocking)
+      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            const transporter = createMailTransporter();
+            const replyHeaders = entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {};
+            const displayName = escapeEmailHtml(
+              entry.user_name || entry.user_upn,
+            );
+            const firstDate = escapeEmailHtml(batchRes.rows[0].entry_date);
+            const lastDate = escapeEmailHtml(
+              batchRes.rows[batchRes.rows.length - 1].entry_date,
+            );
+            const dateRange =
+              firstDate === lastDate
+                ? firstDate
+                : `${firstDate} to ${lastDate}`;
+
+            if (req.userRole === 'lead') {
+              const pmEmails = await getApproverEmails('lead', null, null);
+              const toList = [...new Set([...pmEmails, entry.user_upn])].filter(
+                Boolean,
+              );
+              if (toList.length) {
+                await transporter.sendMail({
+                  from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                  to: toList.join(', '),
+                  subject: `PTO Lead-Approved \u2013 ${displayName} \u2013 ${dateRange}`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
+<p>This request is still pending final Manager's review and approval.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
+                  headers: replyHeaders,
+                });
+              }
+            } else {
+              let leadEmails = [];
+              if (
+                ['dev', 'qa'].includes(entry.filer_role) ||
+                entry.filer_role === 'lead'
+              ) {
+                const filerUser = await pool.query(
+                  `SELECT team FROM public.users WHERE LOWER(email) = LOWER($1)`,
+                  [entry.user_upn],
+                );
+                const filerTeam = filerUser.rows[0]?.team || null;
+                leadEmails = await getApproverEmails('dev', filerTeam, null);
+              }
+              const toList = [
+                ...new Set([entry.user_upn, ...leadEmails]),
+              ].filter(Boolean);
+              if (toList.length) {
+                await transporter.sendMail({
+                  from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                  to: toList.join(', '),
+                  subject: `PTO Approved \u2013 ${displayName} \u2013 ${dateRange}`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+<p>The approved request has been added to the team calendar.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.`,
+                  headers: replyHeaders,
+                });
+              }
+            }
+          } catch (emailErr) {
+            console.error('PTO batch approval email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, rows: updatedRows });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/pto/batch/:batchId/deny',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
+    const { batchId } = req.params;
+    if (!batchId)
+      return res.status(400).json({ ok: false, error: 'invalid batchId' });
+    const denialNote = normText(req.body?.note) || null;
+    try {
+      const batchRes = await pool.query(
+        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
+                status, filer_role, email_message_id
+         FROM public.pto_entries WHERE batch_id = $1
+         ORDER BY entry_date ASC`,
+        [batchId],
+      );
+      if (!batchRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'batch not found' });
+
+      const entry = batchRes.rows[0];
+      const accessError = checkApprovalAccess(
+        entry,
+        req.userRole,
+        req.userEmail,
+        req.userTeam,
+      );
+      if (accessError)
+        return res.status(403).json({ ok: false, error: accessError });
+
+      if (req.userRole === 'lead' && req.userTeam) {
+        const teamCheck = await pool.query(
+          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
+          [entry.user_upn, req.userTeam],
+        );
+        if (!teamCheck.rows.length)
+          return res
+            .status(403)
+            .json({ ok: false, error: 'filer is not in your team' });
+      }
+
+      const r = await pool.query(
+        `UPDATE public.pto_entries
+         SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
+         WHERE batch_id = $3
+         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                   status, filer_role, email_message_id, denied_by, denial_note, batch_id`,
+        [req.userEmail, denialNote, batchId],
+      );
+      const updatedRows = r.rows;
+
+      // One denial email covering the whole range (non-blocking)
+      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            const transporter = createMailTransporter();
+            const replyHeaders = entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {};
+            const firstDate = batchRes.rows[0].entry_date;
+            const lastDate = batchRes.rows[batchRes.rows.length - 1].entry_date;
+            const dateRange =
+              firstDate === lastDate
+                ? firstDate
+                : `${firstDate} to ${lastDate}`;
+            const approverEmails = await getApproverEmails(
+              entry.filer_role,
+              null,
+              entry.user_upn,
+            );
+            const ccEmails = approverEmails.filter(
+              (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
+            );
+            await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: entry.user_upn,
+              ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
+              subject: `PTO Denied \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(dateRange)}`,
+              html: `<p>Your PTO request for <strong>${escapeEmailHtml(dateRange)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
+<p>You may resubmit a new PTO request if needed.</p>`,
+              text: `Your PTO for ${dateRange} was denied by ${req.userName || req.userEmail}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+              headers: replyHeaders,
+            });
+          } catch (emailErr) {
+            console.error('PTO batch denial email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, rows: updatedRows });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.delete('/api/pto/batch/:batchId', requireAuth, async (req, res) => {
+  const { batchId } = req.params;
+  if (!batchId)
+    return res.status(400).json({ ok: false, error: 'invalid batchId' });
+  try {
+    // Own-data roles: dev, qa — verify all batch rows belong to them
+    if (OWN_DATA_ROLES.has(req.userRole)) {
+      const ownerCheck = await pool.query(
+        `SELECT COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE LOWER(COALESCE(user_upn,'')) = LOWER($2)) AS owned
+         FROM public.pto_entries WHERE batch_id = $1`,
+        [batchId, req.userEmail],
+      );
+      const { total, owned } = ownerCheck.rows[0];
+      if (Number(total) === 0)
+        return res.status(404).json({ ok: false, error: 'batch not found' });
+      if (Number(owned) !== Number(total))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+    // Only allow deletion when ALL rows are pending
+    const statusCheck = await pool.query(
+      `SELECT COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE status = 'pending') AS pending_count
+       FROM public.pto_entries WHERE batch_id = $1`,
+      [batchId],
+    );
+    const { total, pending_count } = statusCheck.rows[0];
+    if (Number(total) === 0)
+      return res.status(404).json({ ok: false, error: 'batch not found' });
+    if (Number(pending_count) !== Number(total))
+      return res
+        .status(400)
+        .json({ ok: false, error: 'only pending PTO batches can be deleted' });
+
+    await pool.query('DELETE FROM public.pto_entries WHERE batch_id = $1', [
+      batchId,
+    ]);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -2121,6 +2549,8 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     pdfBuf = await generatePtoPdf({
       userName: user_name,
       entryDate: entry_date,
+      entryDateTo: null,
+      totalDays: 1,
       hours,
       leaveType: leave_type,
       notes,
@@ -2243,6 +2673,8 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
 function generatePtoPdf({
   userName,
   entryDate,
+  entryDateTo, // null for single-day
+  totalDays, // number of working days (for range)
   hours,
   leaveType,
   notes,
@@ -2303,17 +2735,25 @@ function generatePtoPdf({
       );
     }
 
-    // --- Days calculation ---
-    const rawDays = Number(hours) / 8;
+    // --- Days / hours calculation ---
+    const nDays = totalDays || 1;
+    const totalHoursForPdf = Number(hours) * nDays;
+    const rawDays = totalHoursForPdf / 8;
     const daysStr = Number.isInteger(rawDays)
       ? String(rawDays)
       : rawDays.toFixed(1);
+
+    // --- Date of Leave(s) label ---
+    const dateOfLeaveLabel =
+      entryDateTo && entryDateTo !== entryDate
+        ? `${fmtDate(entryDate)} \u2013 ${fmtDate(entryDateTo)}`
+        : fmtDate(entryDate);
 
     // --- Fields ---
     const fields = [
       ['Employee Name', userName || '—'],
       ['Date Requested', fmtSubmitted(submittedAt)],
-      ['Date of Leave(s)', fmtDate(entryDate)],
+      ['Date of Leave(s)', dateOfLeaveLabel],
       ['Leave Type', leaveType || '—'],
       ['Total Number of Days Applied', daysStr],
       ['Reason for Leave', notes || '—'],
