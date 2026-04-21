@@ -1894,8 +1894,8 @@ app.patch(
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
                   subject: `PTO Lead-Approved \u2013 ${displayName} \u2013 ${entryDate}`,
-                  html: `<p>The PTO request for <strong>${displayName}</strong> on ${entryDate} has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
-<p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
+<p>This request is still pending final Manager's review and approval.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
                   headers: replyHeaders,
                 });
@@ -1923,7 +1923,8 @@ app.patch(
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
                   subject: `PTO Approved \u2013 ${displayName} \u2013 ${entryDate}`,
-                  html: `<p>The PTO request for <strong>${displayName}</strong> on ${entryDate} has been <strong>fully approved</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>`,
+                  html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+                  <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} fully approved by ${req.userName || req.userEmail}.`,
                   headers: replyHeaders,
                 });
@@ -1997,7 +1998,7 @@ app.patch(
       );
       const updatedRow = r.rows[0];
 
-      // Notify filer of denial (non-blocking)
+      // Notify filer of denial; CC approvers (non-blocking)
       if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
@@ -2008,9 +2009,19 @@ app.patch(
                   References: entry.email_message_id,
                 }
               : {};
+            const approverEmails = await getApproverEmails(
+              entry.filer_role,
+              entry.filer_team,
+              entry.user_upn,
+            );
+            // CC approvers excluding the actor (they already know they denied it)
+            const ccEmails = approverEmails.filter(
+              (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
+            );
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
+              ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
               subject: `PTO Denied \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(entry.entry_date)}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
@@ -2252,8 +2263,10 @@ function generatePtoPdf({
     if (fs.existsSync(logoPath)) {
       const logoW = 180;
       const logoX = (pageWidth - logoW) / 2;
-      doc.image(logoPath, logoX, doc.y, { fit: [logoW, 90] });
-      doc.moveDown(1);
+      const logoY = doc.y;
+      doc.image(logoPath, logoX, logoY, { fit: [logoW, 90] });
+      // pdfkit does not advance doc.y when explicit x/y are given — move past image manually
+      doc.y = logoY + 90 + 16;
     } else {
       doc.moveDown(0.5);
     }
