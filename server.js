@@ -279,53 +279,53 @@ function verifyLegacyPassword(pw, encoded) {
 async function hashPassword(pw) {
   const salt = crypto.randomBytes(16);
   const hash = await new Promise((resolve, reject) => {
-    crypto.scrypt(
-      Buffer.from(pw, 'utf8'),
-      salt,
-      32,
-      { N: 16384, r: 8, p: 1 },
-      (err, key) => (err ? reject(err) : resolve(key)),
+    crypto.scrypt(Buffer.from(pw, 'utf8'), salt, 32, (err, key) =>
+      err ? reject(err) : resolve(key),
     );
   });
-  return `scrypt:${salt.toString('base64')}:${hash.toString('base64')}`;
+  // Shared format with tfs-daily-updates: saltB64:hashB64 (no prefix)
+  return `${salt.toString('base64')}:${hash.toString('base64')}`;
 }
 
+// Returns the matched format string, or null on failure:
+//   'scrypt-prefixed' — old tfs-hours native format (scrypt:saltB64:hashB64)
+//   'scrypt-shared'   — shared format with tfs-daily-updates (saltB64:hashB64, scrypt)
+//   'legacy'          — old SHA256-based format
+//   null              — no match / wrong password
 async function verifyPassword(pw, encoded) {
   const s = String(encoded || '');
   if (s.startsWith('scrypt:')) {
-    // tfs-hours native format: scrypt:saltB64:hashB64
+    // Old tfs-hours native format: scrypt:saltB64:hashB64
     const parts = s.split(':');
-    if (parts.length !== 3) return false;
+    if (parts.length !== 3) return null;
     try {
       const salt = Buffer.from(parts[1], 'base64');
       const expected = Buffer.from(parts[2], 'base64');
       const derived = await new Promise((resolve, reject) => {
-        crypto.scrypt(
-          Buffer.from(pw, 'utf8'),
-          salt,
-          32,
-          { N: 16384, r: 8, p: 1 },
-          (err, key) => (err ? reject(err) : resolve(key)),
+        crypto.scrypt(Buffer.from(pw, 'utf8'), salt, 32, (err, key) =>
+          err ? reject(err) : resolve(key),
         );
       });
-      return crypto.timingSafeEqual(expected, derived);
+      return crypto.timingSafeEqual(expected, derived)
+        ? 'scrypt-prefixed'
+        : null;
     } catch {
-      return false;
+      return null;
     }
   }
-  // tfs-daily-updates shared format: saltB64:hashB64 (scrypt, no prefix)
+  // Shared format with tfs-daily-updates: saltB64:hashB64 (scrypt, no prefix)
   const parts = s.split(':');
   if (parts.length === 2) {
     try {
       const salt = Buffer.from(parts[0], 'base64');
       const expected = Buffer.from(parts[1], 'base64');
       const calc = crypto.scryptSync(pw, salt, 32);
-      if (crypto.timingSafeEqual(calc, expected)) return true;
+      if (crypto.timingSafeEqual(calc, expected)) return 'scrypt-shared';
     } catch {
       // fall through to legacy
     }
   }
-  return verifyLegacyPassword(pw, s);
+  return verifyLegacyPassword(pw, s) ? 'legacy' : null;
 }
 
 // ---------- Auth middleware ----------
@@ -418,11 +418,12 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ ok: false, error: 'invalid credentials' });
     }
     const user = r.rows[0];
-    const ok = await verifyPassword(pw, user.pw);
-    if (!ok)
+    const format = await verifyPassword(pw, user.pw);
+    if (!format)
       return res.status(401).json({ ok: false, error: 'invalid credentials' });
-    // Silently re-hash legacy passwords with scrypt
-    if (!String(user.pw || '').startsWith('scrypt:')) {
+    // Migrate 'scrypt-prefixed' (old tfs-hours format) and 'legacy' (SHA256) to shared format.
+    // Never re-hash 'scrypt-shared' — it's already the correct shared format.
+    if (format === 'scrypt-prefixed' || format === 'legacy') {
       try {
         const newHash = await hashPassword(pw);
         await pool.query('UPDATE public.users SET pw = $1 WHERE email = $2', [
