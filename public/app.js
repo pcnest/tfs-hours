@@ -693,6 +693,7 @@ const PTO_STATUS_LABELS = {
   lead_approved: 'Lead Approved',
   approved: 'Approved',
   denied: 'Denied',
+  cancelled: 'Cancelled',
 };
 
 function ptoBadge(status) {
@@ -793,8 +794,14 @@ function renderPtoEntries(rows) {
           }
         }
 
+        const cancellable = !['cancelled', 'denied'].includes(first.status);
+        const canCancel = cancellable && (isPrivileged || filerUpn === myEmail);
         const canDelete =
-          first.status === 'pending' && (isPrivileged || filerUpn === myEmail);
+          ['cancelled', 'denied'].includes(first.status) &&
+          (isPrivileged || filerUpn === myEmail);
+        const cancelBtn = canCancel
+          ? `<button class="btn-cancel" data-batch-id="${item.batchId}" data-action="cancel">Cancel</button>`
+          : '';
         const delBtn = canDelete
           ? `<button class="btn-del" data-batch-id="${item.batchId}" data-type="pto-batch">Delete</button>`
           : '';
@@ -811,21 +818,26 @@ function renderPtoEntries(rows) {
         <td>${escapeHtml(first.leave_type || '')}</td>
         <td>${escapeHtml(first.notes || '')}</td>
         <td${denialTip}>${ptoBadge(first.status)}</td>
-        <td>${actionBtns}${delBtn}</td>
+        <td>${actionBtns}${cancelBtn}${delBtn}</td>
       </tr>`;
       }
 
       // Single row
       const r = item.row;
+      const filerUpn = (r.user_upn || '').toLowerCase();
+      const cancellable = !['cancelled', 'denied'].includes(r.status);
+      const canCancel = cancellable && (isPrivileged || filerUpn === myEmail);
       const canDelete =
-        r.status === 'pending' &&
-        (isPrivileged || (r.user_upn || '').toLowerCase() === myEmail);
+        ['cancelled', 'denied'].includes(r.status) &&
+        (isPrivileged || filerUpn === myEmail);
+      const cancelBtn = canCancel
+        ? `<button class="btn-cancel" data-id="${r.id}" data-action="cancel">Cancel</button>`
+        : '';
       const delBtn = canDelete
         ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
         : '';
 
       let actionBtns = '';
-      const filerUpn = (r.user_upn || '').toLowerCase();
       if (
         isLead &&
         ['dev', 'qa'].includes(r.filer_role) &&
@@ -850,7 +862,7 @@ function renderPtoEntries(rows) {
         }
       }
 
-      const actionCell = `${actionBtns}${delBtn}`;
+      const actionCell = `${actionBtns}${cancelBtn}${delBtn}`;
       const denialTip = r.denial_note
         ? ` title="${escapeHtml(r.denial_note)}"`
         : '';
@@ -873,7 +885,16 @@ async function ptoAction(id, batchId, action) {
   let note = null;
   if (action === 'deny') {
     note = window.prompt('Reason for denial (optional):') ?? '';
-    if (note === null) return; // user cancelled
+    if (note === null) return;
+  }
+  if (action === 'cancel') {
+    note = window.prompt('Reason for cancellation (required):');
+    if (note === null) return; // user dismissed
+    note = (note || '').trim();
+    if (!note) {
+      alert('A cancellation reason is required.');
+      return;
+    }
   }
   const url = batchId
     ? `/api/pto/batch/${batchId}/${action}`
@@ -895,9 +916,11 @@ async function ptoAction(id, batchId, action) {
   }
 }
 
-// Delegated click for approve/deny buttons (single and batch)
+// Delegated click for approve/deny/cancel buttons (single and batch)
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-action="approve"],[data-action="deny"]');
+  const btn = e.target.closest(
+    '[data-action="approve"],[data-action="deny"],[data-action="cancel"]',
+  );
   if (!btn) return;
   const id = btn.dataset.id || null;
   const batchId = btn.dataset.batchId || null;

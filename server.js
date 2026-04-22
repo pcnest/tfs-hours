@@ -1665,12 +1665,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       .status(400)
       .json({ ok: false, error: 'user_name or user_upn is required' });
   if (!dateFrom)
-    return res
-      .status(400)
-      .json({
-        ok: false,
-        error: 'entry_date (or entry_date_from) is required (YYYY-MM-DD)',
-      });
+    return res.status(400).json({
+      ok: false,
+      error: 'entry_date (or entry_date_from) is required (YYYY-MM-DD)',
+    });
   if (dateTo < dateFrom)
     return res
       .status(400)
@@ -1684,12 +1682,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const weekdays = isRange ? weekdaysInRange(dateFrom, dateTo) : [dateFrom];
 
   if (weekdays.length === 0)
-    return res
-      .status(400)
-      .json({
-        ok: false,
-        error: 'date range contains no working days (Mon–Fri)',
-      });
+    return res.status(400).json({
+      ok: false,
+      error: 'date range contains no working days (Mon–Fri)',
+    });
   if (weekdays.length > PTO_MAX_WORKING_DAYS)
     return res.status(400).json({
       ok: false,
@@ -1882,15 +1878,13 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       })();
     }
 
-    res
-      .status(201)
-      .json({
-        ok: true,
-        row: savedRow,
-        rows: savedRows,
-        batchId,
-        pdfEmailSent,
-      });
+    res.status(201).json({
+      ok: true,
+      row: savedRow,
+      rows: savedRows,
+      batchId,
+      pdfEmailSent,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -2470,6 +2464,98 @@ ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` 
   },
 );
 
+// ---------- PTO Cancel ----------
+app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
+  const id = normInt(req.params.id);
+  if (!id || id < 1)
+    return res.status(400).json({ ok: false, error: 'invalid id' });
+  const cancelNote = normText(req.body?.note) || null;
+  if (!cancelNote)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'cancellation reason is required' });
+
+  try {
+    const entryRes = await pool.query(
+      `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+              p.status, p.filer_role, p.email_message_id, u.team AS filer_team
+       FROM public.pto_entries p
+       LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+       WHERE p.id = $1`,
+      [id],
+    );
+    if (!entryRes.rows.length)
+      return res.status(404).json({ ok: false, error: 'not found' });
+    const entry = entryRes.rows[0];
+
+    // Ownership check: dev/qa can only cancel their own entries
+    if (OWN_DATA_ROLES.has(req.userRole)) {
+      if ((entry.user_upn || '').toLowerCase() !== req.userEmail.toLowerCase())
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    // Only cancellable if not already cancelled/denied
+    const nonCancellable = ['cancelled', 'denied'];
+    if (nonCancellable.includes(entry.status))
+      return res
+        .status(400)
+        .json({ ok: false, error: `cannot cancel a ${entry.status} entry` });
+
+    const r = await pool.query(
+      `UPDATE public.pto_entries
+       SET status = 'cancelled', cancelled_by = $1, cancelled_at = NOW(), cancel_note = $2
+       WHERE id = $3
+       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                 status, filer_role, email_message_id, cancelled_by, cancel_note`,
+      [req.userEmail, cancelNote, id],
+    );
+    const updatedRow = r.rows[0];
+
+    // Notify approvers of cancellation (non-blocking)
+    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      (async () => {
+        try {
+          const transporter = createMailTransporter();
+          const replyHeaders = entry.email_message_id
+            ? {
+                'In-Reply-To': entry.email_message_id,
+                References: entry.email_message_id,
+              }
+            : {};
+          const approverEmails = await getApproverEmails(
+            entry.filer_role,
+            entry.filer_team,
+            entry.user_upn,
+          );
+          // Notify approvers only (filer initiated the cancel; they know)
+          const toList = approverEmails.filter(
+            (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
+          );
+          if (toList.length) {
+            await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: toList.join(', '),
+              subject: `PTO Cancelled \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(entry.entry_date)}`,
+              html: `<p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
+<p>No further action is needed.</p>`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} has been cancelled by ${req.userName || req.userEmail}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+              headers: replyHeaders,
+            });
+          }
+        } catch (emailErr) {
+          console.error('PTO cancel email error:', emailErr);
+        }
+      })();
+    }
+
+    res.json({ ok: true, row: updatedRow });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ---------- PTO Delete ----------
 app.delete('/api/pto/:id', requireAuth, async (req, res) => {
   const id = normInt(req.params.id);
   if (!id || id < 1)
@@ -2485,17 +2571,21 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
       if (!check.rows.length)
         return res.status(403).json({ ok: false, error: 'forbidden' });
     }
-    // Only allow deletion of pending entries
+    // Only allow hard delete of cancelled or denied entries
     const statusCheck = await pool.query(
       `SELECT id, status FROM public.pto_entries WHERE id = $1`,
       [id],
     );
     if (!statusCheck.rows.length)
       return res.status(404).json({ ok: false, error: 'not found' });
-    if (statusCheck.rows[0].status !== 'pending')
+    const deletableStatuses = ['cancelled', 'denied'];
+    if (!deletableStatuses.includes(statusCheck.rows[0].status))
       return res
         .status(400)
-        .json({ ok: false, error: 'only pending PTO entries can be deleted' });
+        .json({
+          ok: false,
+          error: 'only cancelled or denied PTO entries can be deleted',
+        });
 
     const r = await pool.query(
       'DELETE FROM public.pto_entries WHERE id = $1 RETURNING id',
@@ -2664,6 +2754,24 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     results.push('denial-notification: sent');
   } catch (e) {
     results.push(`denial-notification: FAILED \u2014 ${e.message}`);
+  }
+
+  // 6. Cancellation notification (what approvers receive when filer cancels)
+  try {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: dest,
+      subject: `[TEST] PTO Cancelled \u2013 ${user_name} \u2013 ${entry_date}`,
+      html: `<p><em style="color:#888">[TEST \u2014 sent to approvers when filer cancels]</em></p>
+<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(user_name)}.</p>
+<p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
+<p>No further action is needed.</p>`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} has been cancelled. Reason: ${notes}`,
+      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
+    });
+    results.push('cancellation-notification: sent');
+  } catch (e) {
+    results.push(`cancellation-notification: FAILED \u2014 ${e.message}`);
   }
 
   res.json({ ok: true, sentTo: dest, results });
