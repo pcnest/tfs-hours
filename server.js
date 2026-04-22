@@ -1819,8 +1819,11 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             );
             if (approverEmails.length) {
               const dateLabel = isRange ? `${dateFrom} to ${dateTo}` : dateFrom;
-              const info = await transporter.sendMail({
+              // Pre-generate Message-ID so Brevo preserves it on delivery (required for reply threading)
+              const generatedMsgId = `<${crypto.randomUUID()}@tfs-hours>`;
+              await transporter.sendMail({
                 from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+                messageId: generatedMsgId,
                 to: approverEmails.join(', '),
                 cc: req.userEmail,
                 subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`,
@@ -1837,20 +1840,17 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
                 attachments: [pdfAttachment],
               });
-              // Store the same message-id on all rows for reply threading
-              const msgId = info.messageId || null;
-              if (msgId) {
-                if (batchId) {
-                  await pool.query(
-                    `UPDATE public.pto_entries SET email_message_id = $1 WHERE batch_id = $2`,
-                    [msgId, batchId],
-                  );
-                } else {
-                  await pool.query(
-                    `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
-                    [msgId, savedRow.id],
-                  );
-                }
+              // Store the pre-generated message-id on all rows for reply threading
+              if (batchId) {
+                await pool.query(
+                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE batch_id = $2`,
+                  [generatedMsgId, batchId],
+                );
+              } else {
+                await pool.query(
+                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
+                  [generatedMsgId, savedRow.id],
+                );
               }
               pdfEmailSent = true;
             }
