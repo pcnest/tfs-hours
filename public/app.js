@@ -795,7 +795,10 @@ function renderPtoEntries(rows) {
         }
 
         const cancellable = !['cancelled', 'denied'].includes(first.status);
-        const canCancel = cancellable && (isPrivileged || filerUpn === myEmail);
+        const ptoNotPast =
+          first.entry_date >= new Date().toISOString().slice(0, 10);
+        const canCancel =
+          cancellable && ptoNotPast && (isPrivileged || filerUpn === myEmail);
         const canDelete =
           ['cancelled', 'denied'].includes(first.status) &&
           (isPrivileged || filerUpn === myEmail);
@@ -826,7 +829,9 @@ function renderPtoEntries(rows) {
       const r = item.row;
       const filerUpn = (r.user_upn || '').toLowerCase();
       const cancellable = !['cancelled', 'denied'].includes(r.status);
-      const canCancel = cancellable && (isPrivileged || filerUpn === myEmail);
+      const ptoNotPast = r.entry_date >= new Date().toISOString().slice(0, 10);
+      const canCancel =
+        cancellable && ptoNotPast && (isPrivileged || filerUpn === myEmail);
       const canDelete =
         ['cancelled', 'denied'].includes(r.status) &&
         (isPrivileged || filerUpn === myEmail);
