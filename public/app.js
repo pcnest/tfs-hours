@@ -809,8 +809,9 @@ function renderPtoEntries(rows) {
           ? `<button class="btn-del" data-batch-id="${item.batchId}" data-type="pto-batch">Delete</button>`
           : '';
 
-        const denialTip = first.denial_note
-          ? ` title="${escapeHtml(first.denial_note)}"`
+        const statusNote = first.denial_note || first.cancel_note || '';
+        const statusNoteHtml = statusNote
+          ? ` <span class="pto-status-note">${escapeHtml(statusNote)}</span>`
           : '';
 
         return `
@@ -820,7 +821,7 @@ function renderPtoEntries(rows) {
         <td>${fmtHours(totalHours)}</td>
         <td>${escapeHtml(first.leave_type || '')}</td>
         <td>${escapeHtml(first.notes || '')}</td>
-        <td${denialTip}>${ptoBadge(first.status)}</td>
+        <td>${ptoBadge(first.status)}${statusNoteHtml}</td>
         <td>${actionBtns}${cancelBtn}${delBtn}</td>
       </tr>`;
       }
@@ -868,8 +869,9 @@ function renderPtoEntries(rows) {
       }
 
       const actionCell = `${actionBtns}${cancelBtn}${delBtn}`;
-      const denialTip = r.denial_note
-        ? ` title="${escapeHtml(r.denial_note)}"`
+      const statusNote = r.denial_note || r.cancel_note || '';
+      const statusNoteHtml = statusNote
+        ? ` <span class="pto-status-note">${escapeHtml(statusNote)}</span>`
         : '';
 
       return `
@@ -879,7 +881,7 @@ function renderPtoEntries(rows) {
         <td>${fmtHours(r.hours)}</td>
         <td>${escapeHtml(r.leave_type || '')}</td>
         <td>${escapeHtml(r.notes || '')}</td>
-        <td${denialTip}>${ptoBadge(r.status)}</td>
+        <td>${ptoBadge(r.status)}${statusNoteHtml}</td>
         <td>${actionCell}</td>
       </tr>`;
     })

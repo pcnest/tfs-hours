@@ -1498,7 +1498,8 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   const SELECT = `
     SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at,
            status, filer_role, approved_by_lead, lead_actioned_at,
-           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note, batch_id
+           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note, batch_id,
+           cancelled_by, cancelled_at, cancel_note
     FROM public.pto_entries`;
 
   try {
@@ -2580,12 +2581,10 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ ok: false, error: 'not found' });
     const deletableStatuses = ['cancelled', 'denied'];
     if (!deletableStatuses.includes(statusCheck.rows[0].status))
-      return res
-        .status(400)
-        .json({
-          ok: false,
-          error: 'only cancelled or denied PTO entries can be deleted',
-        });
+      return res.status(400).json({
+        ok: false,
+        error: 'only cancelled or denied PTO entries can be deleted',
+      });
 
     const r = await pool.query(
       'DELETE FROM public.pto_entries WHERE id = $1 RETURNING id',
