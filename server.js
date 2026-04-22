@@ -1304,6 +1304,23 @@ function validateHours(v) {
   return n !== null && n > 0 && n <= 24 ? n : null;
 }
 
+/** Format a YYYY-MM-DD string as "Month D, YYYY" for use in email subjects. */
+function fmtSubjectDate(ymd) {
+  const d = new Date((ymd || '') + 'T00:00:00');
+  if (isNaN(d)) return ymd || '';
+  return d.toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/** Format a date range for email subjects. Same date → "Month D, YYYY"; range → "Month D, YYYY – Month D, YYYY". */
+function fmtSubjectDateRange(from, to) {
+  if (!to || to === from) return fmtSubjectDate(from);
+  return `${fmtSubjectDate(from)} \u2013 ${fmtSubjectDate(to)}`;
+}
+
 // ---------- Public Holidays ----------
 app.get('/api/holidays', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
@@ -1818,7 +1835,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               req.userEmail,
             );
             if (approverEmails.length) {
-              const dateLabel = isRange ? `${dateFrom} to ${dateTo}` : dateFrom;
+              const dateLabel = fmtSubjectDateRange(
+                dateFrom,
+                isRange ? dateTo : dateFrom,
+              );
               // Pre-generate Message-ID so Brevo preserves it on delivery (required for reply threading)
               const generatedMsgId = `<${crypto.randomUUID()}@tfs-hours>`;
               await transporter.sendMail({
@@ -1856,7 +1876,10 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             }
           } else {
             // Auto-approved (admin or PTO_APPROVAL_ENABLED=false) → receipt to filer only
-            const dateLabel = isRange ? `${dateFrom} to ${dateTo}` : dateFrom;
+            const dateLabel = fmtSubjectDateRange(
+              dateFrom,
+              isRange ? dateTo : dateFrom,
+            );
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: req.userEmail,
@@ -1978,14 +2001,10 @@ app.patch(
             const displayName = escapeEmailHtml(
               entry.user_name || entry.user_upn,
             );
-            const firstDate = escapeEmailHtml(batchRes.rows[0].entry_date);
-            const lastDate = escapeEmailHtml(
+            const dateRange = fmtSubjectDateRange(
+              batchRes.rows[0].entry_date,
               batchRes.rows[batchRes.rows.length - 1].entry_date,
             );
-            const dateRange =
-              firstDate === lastDate
-                ? firstDate
-                : `${firstDate} to ${lastDate}`;
 
             if (req.userRole === 'lead') {
               const pmEmails = await getApproverEmails('lead', null, null);
@@ -2110,12 +2129,10 @@ app.patch(
                   References: entry.email_message_id,
                 }
               : {};
-            const firstDate = batchRes.rows[0].entry_date;
-            const lastDate = batchRes.rows[batchRes.rows.length - 1].entry_date;
-            const dateRange =
-              firstDate === lastDate
-                ? firstDate
-                : `${firstDate} to ${lastDate}`;
+            const dateRange = fmtSubjectDateRange(
+              batchRes.rows[0].entry_date,
+              batchRes.rows[batchRes.rows.length - 1].entry_date,
+            );
             const approverEmails = await getApproverEmails(
               entry.filer_role,
               null,
@@ -2317,7 +2334,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p>This request is still pending final Manager's review and approval.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
@@ -2346,7 +2363,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} fully approved by ${req.userName || req.userEmail}.`,
@@ -2446,7 +2463,7 @@ app.patch(
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
               ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
-              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>`,
@@ -2537,7 +2554,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: toList.join(', '),
-              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
 <p>No further action is needed.</p>`,
@@ -2662,7 +2679,8 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] LEAVE REQUEST \u2013 ${user_name} \u2013 ${leave_type} Leave on ${entry_date}`,
+      subject: `[TEST] LEAVE REQUEST \u2013 ${user_name} \u2013 ${leave_type} Leave on ${fmtSubjectDate(entry_date)}`,
+
       html: `<p><em style="color:#888">[TEST \u2014 approval notification sent to approvers; filer is CC]</em></p>
 <p>Hi @Team,</p>
 <p><strong>${escapeEmailHtml(user_name)}</strong> has filed a Leave Request and it needs your approval.</p>
@@ -2687,7 +2705,7 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
       html: `<p><em style="color:#888">[TEST \u2014 auto-approve receipt sent to filer]</em></p>
 <p>Hi ${escapeEmailHtml(user_name)},</p>
 <p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
@@ -2710,7 +2728,7 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Lead-Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      subject: `[TEST] PTO Lead-Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
       html: `<p><em style="color:#888">[TEST \u2014 sent to PMs + filer after lead approves]</em></p>
 <p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>approved by Test Lead</strong> (lead).</p>
 <p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
@@ -2727,7 +2745,7 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${entry_date}`,
+      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
       html: `<p><em style="color:#888">[TEST \u2014 sent to filer + leads after PM gives final approval]</em></p>
 <p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>fully approved</strong> by Test PM.</p>`,
       text: `[TEST] PTO for ${user_name} on ${entry_date} fully approved by Test PM.`,
@@ -2743,7 +2761,8 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Denied \u2013 ${user_name} \u2013 ${entry_date}`,
+      subject: `[TEST] PTO Denied \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
+
       html: `<p><em style="color:#888">[TEST \u2014 sent to filer on denial]</em></p>
 <p>Your PTO request for <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>denied</strong> by Test Lead.</p>
 <p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
@@ -2761,7 +2780,8 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: dest,
-      subject: `[TEST] PTO Cancelled \u2013 ${user_name} \u2013 ${entry_date}`,
+      subject: `[TEST] PTO Cancelled \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
+
       html: `<p><em style="color:#888">[TEST \u2014 sent to approvers when filer cancels]</em></p>
 <p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(user_name)}.</p>
 <p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
