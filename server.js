@@ -1495,6 +1495,40 @@ app.delete(
   },
 );
 
+// ---------- Outlook Thread-Index helpers ----------
+// Outlook/Exchange uses Thread-Topic + Thread-Index (MS-proprietary headers) for conversation
+// grouping — independent of Message-Id, which Brevo rewrites on delivery.
+// Base block: 22 bytes = 0x01 (version) + 4-byte timestamp (zeroed) + 16-byte GUID + 1-byte reserved.
+// Reply block: parent base + 5 random bytes per reply level.
+
+function _threadIndexBase(uuid) {
+  const uuidBytes = Buffer.from(uuid.replace(/-/g, ''), 'hex'); // 16 bytes
+  return Buffer.concat([
+    Buffer.from([0x01]),
+    Buffer.alloc(4),
+    uuidBytes,
+    Buffer.alloc(1),
+  ]);
+}
+
+/** Build Thread-Index for the root email given the UUID portion of our generated Message-Id. */
+function buildThreadIndex(uuid) {
+  return _threadIndexBase(uuid).toString('base64');
+}
+
+/**
+ * Build Thread-Index for a reply email.
+ * parentMsgId must be in the form <UUID@tfs-hours>; returns undefined for old-format IDs.
+ */
+function buildReplyThreadIndex(parentMsgId) {
+  const m = (parentMsgId || '').match(/^<([0-9a-f-]{36})@tfs-hours>$/i);
+  if (!m) return undefined;
+  return Buffer.concat([
+    _threadIndexBase(m[1]),
+    crypto.randomBytes(5),
+  ]).toString('base64');
+}
+
 // ---------- Individual PTO ----------
 const VALID_LEAVE_TYPES = new Set([
   'Personal',
@@ -1839,14 +1873,21 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 dateFrom,
                 isRange ? dateTo : dateFrom,
               );
-              // Pre-generate Message-ID so Brevo preserves it on delivery (required for reply threading)
-              const generatedMsgId = `<${crypto.randomUUID()}@tfs-hours>`;
+              // Pre-generate Message-ID; also build Thread-Index for Outlook conversation grouping
+              // (Brevo rewrites Message-Id on delivery, but Thread-Topic/Thread-Index are preserved)
+              const generatedUuid = crypto.randomUUID();
+              const generatedMsgId = `<${generatedUuid}@tfs-hours>`;
+              const threadTopic = `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`;
               await transporter.sendMail({
                 from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                 messageId: generatedMsgId,
                 to: approverEmails.join(', '),
                 cc: req.userEmail,
                 subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`,
+                headers: {
+                  'Thread-Topic': threadTopic,
+                  'Thread-Index': buildThreadIndex(generatedUuid),
+                },
                 html: `<p>Hi @Team,</p>
 <p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
@@ -1992,19 +2033,31 @@ app.patch(
         (async () => {
           try {
             const transporter = createMailTransporter();
-            const replyHeaders = entry.email_message_id
-              ? {
-                  'In-Reply-To': entry.email_message_id,
-                  References: entry.email_message_id,
-                }
-              : {};
-            const displayName = escapeEmailHtml(
-              entry.user_name || entry.user_upn,
-            );
-            const dateRange = fmtSubjectDateRange(
+            const _batchDateRange = fmtSubjectDateRange(
               batchRes.rows[0].entry_date,
               batchRes.rows[batchRes.rows.length - 1].entry_date,
             );
+            const _batchReplyThreadIdx = buildReplyThreadIndex(
+              entry.email_message_id,
+            );
+            const replyHeaders = {
+              ...(entry.email_message_id
+                ? {
+                    'In-Reply-To': entry.email_message_id,
+                    References: entry.email_message_id,
+                  }
+                : {}),
+              ...(_batchReplyThreadIdx
+                ? {
+                    'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${_batchDateRange}`,
+                    'Thread-Index': _batchReplyThreadIdx,
+                  }
+                : {}),
+            };
+            const displayName = escapeEmailHtml(
+              entry.user_name || entry.user_upn,
+            );
+            const dateRange = _batchDateRange;
 
             if (req.userRole === 'lead') {
               const pmEmails = await getApproverEmails('lead', null, null);
@@ -2123,16 +2176,28 @@ app.patch(
         (async () => {
           try {
             const transporter = createMailTransporter();
-            const replyHeaders = entry.email_message_id
-              ? {
-                  'In-Reply-To': entry.email_message_id,
-                  References: entry.email_message_id,
-                }
-              : {};
-            const dateRange = fmtSubjectDateRange(
+            const _batchDenyDateRange = fmtSubjectDateRange(
               batchRes.rows[0].entry_date,
               batchRes.rows[batchRes.rows.length - 1].entry_date,
             );
+            const _batchDenyReplyThreadIdx = buildReplyThreadIndex(
+              entry.email_message_id,
+            );
+            const replyHeaders = {
+              ...(entry.email_message_id
+                ? {
+                    'In-Reply-To': entry.email_message_id,
+                    References: entry.email_message_id,
+                  }
+                : {}),
+              ...(_batchDenyReplyThreadIdx
+                ? {
+                    'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${_batchDenyDateRange}`,
+                    'Thread-Index': _batchDenyReplyThreadIdx,
+                  }
+                : {}),
+            };
+            const dateRange = _batchDenyDateRange;
             const approverEmails = await getApproverEmails(
               entry.filer_role,
               null,
@@ -2312,12 +2377,23 @@ app.patch(
         (async () => {
           try {
             const transporter = createMailTransporter();
-            const replyHeaders = entry.email_message_id
-              ? {
-                  'In-Reply-To': entry.email_message_id,
-                  References: entry.email_message_id,
-                }
-              : {};
+            const _approveReplyThreadIdx = buildReplyThreadIndex(
+              entry.email_message_id,
+            );
+            const replyHeaders = {
+              ...(entry.email_message_id
+                ? {
+                    'In-Reply-To': entry.email_message_id,
+                    References: entry.email_message_id,
+                  }
+                : {}),
+              ...(_approveReplyThreadIdx
+                ? {
+                    'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
+                    'Thread-Index': _approveReplyThreadIdx,
+                  }
+                : {}),
+            };
             const filerEmail = entry.user_upn;
             const displayName = escapeEmailHtml(
               entry.user_name || entry.user_upn,
@@ -2444,12 +2520,23 @@ app.patch(
         (async () => {
           try {
             const transporter = createMailTransporter();
-            const replyHeaders = entry.email_message_id
-              ? {
-                  'In-Reply-To': entry.email_message_id,
-                  References: entry.email_message_id,
-                }
-              : {};
+            const _denyReplyThreadIdx = buildReplyThreadIndex(
+              entry.email_message_id,
+            );
+            const replyHeaders = {
+              ...(entry.email_message_id
+                ? {
+                    'In-Reply-To': entry.email_message_id,
+                    References: entry.email_message_id,
+                  }
+                : {}),
+              ...(_denyReplyThreadIdx
+                ? {
+                    'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
+                    'Thread-Index': _denyReplyThreadIdx,
+                  }
+                : {}),
+            };
             const approverEmails = await getApproverEmails(
               entry.filer_role,
               entry.filer_team,
@@ -2535,12 +2622,23 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
       (async () => {
         try {
           const transporter = createMailTransporter();
-          const replyHeaders = entry.email_message_id
-            ? {
-                'In-Reply-To': entry.email_message_id,
-                References: entry.email_message_id,
-              }
-            : {};
+          const _cancelReplyThreadIdx = buildReplyThreadIndex(
+            entry.email_message_id,
+          );
+          const replyHeaders = {
+            ...(entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {}),
+            ...(_cancelReplyThreadIdx
+              ? {
+                  'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
+                  'Thread-Index': _cancelReplyThreadIdx,
+                }
+              : {}),
+          };
           const approverEmails = await getApproverEmails(
             entry.filer_role,
             entry.filer_team,
