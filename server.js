@@ -1996,7 +1996,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `PTO Lead-Approved \u2013 ${displayName} \u2013 ${dateRange}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p>This request is still pending final Manager's review and approval.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
@@ -2023,7 +2023,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `PTO Approved \u2013 ${displayName} \u2013 ${dateRange}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.`,
@@ -2128,7 +2128,7 @@ app.patch(
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
               ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
-              subject: `PTO Denied \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(dateRange)}`,
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(dateRange)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>`,
@@ -2317,7 +2317,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `PTO Lead-Approved \u2013 ${displayName} \u2013 ${entryDate}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p>This request is still pending final Manager's review and approval.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
@@ -2346,7 +2346,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  subject: `PTO Approved \u2013 ${displayName} \u2013 ${entryDate}`,
+                  subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${entry.entry_date} fully approved by ${req.userName || req.userEmail}.`,
@@ -2446,7 +2446,7 @@ app.patch(
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
               ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
-              subject: `PTO Denied \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(entry.entry_date)}`,
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>`,
@@ -2537,7 +2537,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: toList.join(', '),
-              subject: `PTO Cancelled \u2013 ${escapeEmailHtml(entry.user_name || entry.user_upn)} \u2013 ${escapeEmailHtml(entry.entry_date)}`,
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${entry.entry_date}`,
               html: `<p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(entry.entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
 <p>No further action is needed.</p>`,
