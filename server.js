@@ -24,6 +24,12 @@ const BREVO_SMTP_KEY = process.env.BREVO_SMTP_KEY || '';
 const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
 const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
 const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
+// Optional fixed CC list for PM final approval emails (HR, managers, etc.)
+// Comma-separated list of email addresses, e.g. "hr@company.com,ceo@company.com"
+const EXTRA_CC_EMAILS = (process.env.EXTRA_CC_EMAILS || '')
+  .split(',')
+  .map((e) => e.trim())
+  .filter((e) => e.includes('@'));
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
 const PTO_APPROVAL_ENABLED = process.env.PTO_APPROVAL_ENABLED !== 'false';
 
@@ -1975,7 +1981,7 @@ app.patch(
     try {
       const batchRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                status, filer_role, email_message_id
+                status, filer_role, email_message_id, notes, created_at
          FROM public.pto_entries WHERE batch_id = $1
          ORDER BY entry_date ASC`,
         [batchId],
@@ -2092,14 +2098,52 @@ app.patch(
                 ...new Set([entry.user_upn, ...leadEmails]),
               ].filter(Boolean);
               if (toList.length) {
+                // Regenerate PDF for attachment (totalDays = batch row count)
+                let pmBatchAttachments = [];
+                try {
+                  const totalDays = batchRes.rows.length;
+                  const pdfBuf = await generatePtoPdf({
+                    userName: entry.user_name || entry.user_upn,
+                    entryDate: batchRes.rows[0].entry_date,
+                    entryDateTo:
+                      totalDays > 1
+                        ? batchRes.rows[batchRes.rows.length - 1].entry_date
+                        : null,
+                    totalDays,
+                    hours: entry.hours,
+                    leaveType: entry.leave_type,
+                    notes: entry.notes || '',
+                    submittedAt: entry.created_at
+                      ? new Date(entry.created_at).toUTCString()
+                      : new Date().toUTCString(),
+                  });
+                  const dateFrom = batchRes.rows[0].entry_date;
+                  const dateTo =
+                    batchRes.rows[batchRes.rows.length - 1].entry_date;
+                  pmBatchAttachments = [
+                    {
+                      filename:
+                        totalDays > 1
+                          ? `pto_approved_${dateFrom}_to_${dateTo}.pdf`
+                          : `pto_approved_${dateFrom}.pdf`,
+                      content: pdfBuf,
+                      contentType: 'application/pdf',
+                    },
+                  ];
+                } catch (pdfErr) {
+                  console.error('PM batch approval PDF error:', pdfErr);
+                }
+                const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
+                  ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.`,
                   headers: replyHeaders,
+                  attachments: pmBatchAttachments,
                 });
               }
             }
@@ -2319,7 +2363,8 @@ app.patch(
     try {
       const entryRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              status, filer_role, email_message_id
+              status, filer_role, email_message_id, batch_id, notes,
+              created_at
        FROM public.pto_entries WHERE id = $1`,
         [id],
       );
@@ -2436,14 +2481,42 @@ app.patch(
                 Boolean,
               );
               if (toList.length) {
+                // Regenerate PDF for attachment
+                let pmApprovalAttachments = [];
+                try {
+                  const pdfBuf = await generatePtoPdf({
+                    userName: entry.user_name || entry.user_upn,
+                    entryDate: entry.entry_date,
+                    entryDateTo: null,
+                    totalDays: 1,
+                    hours: entry.hours,
+                    leaveType: entry.leave_type,
+                    notes: entry.notes || '',
+                    submittedAt: entry.created_at
+                      ? new Date(entry.created_at).toUTCString()
+                      : new Date().toUTCString(),
+                  });
+                  pmApprovalAttachments = [
+                    {
+                      filename: `pto_approved_${entry.entry_date}.pdf`,
+                      content: pdfBuf,
+                      contentType: 'application/pdf',
+                    },
+                  ];
+                } catch (pdfErr) {
+                  console.error('PM approval PDF error:', pdfErr);
+                }
+                const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
+                  ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   <p>The approved request has been added to the team calendar.</p>`,
                   text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.`,
                   headers: replyHeaders,
+                  attachments: pmApprovalAttachments,
                 });
               }
             }
