@@ -117,10 +117,24 @@
     }
 
     .filters {
-      display: grid;
+      display: flex;
+      flex-wrap: wrap;
       gap: 16px;
-      grid-template-columns: 2fr 1fr 1fr;
-      align-items: end;
+      align-items: flex-end;
+    }
+
+    .filter-dates {
+      flex: 1 1 300px;
+    }
+
+    .filter-assigned {
+      flex: 0 1 220px;
+      min-width: 180px;
+    }
+
+    .filters .actions {
+      flex: 0 0 auto;
+      margin-left: auto;
     }
 
     .presets {
@@ -384,8 +398,12 @@
     }
 
     @media (max-width: 960px) {
-      .filters {
-        grid-template-columns: 1fr 1fr;
+      .filter-assigned {
+        flex: 1 1 180px;
+      }
+
+      .filters .actions {
+        margin-left: 0;
       }
 
       .actions {
@@ -861,7 +879,7 @@
     <div id="tabReport" class="tab-panel">
 
       <section class="panel filters">
-        <div>
+        <div class="filter-dates">
           <label>Report Date Range <span class="tz" id="tzLabel">UTC</span></label>
           <div class="range">
             <input id="from" type="date" />
@@ -876,7 +894,7 @@
             <button type="button" class="preset-btn" data-preset="last30">Last 30 days</button>
           </div>
         </div>
-        <div>
+        <div class="filter-assigned">
           <label>Assigned To</label>
           <input id="assignedTo" list="assignedToList" placeholder="Name or UPN" autocomplete="off" />
           <datalist id="assignedToList"></datalist>
