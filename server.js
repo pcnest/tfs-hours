@@ -2200,7 +2200,7 @@ app.patch(
             const dateRange = _batchDenyDateRange;
             const approverEmails = await getApproverEmails(
               entry.filer_role,
-              null,
+              entry.filer_team,
               entry.user_upn,
             );
             const ccEmails = approverEmails.filter(
@@ -2476,7 +2476,7 @@ app.patch(
     try {
       const entryRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              status, filer_role, email_message_id
+              status, filer_role, filer_team, email_message_id
        FROM public.pto_entries WHERE id = $1`,
         [id],
       );
