@@ -1063,7 +1063,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
       -- the same logical save; keeping only the last-of-day per task matches the
       -- desktop app behaviour (PST offset applied via $3).
       SELECT DISTINCT ON (task_id, (t + ($3::text || ' minutes')::interval)::date)
-        task_id, snapshot_at, t, task_assigned_upn, task_assigned_to,
+        run_id, task_id, snapshot_at, t, task_assigned_upn, task_assigned_to,
         task_activity, task_changed_by, task_changed_by_upn, h,
         ticket_id, feature_id, cost_type
       FROM snaps
