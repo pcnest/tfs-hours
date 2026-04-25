@@ -1005,7 +1005,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
   const offset = Math.max(0, Number(req.query.offset || 0));
 
-  const params = [from.toISOString(), toExclusive.toISOString()];
+  const params = [from.toISOString(), toExclusive.toISOString(), offsetMin];
   let idx = params.length;
 
   const filters = [];
@@ -1057,16 +1057,28 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
       FROM public.tfs_task_hours_snapshots s
       ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
     ),
+    daily_snaps AS (
+      -- Collapse multiple saves on the same local calendar day to the final value.
+      -- Multiple sync runs on the same day can create distinct UTC timestamps for
+      -- the same logical save; keeping only the last-of-day per task matches the
+      -- desktop app behaviour (PST offset applied via $3).
+      SELECT DISTINCT ON (task_id, (t + ($3::text || ' minutes')::interval)::date)
+        task_id, snapshot_at, t, task_assigned_upn, task_assigned_to,
+        task_activity, task_changed_by, task_changed_by_upn, h,
+        ticket_id, feature_id, cost_type
+      FROM snaps
+      ORDER BY task_id, (t + ($3::text || ' minutes')::interval)::date, t DESC, snapshot_at DESC
+    ),
     prior AS (
       SELECT DISTINCT ON (task_id)
         task_id, snapshot_at, t, h
-      FROM snaps
+      FROM daily_snaps
       WHERE t < $1::timestamptz
       ORDER BY task_id, t DESC, snapshot_at DESC
     ),
     inrange AS (
       SELECT *
-      FROM snaps
+      FROM daily_snaps
       WHERE t >= $1::timestamptz AND t < $2::timestamptz
     ),
     s AS (
@@ -1152,7 +1164,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
       COUNT(*) OVER() AS total_count
     FROM d
     LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
-    WHERE d.actual_hours > 0
+    WHERE d.delta_hours <> 0
       ${filters.join('\n ')}
     ORDER BY d.changed_at ASC, d.task_id ASC
     LIMIT $${idx - 1} OFFSET $${idx};
