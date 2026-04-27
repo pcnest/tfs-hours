@@ -1,1 +1,9 @@
-agent/last_sync.json
+node_modules/
+.env
+.env.*
+!.env.example
+agent/
+*.csv
+
+#misc
+migrate-approval.js
