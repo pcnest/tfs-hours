@@ -257,6 +257,12 @@ function fmtHours(v) {
   }).format(n);
 }
 
+const COST_TYPE_LABELS = { 1: 'Capitalized', 2: 'Expense' };
+function fmtCostType(v) {
+  const key = String(v ?? '').trim();
+  return COST_TYPE_LABELS[key] ?? key;
+}
+
 function setStatus(text) {
   const el = qs('status');
   if (el) el.textContent = text;
@@ -287,13 +293,126 @@ function renderReportRows(rows) {
         <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
         <td>${escapeHtml(x.task_activity || '')}</td>
         <td>${escapeHtml(fmtDateTime(x.changed_at))}</td>
-        <td>${escapeHtml(x.cost_type || '')}</td>
+        <td>${escapeHtml(fmtCostType(x.cost_type))}</td>
         <td>${fmtHours(x.actual_hours)}</td>
         <td>${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
     `,
     )
     .join('');
+}
+
+// -------- Table filter bar --------
+
+function populateTableFilters(rows) {
+  const ticketTypes = [
+    ...new Set(rows.map((r) => r.ticket_type || '').filter(Boolean)),
+  ].sort();
+  const activities = [
+    ...new Set(rows.map((r) => r.task_activity || '').filter(Boolean)),
+  ].sort();
+
+  const selType = qs('tf_ticket_type');
+  if (selType) {
+    const prev = selType.value;
+    selType.innerHTML =
+      '<option value="">All</option>' +
+      ticketTypes
+        .map(
+          (t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`,
+        )
+        .join('');
+    if (prev && ticketTypes.includes(prev)) selType.value = prev;
+  }
+
+  const selActivity = qs('tf_activity');
+  if (selActivity) {
+    const prev = selActivity.value;
+    selActivity.innerHTML =
+      '<option value="">All</option>' +
+      activities
+        .map(
+          (a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`,
+        )
+        .join('');
+    if (prev && activities.includes(prev)) selActivity.value = prev;
+  }
+
+  const bar = qs('tableFilterBar');
+  if (bar) bar.hidden = rows.length === 0;
+}
+
+function applyTableFilters() {
+  const filterType = (qs('tf_ticket_type')?.value || '').toLowerCase();
+  const filterCost = (qs('tf_cost_type')?.value || '').toLowerCase();
+  const filterActivity = (qs('tf_activity')?.value || '').toLowerCase();
+  const filterDate = (qs('tf_date')?.value || '').trim();
+  const filterSearch = (qs('tf_search')?.value || '').toLowerCase().trim();
+
+  const tz = reportTimeZone();
+  const off = tzOffsetMinutes();
+
+  const filtered = LAST_ROWS.filter((x) => {
+    if (filterType && (x.ticket_type || '').toLowerCase() !== filterType)
+      return false;
+    if (filterCost && fmtCostType(x.cost_type).toLowerCase() !== filterCost)
+      return false;
+    if (
+      filterActivity &&
+      (x.task_activity || '').toLowerCase() !== filterActivity
+    )
+      return false;
+    if (filterDate) {
+      if (!x.changed_at) return false;
+      const d = new Date(x.changed_at);
+      if (isNaN(d.getTime())) return false;
+      const localYmd = tz
+        ? formatYmdInZone(d, tz)
+        : shiftDateByOffset(d, off).toISOString().slice(0, 10);
+      if (localYmd !== filterDate) return false;
+    }
+    if (filterSearch) {
+      const haystack =
+        `${x.ticket_title || ''} ${x.task_title || ''}`.toLowerCase();
+      if (!haystack.includes(filterSearch)) return false;
+    }
+    return true;
+  });
+
+  qs('tbodyReport').innerHTML = renderReportRows(filtered);
+  updateStats(filtered);
+
+  // Update row count label
+  let countEl = qs('tableFilterCount');
+  if (!countEl) {
+    countEl = document.createElement('span');
+    countEl.id = 'tableFilterCount';
+    countEl.className = 'table-filter-count';
+    const bar = qs('tableFilterBar');
+    if (bar) bar.appendChild(countEl);
+  }
+  const isFiltered =
+    filterType || filterCost || filterActivity || filterDate || filterSearch;
+  countEl.textContent = isFiltered
+    ? `Showing ${filtered.length} of ${LAST_ROWS.length} rows`
+    : `${LAST_ROWS.length} rows`;
+}
+
+function clearTableFilters() {
+  const ids = [
+    'tf_ticket_type',
+    'tf_cost_type',
+    'tf_activity',
+    'tf_date',
+    'tf_search',
+  ];
+  ids.forEach((id) => {
+    const el = qs(id);
+    if (!el) return;
+    if (el.tagName === 'SELECT') el.value = '';
+    else el.value = '';
+  });
+  applyTableFilters();
 }
 
 async function fetchDailyAnnotations(fromYmd, toYmd, assignedTo) {
@@ -443,14 +562,16 @@ async function loadReport() {
   const rows = data.rows || [];
   LAST_ROWS = rows;
 
-  qs('tbodyReport').innerHTML = renderReportRows(rows);
+  clearTableFilters(); // reset filters whenever a new report loads
+  populateTableFilters(rows); // rebuild dropdowns from new data
+  applyTableFilters(); // renders tbodyReport + updates stats
+
   qs('tbodyDailyHours').innerHTML = renderDailyHoursTable(
     rows,
     fromYmd,
     toYmd,
     annotations,
   );
-  updateStats(rows);
   await loadMetrics(rows);
   qs('btnExport').disabled = rows.length === 0;
   qs('btnDailyView').disabled = rows.length === 0;
@@ -484,7 +605,7 @@ function exportCsv() {
       x.task_title,
       x.task_activity,
       fmtDateTime(x.changed_at),
-      x.cost_type,
+      fmtCostType(x.cost_type),
       x.actual_hours,
       x.task_assigned_to,
     ];
@@ -1124,6 +1245,19 @@ qs('btnLoad').addEventListener('click', async () => {
 qs('btnExport').addEventListener('click', () => {
   exportCsv();
 });
+
+// Table filter bar — live filtering on every input/change
+[
+  'tf_ticket_type',
+  'tf_cost_type',
+  'tf_activity',
+  'tf_date',
+  'tf_search',
+].forEach((id) => {
+  qs(id)?.addEventListener('input', applyTableFilters);
+  qs(id)?.addEventListener('change', applyTableFilters);
+});
+qs('btnClearFilters')?.addEventListener('click', clearTableFilters);
 
 qs('btnDailyView').addEventListener('click', () => {
   qs('dailyModal').showModal();
