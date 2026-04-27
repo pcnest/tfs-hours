@@ -264,7 +264,7 @@ function setStatus(text) {
 
 function updateStats(rows) {
   const totalHours = rows.reduce((acc, r) => {
-    const n = Number(r.delta_hours || 0);
+    const n = Number(r.actual_hours || 0);
     return acc + (Number.isFinite(n) ? n : 0);
   }, 0);
   qs('m_hours').textContent = fmtHours(totalHours);
@@ -351,7 +351,7 @@ function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
     const localYmd = tz
       ? formatYmdInZone(d, tz)
       : shiftDateByOffset(d, off).toISOString().slice(0, 10);
-    const h = Number(row.delta_hours || 0);
+    const h = Number(row.actual_hours || 0);
     dayTotals.set(
       localYmd,
       (dayTotals.get(localYmd) || 0) + (Number.isFinite(h) ? h : 0),
