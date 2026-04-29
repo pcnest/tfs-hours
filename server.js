@@ -21,6 +21,7 @@ const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
 
 const BREVO_SMTP_USER = process.env.BREVO_SMTP_USER || '';
 const BREVO_SMTP_KEY = process.env.BREVO_SMTP_KEY || '';
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
 const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
 const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
 const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
@@ -33,15 +34,65 @@ const EXTRA_CC_EMAILS = (process.env.EXTRA_CC_EMAILS || '')
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
 const PTO_APPROVAL_ENABLED = process.env.PTO_APPROVAL_ENABLED !== 'false';
 
+function parseEmailList(str) {
+  if (!str) return [];
+  return String(str)
+    .split(',')
+    .map((s) => {
+      const m = s.trim().match(/^"?([^"<]*)"?\s*<([^>]+)>$/);
+      if (m) {
+        const name = m[1].trim();
+        return name ? { name, email: m[2].trim() } : { email: m[2].trim() };
+      }
+      const e = s.trim();
+      return e ? { email: e } : null;
+    })
+    .filter(Boolean);
+}
+
 function createMailTransporter() {
-  return nodemailer.createTransport({
-    host: 'smtp-relay.brevo.com',
-    port: 587,
-    secure: false,
-    auth: { user: BREVO_SMTP_USER, pass: BREVO_SMTP_KEY },
-    connectionTimeout: 10000,
-    socketTimeout: 15000,
-  });
+  return {
+    sendMail: async (opts) => {
+      const { from, to, cc, subject, html, text, headers, attachments } = opts;
+      const senderList = parseEmailList(from);
+      const sender = senderList[0] || {
+        email: NOTIFY_FROM_EMAIL,
+        name: NOTIFY_FROM_NAME,
+      };
+      const body = {
+        sender,
+        to: parseEmailList(to),
+        subject,
+        ...(html ? { htmlContent: html } : {}),
+        ...(text ? { textContent: text } : {}),
+        ...(cc ? { cc: parseEmailList(cc) } : {}),
+        ...(headers && Object.keys(headers).length ? { headers } : {}),
+        ...(attachments?.length
+          ? {
+              attachment: attachments.map((a) => ({
+                name: a.filename,
+                content: Buffer.isBuffer(a.content)
+                  ? a.content.toString('base64')
+                  : a.content,
+              })),
+            }
+          : {}),
+      };
+      const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': BREVO_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => resp.statusText);
+        throw new Error(`Brevo API error ${resp.status}: ${errText}`);
+      }
+      return resp.json();
+    },
+  };
 }
 
 function escapeEmailHtml(v) {
@@ -88,7 +139,7 @@ app.get('/api/config', (req, res) => {
     reportTzLabel: REPORT_TZ_LABEL,
     reportTzIana: REPORT_TZ_IANA || null,
     notifyManagerEmail: NOTIFY_MANAGER_EMAIL || null,
-    smtpConfigured: !!(BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL),
+    smtpConfigured: !!(BREVO_API_KEY && NOTIFY_FROM_EMAIL),
   });
 });
 
@@ -1824,7 +1875,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     //   - pending:  approval notification with PDF attached → to approvers, CC filer
     //   - approved: auto-approve receipt with PDF attached  → to filer only
     let pdfEmailSent = false;
-    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+    if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
       (async () => {
         try {
           const submittedAt = new Date().toUTCString();
@@ -2037,7 +2088,7 @@ app.patch(
       }
 
       // Send one notification email covering the whole range (non-blocking)
-      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
             const transporter = createMailTransporter();
@@ -2218,7 +2269,7 @@ app.patch(
       const updatedRows = r.rows;
 
       // One denial email covering the whole range (non-blocking)
-      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
             const transporter = createMailTransporter();
@@ -2420,7 +2471,7 @@ app.patch(
       }
 
       // Send notification emails (non-blocking)
-      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
             const transporter = createMailTransporter();
@@ -2591,7 +2642,7 @@ app.patch(
       const updatedRow = r.rows[0];
 
       // Notify filer of denial; CC approvers (non-blocking)
-      if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
             const transporter = createMailTransporter();
@@ -2693,7 +2744,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
     const updatedRow = r.rows[0];
 
     // Notify approvers of cancellation (non-blocking)
-    if (BREVO_SMTP_USER && BREVO_SMTP_KEY && NOTIFY_FROM_EMAIL) {
+    if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
       (async () => {
         try {
           const transporter = createMailTransporter();
@@ -3296,11 +3347,10 @@ app.post(
   requireAuth,
   requireManagerOrAbove,
   async (req, res) => {
-    if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY) {
+    if (!BREVO_API_KEY) {
       return res.status(503).json({
         ok: false,
-        error:
-          'SMTP not configured on server (BREVO_SMTP_USER / BREVO_SMTP_KEY).',
+        error: 'BREVO_API_KEY not configured on server.',
       });
     }
     if (!NOTIFY_FROM_EMAIL) {
