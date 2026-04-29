@@ -3436,7 +3436,15 @@ app.post(
 
       // 7 — Send individual emails
       const transporter = createMailTransporter();
-      const period = `${fromStr} to ${toStr}`;
+      const fmtPeriodDate = (s) => {
+        const [y, m, d] = s.split('-');
+        return new Date(+y, +m - 1, +d).toLocaleDateString('en-US', {
+          month: 'long',
+          day: '2-digit',
+          year: 'numeric',
+        });
+      };
+      const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
       let sent = 0;
       const errors = [];
 
@@ -3465,7 +3473,9 @@ app.post(
               </tr>
             </tbody>
           </table>
-          <p>Please log your hours in TFS at your earliest convenience.</p>
+          <p><strong>Please log your hours in TFS at your earliest convenience.</strong></p>
+          <p>If there are approved exceptions, weekend deployment coverage, or manual adjustments that should be considered, please coordinate the necessary correction.</p>
+          <p>Thank you for your attention to this matter.</p>
           <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
         </div>`;
         try {
@@ -3499,8 +3509,9 @@ app.post(
           .join('');
         const digestHtml = `
         <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
-          <p><strong>${offenders.length} user(s)</strong> have missing hours
-             &gt; ${fmtH(threshold)}h for <strong>${escapeEmailHtml(period)}</strong>:</p>
+          <p>Hi @all,</p>
+          <p>The following <strong>${offenders.length} team member(s)</strong> have <strong>more than
+             ${fmtH(threshold)} hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
           <table border="1" cellpadding="8" cellspacing="0"
                  style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
             <thead>
@@ -3511,6 +3522,8 @@ app.post(
             </thead>
             <tbody>${tableRows}</tbody>
           </table>
+          <p>Please review and confirm whether the missing hours need correction or require follow-up with the team member.</p>
+          <p>Thank you.</p>
           <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
         </div>`;
         try {
