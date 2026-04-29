@@ -39,6 +39,8 @@ function createMailTransporter() {
     port: 587,
     secure: false,
     auth: { user: BREVO_SMTP_USER, pass: BREVO_SMTP_KEY },
+    connectionTimeout: 10000,
+    socketTimeout: 15000,
   });
 }
 

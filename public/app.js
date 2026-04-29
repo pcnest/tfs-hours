@@ -1494,8 +1494,12 @@ qs('btnNotify')?.addEventListener('click', async () => {
     if (!r.ok || !j.ok) {
       statusEl.textContent = `Error: ${j.error || `HTTP ${r.status}`}`;
     } else if (j.sent === 0) {
+      const errDetail = j.errors?.length
+        ? ` Errors: ${j.errors.map((e) => e.error).join('; ')}`
+        : '';
       statusEl.textContent =
-        j.message || 'No users exceed the threshold \u2014 no emails sent.';
+        j.message ||
+        `0 of ${j.offenders} email(s) sent \u2014 all failed.${errDetail}`;
     } else {
       statusEl.textContent =
         `Done \u2014 ${j.sent} of ${j.offenders} email(s) sent.` +
