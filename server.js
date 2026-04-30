@@ -108,6 +108,11 @@ function fmtH(n) {
   return Number.isFinite(v) ? v.toFixed(1) : '0.0';
 }
 
+function fmtWorkingDaysFromHours(hours) {
+  const days = Number(hours) / 8;
+  return Number.isFinite(days) ? days.toFixed(1) : '0.0';
+}
+
 if (!DATABASE_URL) {
   console.error('ERROR: DATABASE_URL env var not set.');
   process.exit(1);
@@ -3511,7 +3516,7 @@ app.post(
         <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
           <p>Hi @all,</p>
           <p>The following <strong>${offenders.length} team member(s)</strong> have <strong>more than
-             ${fmtH(threshold)} hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
+             ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
           <table border="1" cellpadding="8" cellspacing="0"
                  style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
             <thead>
