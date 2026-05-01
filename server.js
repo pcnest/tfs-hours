@@ -724,7 +724,7 @@ function buildSnapshotInsert(runId, snapshotAt, rows) {
   const text = `
     INSERT INTO public.tfs_task_hours_snapshots (${cols.join(',')})
     VALUES ${valuesSql}
-    ON CONFLICT (run_id, task_id, task_changed_date) DO UPDATE SET
+    ON CONFLICT (task_id, task_changed_date) DO UPDATE SET
       snapshot_at       = EXCLUDED.snapshot_at,
       task_assigned_upn = EXCLUDED.task_assigned_upn,
       task_assigned_to  = EXCLUDED.task_assigned_to,
