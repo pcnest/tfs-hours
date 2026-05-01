@@ -1,5 +1,8 @@
 let APP_CFG = null;
 let LAST_ROWS = [];
+let LAST_FILTERED = [];
+let CURRENT_PAGE = 1;
+let CURRENT_PAGE_SIZE = 50;
 let USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
 let USERS_CACHE = [];
@@ -302,6 +305,75 @@ function renderReportRows(rows) {
     .join('');
 }
 
+// -------- Pagination --------
+
+function renderPage() {
+  const filtered = LAST_FILTERED;
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / CURRENT_PAGE_SIZE));
+  CURRENT_PAGE = Math.min(CURRENT_PAGE, totalPages);
+  const start = (CURRENT_PAGE - 1) * CURRENT_PAGE_SIZE;
+  const pageRows = filtered.slice(start, start + CURRENT_PAGE_SIZE);
+  qs('tbodyReport').innerHTML = renderReportRows(pageRows);
+  renderPagination(total);
+}
+
+function renderPagination(total) {
+  const el = qs('tablePagination');
+  if (!el) return;
+  if (total === 0) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+
+  const totalPages = Math.max(1, Math.ceil(total / CURRENT_PAGE_SIZE));
+  const page = CURRENT_PAGE;
+  const start = (page - 1) * CURRENT_PAGE_SIZE + 1;
+  const end = Math.min(page * CURRENT_PAGE_SIZE, total);
+
+  // Build page number buttons with ellipsis
+  const pages = new Set([1, totalPages, page]);
+  if (page > 1) pages.add(page - 1);
+  if (page < totalPages) pages.add(page + 1);
+  const sortedPages = [...pages].sort((a, b) => a - b);
+
+  let pageButtons = '';
+  let prev = null;
+  for (const p of sortedPages) {
+    if (prev !== null && p - prev > 1) {
+      pageButtons += `<span class="pg-ellipsis">&hellip;</span>`;
+    }
+    pageButtons += `<button class="pg-btn${p === page ? ' pg-btn-active' : ''}" data-page="${p}" aria-label="Page ${p}"${p === page ? ' aria-current="page"' : ''}>${p}</button>`;
+    prev = p;
+  }
+
+  const pageSizeOptions = [50, 100, 200]
+    .map(
+      (n) =>
+        `<option value="${n}"${n === CURRENT_PAGE_SIZE ? ' selected' : ''}>${n}</option>`,
+    )
+    .join('');
+
+  el.innerHTML = `
+    <div class="pg-info">Showing ${start}&ndash;${end} of ${total} rows</div>
+    <div class="pg-controls">
+      <button class="pg-btn pg-nav" data-page="${page - 1}" aria-label="Previous page"${page === 1 ? ' disabled' : ''}>&lsaquo;</button>
+      ${pageButtons}
+      <button class="pg-btn pg-nav" data-page="${page + 1}" aria-label="Next page"${page === totalPages ? ' disabled' : ''}>&rsaquo;</button>
+    </div>
+    <div class="pg-size">
+      <label for="pgPageSize">Rows</label>
+      <select id="pgPageSize" aria-label="Rows per page">${pageSizeOptions}</select>
+    </div>`;
+
+  qs('pgPageSize')?.addEventListener('change', (e) => {
+    CURRENT_PAGE_SIZE = Number(e.target.value);
+    CURRENT_PAGE = 1;
+    renderPage();
+  });
+}
+
 // -------- Table filter bar --------
 
 function populateTableFilters(rows) {
@@ -379,10 +451,12 @@ function applyTableFilters() {
     return true;
   });
 
-  qs('tbodyReport').innerHTML = renderReportRows(filtered);
+  LAST_FILTERED = filtered;
+  CURRENT_PAGE = 1;
   updateStats(filtered);
+  renderPage();
 
-  // Update row count label
+  // Update row count label (reflects filter state; pagination detail is in the pagination bar)
   let countEl = qs('tableFilterCount');
   if (!countEl) {
     countEl = document.createElement('span');
@@ -394,7 +468,7 @@ function applyTableFilters() {
   const isFiltered =
     filterType || filterCost || filterActivity || filterDate || filterSearch;
   countEl.textContent = isFiltered
-    ? `Showing ${filtered.length} of ${LAST_ROWS.length} rows`
+    ? `${filtered.length} of ${LAST_ROWS.length} rows`
     : `${LAST_ROWS.length} rows`;
 }
 
@@ -1258,6 +1332,21 @@ qs('btnExport').addEventListener('click', () => {
   qs(id)?.addEventListener('change', applyTableFilters);
 });
 qs('btnClearFilters')?.addEventListener('click', clearTableFilters);
+
+// Pagination — delegated click on page buttons
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.pg-btn[data-page]');
+  if (!btn || btn.disabled) return;
+  const p = Number(btn.dataset.page);
+  const totalPages = Math.max(
+    1,
+    Math.ceil(LAST_FILTERED.length / CURRENT_PAGE_SIZE),
+  );
+  if (!p || p < 1 || p > totalPages) return;
+  CURRENT_PAGE = p;
+  renderPage();
+  qs('tbodyReport')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
 
 qs('btnDailyView').addEventListener('click', () => {
   qs('dailyModal').showModal();

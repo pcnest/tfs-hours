@@ -918,6 +918,102 @@
       padding-bottom: 8px;
       white-space: nowrap;
     }
+
+    /* ---- Pagination bar ---- */
+    .table-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 8px 4px 2px;
+    }
+
+    .pg-info {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .pg-controls {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .pg-btn {
+      min-width: 32px;
+      height: 32px;
+      padding: 0 8px;
+      border-radius: 8px;
+      border: 1px solid var(--stroke);
+      background: white;
+      color: var(--ink);
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transform: none;
+      box-shadow: none;
+      line-height: 1;
+    }
+
+    .pg-btn:hover:not(:disabled):not(.pg-btn-active) {
+      background: var(--bg-2);
+      transform: none;
+      box-shadow: none;
+    }
+
+    .pg-btn-active {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      cursor: default;
+    }
+
+    .pg-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .pg-nav {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .pg-ellipsis {
+      font-size: 13px;
+      color: var(--muted);
+      padding: 0 4px;
+      line-height: 32px;
+      display: inline-block;
+    }
+
+    .pg-size {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .pg-size select {
+      width: auto;
+      padding: 5px 28px 5px 10px;
+      font-size: 12px;
+      border-radius: 8px;
+    }
+
+    .pg-size label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0;
+    }
   </style>
 </head>
 
@@ -1107,6 +1203,8 @@
             </tbody>
           </table>
         </section>
+
+        <div id="tablePagination" class="table-pagination" hidden></div>
 
       </div><!-- /report-body -->
 
