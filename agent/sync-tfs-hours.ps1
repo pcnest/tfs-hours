@@ -401,6 +401,12 @@ if ($SyncKey) { $syncHeaders["x-api-key"] = $SyncKey }
 
 Write-Host "Posting rows: $($taskRows.Count) -> $SyncUrl"
 
+if ($taskRows.Count -eq 0) {
+  Write-Host "No new rows to sync — skipping POST and advancing watermark."
+  Write-LastSyncUtc ([DateTime]::UtcNow)
+  exit 0
+}
+
 $bodyJson = ($payload | ConvertTo-Json -Depth 50)
 $r = Invoke-RestMethod -Method POST -Uri $SyncUrl -Headers $syncHeaders -Body $bodyJson
 
