@@ -1358,6 +1358,24 @@ app.get('/api/pto-users', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/report-registered-users', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        COALESCE(NULLIF(name, ''), email) AS name,
+        email                             AS upn
+      FROM public.users
+      WHERE email IS NOT NULL
+        AND email <> ''
+        AND email LIKE '%@%'
+      ORDER BY COALESCE(NULLIF(name, ''), email) ASC, email ASC
+    `);
+    res.json({ ok: true, users: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Cost types ----------
 app.get('/api/cost-types', requireAuth, async (req, res) => {
   try {

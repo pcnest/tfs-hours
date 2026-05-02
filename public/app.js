@@ -4,9 +4,11 @@ let LAST_FILTERED = [];
 let CURRENT_PAGE = 1;
 let CURRENT_PAGE_SIZE = 50;
 let REPORT_USERS_LOADED = false;
+let REPORT_REGISTERED_USERS_LOADED = false;
 let PTO_USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
 let REPORT_USERS_CACHE = [];
+let REPORT_REGISTERED_USERS_CACHE = [];
 let PTO_USERS_CACHE = [];
 
 function token() {
@@ -48,19 +50,42 @@ function csvEscape(v) {
 async function loadUsers() {
   if (REPORT_USERS_LOADED) return;
   try {
-    const r = await apiFetch('/api/users');
+    const role = window.CURRENT_USER?.role;
+    const isPrivileged = role === 'admin' || role === 'pm';
+    const reportReq = apiFetch('/api/users');
+    const registeredReq = isPrivileged
+      ? loadReportRegisteredUsers()
+      : Promise.resolve();
+
+    const r = await reportReq;
+    await registeredReq;
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
     REPORT_USERS_CACHE = j.users || [];
     const dl = qs('assignedToList');
     if (!dl) return;
-    dl.innerHTML = j.users
+    const datalistUsers =
+      isPrivileged && REPORT_REGISTERED_USERS_LOADED
+      ? intersectReportUsers(REPORT_USERS_CACHE, REPORT_REGISTERED_USERS_CACHE)
+      : REPORT_USERS_CACHE;
+    dl.innerHTML = datalistUsers
       .map(
         (u) =>
           `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
       )
       .join('');
     REPORT_USERS_LOADED = true;
+  } catch {}
+}
+
+async function loadReportRegisteredUsers() {
+  if (REPORT_REGISTERED_USERS_LOADED) return;
+  try {
+    const r = await apiFetch('/api/report-registered-users');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) return;
+    REPORT_REGISTERED_USERS_CACHE = j.users || [];
+    REPORT_REGISTERED_USERS_LOADED = true;
   } catch {}
 }
 
@@ -73,6 +98,36 @@ async function loadPtoUsers() {
     PTO_USERS_CACHE = j.users || [];
     PTO_USERS_LOADED = true;
   } catch {}
+}
+
+function intersectReportUsers(reportUsers, registeredUsers) {
+  const registeredUpns = new Set(
+    registeredUsers
+      .map((u) => String(u?.upn || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const uniqueRegisteredNames = new Set();
+  const duplicateRegisteredNames = new Set();
+  registeredUsers.forEach((u) => {
+    const key = String(u?.name || '').trim().toLowerCase();
+    if (!key) return;
+    if (uniqueRegisteredNames.has(key)) duplicateRegisteredNames.add(key);
+    else uniqueRegisteredNames.add(key);
+  });
+
+  const seenNames = new Set();
+  return reportUsers.filter((u) => {
+    const upnKey = String(u?.upn || '').trim().toLowerCase();
+    const nameKey = String(u?.name || '').trim().toLowerCase();
+    const include =
+      (upnKey && registeredUpns.has(upnKey)) ||
+      (nameKey &&
+        uniqueRegisteredNames.has(nameKey) &&
+        !duplicateRegisteredNames.has(nameKey));
+    if (!include || !nameKey || seenNames.has(nameKey)) return false;
+    seenNames.add(nameKey);
+    return true;
+  });
 }
 
 async function loadCostTypes() {
