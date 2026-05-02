@@ -3,9 +3,11 @@ let LAST_ROWS = [];
 let LAST_FILTERED = [];
 let CURRENT_PAGE = 1;
 let CURRENT_PAGE_SIZE = 50;
-let USERS_LOADED = false;
+let REPORT_USERS_LOADED = false;
+let PTO_USERS_LOADED = false;
 let COST_TYPES_LOADED = false;
-let USERS_CACHE = [];
+let REPORT_USERS_CACHE = [];
+let PTO_USERS_CACHE = [];
 
 function token() {
   return localStorage.getItem('tfsHoursToken');
@@ -44,12 +46,12 @@ function csvEscape(v) {
 }
 
 async function loadUsers() {
-  if (USERS_LOADED) return;
+  if (REPORT_USERS_LOADED) return;
   try {
     const r = await apiFetch('/api/users');
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) return;
-    USERS_CACHE = j.users || [];
+    REPORT_USERS_CACHE = j.users || [];
     const dl = qs('assignedToList');
     if (!dl) return;
     dl.innerHTML = j.users
@@ -58,7 +60,18 @@ async function loadUsers() {
           `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
       )
       .join('');
-    USERS_LOADED = true;
+    REPORT_USERS_LOADED = true;
+  } catch {}
+}
+
+async function loadPtoUsers() {
+  if (PTO_USERS_LOADED) return;
+  try {
+    const r = await apiFetch('/api/pto-users');
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) return;
+    PTO_USERS_CACHE = j.users || [];
+    PTO_USERS_LOADED = true;
   } catch {}
 }
 
@@ -743,11 +756,9 @@ async function populatePtoUserList() {
   const dl = qs('ptoUserList');
   if (!dl || dl.dataset.loaded) return;
   try {
-    const r = await apiFetch('/api/users');
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) return;
-    USERS_CACHE = j.users || [];
-    dl.innerHTML = j.users
+    await loadPtoUsers();
+    if (!PTO_USERS_CACHE.length) return;
+    dl.innerHTML = PTO_USERS_CACHE
       .map(
         (u) =>
           `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
@@ -1151,7 +1162,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   const leave_type = qs('pto_leave_type').value;
   const notes = qs('pto_notes').value.trim();
   if (!typed || !entry_date_from || !Number.isFinite(hours)) return;
-  const match = USERS_CACHE.find(
+  const match = PTO_USERS_CACHE.find(
     (u) =>
       u.name === typed ||
       u.upn === typed ||

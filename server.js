@@ -1340,6 +1340,24 @@ app.get('/api/users', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/pto-users', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        COALESCE(NULLIF(name, ''), email) AS name,
+        email                             AS upn
+      FROM public.users
+      WHERE email IS NOT NULL
+        AND email <> ''
+        AND email LIKE '%@%'
+      ORDER BY COALESCE(NULLIF(name, ''), email) ASC, email ASC
+    `);
+    res.json({ ok: true, users: r.rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Cost types ----------
 app.get('/api/cost-types', requireAuth, async (req, res) => {
   try {
@@ -1744,6 +1762,44 @@ function weekdaysInRange(fromStr, toStr) {
   return dates;
 }
 
+async function resolveRegisteredPtoUser(userName, userUpn) {
+  const upn = normText(userUpn);
+  if (upn) {
+    const byEmail = await pool.query(
+      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name
+       FROM public.users
+       WHERE email IS NOT NULL
+         AND email <> ''
+         AND LOWER(email) = LOWER($1)`,
+      [upn],
+    );
+    if (byEmail.rows[0]) return { user: byEmail.rows[0] };
+  }
+
+  const name = normText(userName);
+  if (name) {
+    const byName = await pool.query(
+      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name
+       FROM public.users
+       WHERE email IS NOT NULL
+         AND email <> ''
+         AND name IS NOT NULL
+         AND name <> ''
+         AND LOWER(name) = LOWER($1)
+       ORDER BY email ASC`,
+      [name],
+    );
+    if (byName.rows.length === 1) return { user: byName.rows[0] };
+    if (byName.rows.length > 1) {
+      return {
+        error: 'Multiple registered users share this name. Please use email/UPN.',
+      };
+    }
+  }
+
+  return { error: 'Selected user is not a registered app user' };
+}
+
 app.post('/api/pto', requireAuth, async (req, res) => {
   const {
     user_name: unRaw,
@@ -1816,6 +1872,15 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const batchId = isRange ? crypto.randomUUID() : null;
 
   try {
+    if (req.userRole === 'admin' || req.userRole === 'pm') {
+      const resolved = await resolveRegisteredPtoUser(user_name, user_upn);
+      if (resolved.error) {
+        return res.status(400).json({ ok: false, error: resolved.error });
+      }
+      user_upn = resolved.user.email;
+      user_name = resolved.user.name;
+    }
+
     let savedRows;
 
     if (isRange) {
