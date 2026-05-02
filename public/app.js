@@ -487,6 +487,9 @@ function applyTableFilters() {
   const filterCost = (qs('tf_cost_type')?.value || '').toLowerCase();
   const filterActivity = (qs('tf_activity')?.value || '').toLowerCase();
   const filterDate = (qs('tf_date')?.value || '').trim();
+  const filterWorkItemId = (qs('tf_work_item_id')?.value || '')
+    .toLowerCase()
+    .trim();
   const filterSearch = (qs('tf_search')?.value || '').toLowerCase().trim();
 
   const tz = reportTimeZone();
@@ -511,6 +514,16 @@ function applyTableFilters() {
         : shiftDateByOffset(d, off).toISOString().slice(0, 10);
       if (localYmd !== filterDate) return false;
     }
+    if (filterWorkItemId) {
+      const ticketId = String(x.ticket_id ?? '').toLowerCase();
+      const taskId = String(x.task_id ?? '').toLowerCase();
+      if (
+        !ticketId.includes(filterWorkItemId) &&
+        !taskId.includes(filterWorkItemId)
+      ) {
+        return false;
+      }
+    }
     if (filterSearch) {
       const haystack =
         `${x.ticket_title || ''} ${x.task_title || ''}`.toLowerCase();
@@ -534,7 +547,12 @@ function applyTableFilters() {
     if (bar) bar.appendChild(countEl);
   }
   const isFiltered =
-    filterType || filterCost || filterActivity || filterDate || filterSearch;
+    filterType ||
+    filterCost ||
+    filterActivity ||
+    filterDate ||
+    filterWorkItemId ||
+    filterSearch;
   countEl.textContent = isFiltered
     ? `${filtered.length} of ${LAST_ROWS.length} rows`
     : `${LAST_ROWS.length} rows`;
@@ -546,6 +564,7 @@ function clearTableFilters() {
     'tf_cost_type',
     'tf_activity',
     'tf_date',
+    'tf_work_item_id',
     'tf_search',
   ];
   ids.forEach((id) => {
@@ -1392,6 +1411,7 @@ qs('btnExport').addEventListener('click', () => {
   'tf_cost_type',
   'tf_activity',
   'tf_date',
+  'tf_work_item_id',
   'tf_search',
 ].forEach((id) => {
   qs(id)?.addEventListener('input', applyTableFilters);
