@@ -1273,7 +1273,6 @@ qs('formPto')?.addEventListener('submit', async (e) => {
       alert(`Error: ${j.error || r.status}`);
       return;
     }
-    const receiptMsg = j.pdfEmailSent ? ' PDF receipt emailed to you.' : '';
     qs('formPto').reset();
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
@@ -1285,7 +1284,12 @@ qs('formPto')?.addEventListener('submit', async (e) => {
       isRange && j.rows?.length
         ? ` (${j.rows.length} working day${j.rows.length !== 1 ? 's' : ''})`
         : '';
-    alert(`PTO submitted${rangeMsg} and pending approval.${receiptMsg}`);
+    const submissionStatus = j.submissionStatus || j.row?.status || 'pending';
+    const statusMsg =
+      submissionStatus === 'approved'
+        ? `submitted${rangeMsg} and approved.`
+        : `submitted${rangeMsg} and pending approval.`;
+    alert(`PTO ${statusMsg}`);
     await loadPtoEntries();
   } catch (err) {
     alert(`Error: ${err.message}`);

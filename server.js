@@ -2093,7 +2093,6 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     // Send email (async, non-blocking to response):
     //   - pending:  approval notification with PDF attached → to approvers, CC filer
     //   - approved: auto-approve receipt with PDF attached  → to filer only
-    let pdfEmailSent = false;
     if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
       (async () => {
         try {
@@ -2191,7 +2190,6 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                   [generatedMsgId, savedRow.id],
                 );
               }
-              pdfEmailSent = true;
             }
           } else {
             // Auto-approved (admin or PTO_APPROVAL_ENABLED=false) → receipt to filer only
@@ -2214,7 +2212,6 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
               attachments: [pdfAttachment],
             });
-            pdfEmailSent = true;
           }
         } catch (emailErr) {
           console.error('PTO email error:', emailErr);
@@ -2227,7 +2224,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       row: savedRow,
       rows: savedRows,
       batchId,
-      pdfEmailSent,
+      submissionStatus: savedRow.status || initialStatus,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -2545,6 +2542,116 @@ ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` 
     }
   },
 );
+
+app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
+  const { batchId } = req.params;
+  if (!batchId)
+    return res.status(400).json({ ok: false, error: 'invalid batchId' });
+  const cancelNote = normText(req.body?.note) || null;
+  if (!cancelNote)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'cancellation reason is required' });
+
+  try {
+    const batchRes = await pool.query(
+      `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+              p.status, p.filer_role, p.email_message_id, p.notes, p.created_at,
+              u.team AS filer_team
+       FROM public.pto_entries p
+       LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+       WHERE p.batch_id = $1
+       ORDER BY p.entry_date ASC`,
+      [batchId],
+    );
+    if (!batchRes.rows.length)
+      return res.status(404).json({ ok: false, error: 'batch not found' });
+
+    const entry = batchRes.rows[0];
+
+    // Ownership check: dev/qa can only cancel their own entries
+    if (OWN_DATA_ROLES.has(req.userRole)) {
+      if ((entry.user_upn || '').toLowerCase() !== req.userEmail.toLowerCase())
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const nonCancellable = ['cancelled', 'denied'];
+    const blockedStatus = batchRes.rows.find((row) =>
+      nonCancellable.includes(row.status),
+    )?.status;
+    if (blockedStatus)
+      return res.status(400).json({
+        ok: false,
+        error: `cannot cancel a batch containing ${blockedStatus} entries`,
+      });
+
+    const r = await pool.query(
+      `UPDATE public.pto_entries
+       SET status = 'cancelled', cancelled_by = $1, cancelled_at = NOW(), cancel_note = $2
+       WHERE batch_id = $3
+       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+                 status, filer_role, email_message_id, cancelled_by, cancel_note, batch_id`,
+      [req.userEmail, cancelNote, batchId],
+    );
+    const updatedRows = r.rows;
+
+    // One cancellation email covering the whole range (non-blocking)
+    if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
+      (async () => {
+        try {
+          const transporter = createMailTransporter();
+          const batchDateRange = fmtSubjectDateRange(
+            batchRes.rows[0].entry_date,
+            batchRes.rows[batchRes.rows.length - 1].entry_date,
+          );
+          const batchReplyThreadIdx = buildReplyThreadIndex(
+            entry.email_message_id,
+          );
+          const replyHeaders = {
+            ...(entry.email_message_id
+              ? {
+                  'In-Reply-To': entry.email_message_id,
+                  References: entry.email_message_id,
+                }
+              : {}),
+            ...(batchReplyThreadIdx
+              ? {
+                  'Thread-Topic': `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${batchDateRange}`,
+                  'Thread-Index': batchReplyThreadIdx,
+                }
+              : {}),
+          };
+          const approverEmails = await getApproverEmails(
+            entry.filer_role,
+            entry.filer_team,
+            entry.user_upn,
+          );
+          const toList = approverEmails.filter(
+            (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
+          );
+          if (toList.length) {
+            await transporter.sendMail({
+              from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+              to: toList.join(', '),
+              subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${batchDateRange}`,
+              html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(batchDateRange)}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
+<p>No further action is needed.</p>`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${batchDateRange} has been cancelled by ${req.userName || req.userEmail}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+              headers: replyHeaders,
+            });
+          }
+        } catch (emailErr) {
+          console.error('PTO batch cancel email error:', emailErr);
+        }
+      })();
+    }
+
+    res.json({ ok: true, rows: updatedRows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 app.delete('/api/pto/batch/:batchId', requireAuth, async (req, res) => {
   const { batchId } = req.params;
