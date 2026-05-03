@@ -763,8 +763,24 @@
     }
 
     .pto-archive-chevron {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
       color: var(--muted);
       transition: transform 0.2s ease;
+    }
+
+    .pto-archive-chevron svg {
+      display: block;
+      width: 12px;
+      height: 12px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
 
     .pto-archive-toggle[aria-expanded="true"] .pto-archive-chevron {

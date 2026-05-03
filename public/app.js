@@ -1251,7 +1251,11 @@ function renderArchiveGroups(items, context) {
             <button type="button" class="pto-archive-toggle" data-archive-month="${monthKey}" aria-expanded="${expanded ? 'true' : 'false'}">
               <span class="pto-archive-label">${escapeHtml(ptoMonthLabel(monthKey))}</span>
               <span class="pto-archive-meta">${meta}</span>
-              <span class="pto-archive-chevron">v</span>
+              <span class="pto-archive-chevron" aria-hidden="true">
+                <svg viewBox="0 0 12 12" focusable="false">
+                  <path d="M2.25 4.5 6 8.25 9.75 4.5" />
+                </svg>
+              </span>
             </button>
           </td>
         </tr>` +
