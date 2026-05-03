@@ -19,8 +19,6 @@ const REPORT_TZ_OFFSET_MINUTES = Number(
 const REPORT_TZ_LABEL = process.env.REPORT_TZ_LABEL || 'UTC';
 const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
 
-const BREVO_SMTP_USER = process.env.BREVO_SMTP_USER || '';
-const BREVO_SMTP_KEY = process.env.BREVO_SMTP_KEY || '';
 const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
 const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
 const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
@@ -431,6 +429,58 @@ function requireLeadOrPm(req, res, next) {
   if (req.userRole !== 'lead' && req.userRole !== 'pm')
     return res.status(403).json({ ok: false, error: 'forbidden' });
   next();
+}
+
+const REPORT_BROAD_ROLES = new Set(['admin', 'pm']);
+const REPORT_OWN_ONLY_ROLES = new Set(['lead', 'dev', 'qa']);
+
+function normIdentity(v) {
+  return String(v ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function getReportingSelf(req) {
+  const email = normText(req.userEmail);
+  const name = normText(req.userName) || email;
+  return { email, name };
+}
+
+function resolveReportingScope(req, assignedToRaw, assignedToUPNRaw) {
+  const assignedTo = normText(assignedToRaw);
+  const assignedToUPN = normText(assignedToUPNRaw);
+  const self = getReportingSelf(req);
+
+  if (!REPORT_OWN_ONLY_ROLES.has(req.userRole)) {
+    return { ok: true, broad: REPORT_BROAD_ROLES.has(req.userRole), self };
+  }
+
+  const emailKey = normIdentity(self.email);
+  const nameKey = normIdentity(self.name);
+  const assignedToKey = normIdentity(assignedTo);
+  const assignedToUPNKey = normIdentity(assignedToUPN);
+
+  const assignedToMatches =
+    !assignedToKey ||
+    assignedToKey === emailKey ||
+    (nameKey && assignedToKey === nameKey);
+  const assignedToUPNMatches =
+    !assignedToUPNKey || assignedToUPNKey === emailKey;
+
+  if (!assignedToMatches || !assignedToUPNMatches) {
+    return { ok: false, error: 'forbidden' };
+  }
+
+  return { ok: true, broad: false, self };
+}
+
+function buildOwnReportingAssigneeClause(params, upnExpr, nameExpr, self) {
+  const emailIdx = params.push(self.email);
+  if (self.name) {
+    const nameIdx = params.push(self.name);
+    return `(LOWER(COALESCE(${upnExpr}, '')) = LOWER($${emailIdx}) OR (COALESCE(NULLIF(${upnExpr}, ''), '') = '' AND LOWER(COALESCE(${nameExpr}, '')) = LOWER($${nameIdx})))`;
+  }
+  return `LOWER(COALESCE(${upnExpr}, '')) = LOWER($${emailIdx})`;
 }
 
 /**
@@ -864,6 +914,9 @@ app.get('/api/hours/latest', requireAuth, async (req, res) => {
     .toString()
     .trim();
   const costType = costTypeRaw || null;
+  const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
+  if (!scope.ok)
+    return res.status(403).json({ ok: false, error: scope.error });
 
   const limit = Math.min(2000, Math.max(1, Number(req.query.limit || 200)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -903,7 +956,16 @@ app.get('/api/hours/latest', requireAuth, async (req, res) => {
 
   // Assigned To: allow name or UPN.
   const assignedFilter = assignedTo || assignedToUPN;
-  if (assignedFilter) {
+  if (!scope.broad) {
+    where.push(
+      buildOwnReportingAssigneeClause(
+        params,
+        'task_assigned_upn',
+        'task_assigned_to',
+        scope.self,
+      ),
+    );
+  } else if (assignedFilter) {
     params.push(`%${assignedFilter}%`);
     where.push(
       `(COALESCE(task_assigned_to,'') ILIKE $${params.length} OR COALESCE(task_assigned_upn,'') ILIKE $${params.length})`,
@@ -985,6 +1047,9 @@ app.get('/api/hours/summary', requireAuth, async (req, res) => {
     .toString()
     .trim();
   const costType = costTypeRaw || null;
+  const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
+  if (!scope.ok)
+    return res.status(403).json({ ok: false, error: scope.error });
 
   const params = [
     from.toISOString(),
@@ -1005,7 +1070,17 @@ app.get('/api/hours/summary', requireAuth, async (req, res) => {
     );
   }
   const assignedFilter = assignedTo || assignedToUPN;
-  if (assignedFilter) {
+  if (!scope.broad) {
+    filters.push(
+      `AND ${buildOwnReportingAssigneeClause(
+        params,
+        'd.task_assigned_upn',
+        'd.task_assigned_to',
+        scope.self,
+      )}`,
+    );
+    idx = params.length;
+  } else if (assignedFilter) {
     idx += 1;
     params.push(`%${assignedFilter}%`);
     filters.push(
@@ -1059,6 +1134,9 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
     .toString()
     .trim();
   const costType = costTypeRaw || null;
+  const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
+  if (!scope.ok)
+    return res.status(403).json({ ok: false, error: scope.error });
 
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -1068,7 +1146,17 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
 
   const filters = [];
   const assignedFilter = assignedTo || assignedToUPN;
-  if (assignedFilter) {
+  if (!scope.broad) {
+    filters.push(
+      `AND ${buildOwnReportingAssigneeClause(
+        params,
+        'd.task_assigned_upn',
+        'd.task_assigned_to',
+        scope.self,
+      )}`,
+    );
+    idx = params.length;
+  } else if (assignedFilter) {
     idx += 1;
     params.push(`%${assignedFilter}%`);
     filters.push(
@@ -1079,15 +1167,6 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
     idx += 1;
     params.push(costType);
     filters.push(`AND LOWER(d.cost_type) = LOWER($${idx})`);
-  }
-
-  // Dev role: enforce own-data filter
-  if (req.userRole === 'dev') {
-    idx += 1;
-    params.push(`%${req.userEmail}%`);
-    filters.push(
-      `AND (COALESCE(d.task_assigned_upn,'') ILIKE $${idx} OR COALESCE(d.task_assigned_to,'') ILIKE $${idx})`,
-    );
   }
 
   idx += 1;
@@ -1238,10 +1317,13 @@ app.get('/api/hours/export.csv', requireAuth, async (req, res) => {
   const bucket = (req.query.bucket || 'day').toString().trim();
   const from = (req.query.from || '').toString().trim();
   const to = (req.query.to || '').toString().trim();
+  const assignedTo = (req.query.assignedTo || '').toString().trim();
   const assignedToUPN = (req.query.assignedToUPN || '').toString().trim();
   const costType = (req.query.costType || req.query.accountCode || '')
     .toString()
     .trim();
+  const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
+  if (!scope.ok) return res.status(403).send(scope.error);
 
   const bucketAllowed = new Set(['day', 'week', 'month']);
   const unit = bucketAllowed.has(bucket.toLowerCase())
@@ -1267,10 +1349,23 @@ app.get('/api/hours/export.csv', requireAuth, async (req, res) => {
   let idx = params.length;
 
   const filters = [];
-  if (assignedToUPN) {
+  const assignedFilter = assignedTo || assignedToUPN;
+  if (!scope.broad) {
+    filters.push(
+      `AND ${buildOwnReportingAssigneeClause(
+        params,
+        'd.task_assigned_upn',
+        'd.task_assigned_to',
+        scope.self,
+      )}`,
+    );
+    idx = params.length;
+  } else if (assignedFilter) {
     idx += 1;
-    params.push(`%${assignedToUPN}%`);
-    filters.push(`AND COALESCE(d.task_assigned_upn,'') ILIKE $${idx}`);
+    params.push(`%${assignedFilter}%`);
+    filters.push(
+      `AND (COALESCE(d.task_assigned_upn,'') ILIKE $${idx} OR COALESCE(d.task_assigned_to,'') ILIKE $${idx})`,
+    );
   }
 
   if (costType) {
@@ -1324,6 +1419,13 @@ app.get('/api/hours/export.csv', requireAuth, async (req, res) => {
 
 // ---------- Users ----------
 app.get('/api/users', requireAuth, async (req, res) => {
+  if (!REPORT_BROAD_ROLES.has(req.userRole)) {
+    const self = getReportingSelf(req);
+    return res.json({
+      ok: true,
+      users: [{ name: self.name || self.email, upn: self.email }],
+    });
+  }
   try {
     const r = await pool.query(`
       SELECT DISTINCT
@@ -1359,6 +1461,13 @@ app.get('/api/pto-users', requireAuth, async (req, res) => {
 });
 
 app.get('/api/report-registered-users', requireAuth, async (req, res) => {
+  if (!REPORT_BROAD_ROLES.has(req.userRole)) {
+    const self = getReportingSelf(req);
+    return res.json({
+      ok: true,
+      users: [{ name: self.name || self.email, upn: self.email }],
+    });
+  }
   try {
     const r = await pool.query(`
       SELECT
@@ -1379,6 +1488,28 @@ app.get('/api/report-registered-users', requireAuth, async (req, res) => {
 // ---------- Cost types ----------
 app.get('/api/cost-types', requireAuth, async (req, res) => {
   try {
+    if (!REPORT_BROAD_ROLES.has(req.userRole)) {
+      const params = [];
+      const ownClause = buildOwnReportingAssigneeClause(
+        params,
+        'task_assigned_upn',
+        'task_assigned_to',
+        getReportingSelf(req),
+      );
+      const r = await pool.query(
+        `
+          SELECT DISTINCT cost_type
+          FROM public.tfs_task_hours_latest
+          WHERE cost_type IS NOT NULL
+            AND cost_type <> ''
+            AND ${ownClause}
+          ORDER BY cost_type ASC
+        `,
+        params,
+      );
+      return res.json({ ok: true, costTypes: r.rows.map((x) => x.cost_type) });
+    }
+
     const r = await pool.query(`
       SELECT DISTINCT cost_type
       FROM public.tfs_task_hours_latest
@@ -2932,7 +3063,7 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
 app.post('/api/pto/test-email', requireAuth, async (req, res) => {
   if (req.userRole !== 'admin')
     return res.status(403).json({ ok: false, error: 'forbidden' });
-  if (!BREVO_SMTP_USER || !BREVO_SMTP_KEY || !NOTIFY_FROM_EMAIL)
+  if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL)
     return res.status(503).json({ ok: false, error: 'email not configured' });
 
   const user_name =
@@ -3243,6 +3374,10 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
       .status(400)
       .json({ ok: false, error: 'from and to required (YYYY-MM-DD)' });
   const assignedTo = normText(req.query.assignedTo);
+  const assignedToUPN = normText(req.query.assignedToUPN);
+  const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
+  if (!scope.ok)
+    return res.status(403).json({ ok: false, error: scope.error });
   try {
     // Mon–Fri weekday count × 8
     const wdR = await pool.query(
@@ -3267,9 +3402,18 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
     // Individual PTO (optionally filtered to one user by name/UPN)
     const ptoParams = [fromStr, toStr];
     let ptoWhere = 'entry_date BETWEEN $1::date AND $2::date';
-    if (assignedTo) {
-      ptoParams.push(`%${assignedTo}%`);
-      ptoWhere += ` AND (COALESCE(user_name,'') ILIKE $3 OR COALESCE(user_upn,'') ILIKE $3)`;
+    if (!scope.broad) {
+      const ownClause = buildOwnReportingAssigneeClause(
+        ptoParams,
+        'user_upn',
+        'user_name',
+        scope.self,
+      );
+      ptoWhere += ` AND ${ownClause}`;
+    } else if (assignedTo || assignedToUPN) {
+      const assignedFilter = assignedTo || assignedToUPN;
+      const filterIdx = ptoParams.push(`%${assignedFilter}%`);
+      ptoWhere += ` AND (COALESCE(user_name,'') ILIKE $${filterIdx} OR COALESCE(user_upn,'') ILIKE $${filterIdx})`;
     }
     const ptoR = await pool.query(
       `SELECT COALESCE(SUM(hours), 0) AS pto_hours FROM public.pto_entries WHERE ${ptoWhere}`,
