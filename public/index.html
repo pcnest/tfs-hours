@@ -580,6 +580,22 @@
       padding: 12px 14px;
     }
 
+    .pto-list-controls {
+      display: grid;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .pto-list-bar {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+
     .pto-form-row {
       display: flex;
       gap: 12px;
@@ -605,6 +621,45 @@
 
     .field input {
       min-width: unset;
+    }
+
+    .segmented {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--stroke);
+      border-radius: 999px;
+      background: white;
+    }
+
+    .segmented-btn {
+      padding: 8px 14px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      box-shadow: none;
+      transform: none;
+    }
+
+    .segmented-btn:hover {
+      background: #f4ede2;
+      color: var(--ink);
+      box-shadow: none;
+      transform: none;
+    }
+
+    .segmented-btn.is-active,
+    .segmented-btn[aria-pressed="true"] {
+      background: var(--accent);
+      color: white;
+    }
+
+    .segmented-btn.is-active:hover,
+    .segmented-btn[aria-pressed="true"]:hover {
+      background: var(--accent);
+      color: white;
     }
 
     .pto-table-wrap {
@@ -642,6 +697,78 @@
 
     .pto-table tbody tr:hover {
       background: #f8fbfa;
+    }
+
+    .pto-table-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .pto-section-row td {
+      background: #f5f0e6;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .pto-empty-row td {
+      color: var(--muted);
+    }
+
+    .pto-archive-month-row td {
+      padding: 0;
+      background: #fcf8f1;
+    }
+
+    .pto-archive-month-row:hover td,
+    .pto-section-row:hover td,
+    .pto-empty-row:hover td {
+      background: inherit;
+    }
+
+    .pto-archive-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      color: var(--ink);
+      box-shadow: none;
+      transform: none;
+      text-align: left;
+    }
+
+    .pto-archive-toggle:hover {
+      background: #f4ede2;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .pto-archive-label {
+      font-weight: 700;
+    }
+
+    .pto-archive-meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: auto;
+    }
+
+    .pto-archive-chevron {
+      color: var(--muted);
+      transition: transform 0.2s ease;
+    }
+
+    .pto-archive-toggle[aria-expanded="true"] .pto-archive-chevron {
+      transform: rotate(180deg);
     }
 
     .btn-del {
@@ -1349,19 +1476,36 @@
               <label for="pto_notes">Leave Reason</label>
               <input type="text" id="pto_notes" placeholder="Optional notes" />
             </div>
-            <div class="field" id="pto_view_wrap">
-              <button type="button" id="btnPtoView" class="ghost">View</button>
-            </div>
             <div class="field">
               <button type="submit">Add PTO</button>
             </div>
           </div>
         </form>
-        <div class="pto-action-filter" id="ptoActionFilterWrap" hidden>
-          <label>
-            <input type="checkbox" id="chkActionRequired" />
-            Show my action items only
-          </label>
+        <div class="pto-list-controls">
+          <div class="pto-list-bar">
+            <div class="field field-grow" id="pto_list_user_wrap">
+              <label for="pto_list_user">Browse User</label>
+              <input type="text" id="pto_list_user" list="ptoUserList" placeholder="All users or Name / UPN" />
+            </div>
+            <div class="field">
+              <label for="ptoViewMode">PTO View</label>
+              <div class="segmented" id="ptoViewMode" role="group" aria-label="PTO view mode">
+                <button type="button" class="segmented-btn is-active" data-pto-view="active" aria-pressed="true">Current &amp; Upcoming</button>
+                <button type="button" class="segmented-btn" data-pto-view="archive" aria-pressed="false">Archive</button>
+                <button type="button" class="segmented-btn" data-pto-view="all" aria-pressed="false">All</button>
+              </div>
+            </div>
+            <div class="field" id="pto_view_wrap">
+              <label for="btnPtoView">&nbsp;</label>
+              <button type="button" id="btnPtoView" class="ghost">View PTO</button>
+            </div>
+          </div>
+          <div class="pto-action-filter" id="ptoActionFilterWrap" hidden>
+            <label>
+              <input type="checkbox" id="chkActionRequired" />
+              Show my action items only
+            </label>
+          </div>
         </div>
         <div class="pto-table-wrap">
           <table class="pto-table">

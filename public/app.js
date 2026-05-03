@@ -10,6 +10,11 @@ let COST_TYPES_LOADED = false;
 let REPORT_USERS_CACHE = [];
 let REPORT_REGISTERED_USERS_CACHE = [];
 let PTO_USERS_CACHE = [];
+let PTO_LIST_VIEW_MODE = 'active';
+let PTO_LIST_USER_FILTER = '';
+let PTO_LAST_ROWS = [];
+const PTO_ARCHIVE_EXPANDED = new Set();
+const PTO_FINAL_STATUSES = new Set(['approved', 'denied', 'cancelled']);
 
 function token() {
   return localStorage.getItem('tfsHoursToken');
@@ -823,17 +828,12 @@ function switchTab(name) {
     populatePtoUserList();
     loadHolidays();
     loadTeamOff();
+    syncPtoViewButtons();
+    updatePtoListControlVisibility();
     loadPtoEntries();
     // Apply role-based visibility each time the tab opens
     const role = window.CURRENT_USER?.role;
     const isPrivileged = role === 'admin' || role === 'pm';
-    const canAction = role === 'lead' || role === 'pm';
-    const ptoUserWrap = qs('pto_user_wrap');
-    if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
-    const ptoViewWrap = qs('pto_view_wrap');
-    if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
-    const ptoActionFilterWrap = qs('ptoActionFilterWrap');
-    if (ptoActionFilterWrap) ptoActionFilterWrap.hidden = !canAction;
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
       if (ptoUser)
@@ -1004,44 +1004,60 @@ function ptoBadge(status) {
   return `<span class="${cls}">${escapeHtml(label)}</span>`;
 }
 
-async function loadPtoEntries(userFilter = '') {
-  const tbody = qs('tbodyPto');
-  if (!tbody) return;
-  const actionRequired = qs('chkActionRequired')?.checked || false;
-  try {
-    const p = new URLSearchParams();
-    if (userFilter) p.set('assignedTo', userFilter);
-    if (actionRequired) p.set('actionRequired', 'true');
-    const r = await apiFetch(
-      `/api/pto${p.toString() ? '?' + p.toString() : ''}`,
-    );
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load.</td></tr>`;
-      return;
-    }
-    renderPtoEntries(j.rows);
-  } catch {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">Error loading.</td></tr>`;
-  }
+function currentPtoMonthStartYmd() {
+  const today = ymdTodayInReportTz();
+  return `${today.slice(0, 7)}-01`;
 }
 
-function renderPtoEntries(rows) {
-  const tbody = qs('tbodyPto');
+function ptoMonthLabel(monthKey) {
+  const [year, month] = String(monthKey || '')
+    .split('-')
+    .map((v) => Number(v));
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return monthKey || '';
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    year: 'numeric',
+  }).format(new Date(Date.UTC(year, month - 1, 1)));
+}
+
+function isFinalPtoStatus(status) {
+  return PTO_FINAL_STATUSES.has(String(status || '').toLowerCase());
+}
+
+function syncPtoViewButtons() {
+  document.querySelectorAll('[data-pto-view]').forEach((btn) => {
+    const active = btn.dataset.ptoView === PTO_LIST_VIEW_MODE;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function updatePtoListControlVisibility() {
   const role = window.CURRENT_USER?.role;
-  const myEmail = (window.CURRENT_USER?.email || '').toLowerCase();
   const isPrivileged = role === 'admin' || role === 'pm';
-  const isLead = role === 'lead';
+  const canAction = role === 'lead' || role === 'pm';
+  const showActionFilter = canAction && PTO_LIST_VIEW_MODE !== 'archive';
 
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No PTO entries defined.</td></tr>`;
-    return;
-  }
+  const ptoUserWrap = qs('pto_user_wrap');
+  if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
 
-  // Group rows: batch rows (shared batch_id) render as a single combined row.
-  // Preserve server order (entry_date ASC); batch rows will always be contiguous.
+  const ptoListUserWrap = qs('pto_list_user_wrap');
+  if (ptoListUserWrap) ptoListUserWrap.hidden = !isPrivileged;
+
+  const ptoViewWrap = qs('pto_view_wrap');
+  if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
+
+  const ptoActionFilterWrap = qs('ptoActionFilterWrap');
+  if (ptoActionFilterWrap) ptoActionFilterWrap.hidden = !showActionFilter;
+
+  const chk = qs('chkActionRequired');
+  if (chk) chk.disabled = !showActionFilter;
+}
+
+function normalizePtoItems(rows) {
   const items = [];
   const batchMap = new Map();
+
   for (const r of rows) {
     if (r.batch_id) {
       if (!batchMap.has(r.batch_id)) {
@@ -1055,139 +1071,304 @@ function renderPtoEntries(rows) {
     }
   }
 
-  tbody.innerHTML = items
-    .map((item) => {
-      if (item.type === 'batch') {
-        const br = item.rows;
-        const first = br[0];
-        const last = br[br.length - 1];
-        const totalHours = br.reduce((s, x) => s + Number(x.hours), 0);
-        const dateLabel =
-          first.entry_date === last.entry_date
-            ? escapeHtml(first.entry_date)
-            : `${escapeHtml(first.entry_date)} \u2013 ${escapeHtml(last.entry_date)}`;
-        const daysLabel = `${br.length} day${br.length !== 1 ? 's' : ''}`;
+  return items.map((item) => {
+    if (item.type === 'batch') {
+      const first = item.rows[0];
+      const last = item.rows[item.rows.length - 1];
+      return {
+        type: 'batch',
+        key: `batch:${item.batchId}`,
+        batchId: item.batchId,
+        rows: item.rows,
+        sortDate: first.entry_date,
+        endDate: last.entry_date,
+        dayCount: item.rows.length,
+        hours: item.rows.reduce((sum, row) => sum + Number(row.hours || 0), 0),
+        userName: first.user_name || first.user_upn || '',
+        userUpn: first.user_upn || '',
+        filerRole: first.filer_role || '',
+        status: first.status || '',
+        leaveType: first.leave_type || '',
+        notes: first.notes || '',
+        statusNote: first.denial_note || first.cancel_note || '',
+      };
+    }
 
-        const filerUpn = (first.user_upn || '').toLowerCase();
-        let actionBtns = '';
-        if (
-          isLead &&
-          ['dev', 'qa'].includes(first.filer_role) &&
-          first.status === 'pending' &&
-          filerUpn !== myEmail
-        ) {
-          actionBtns =
-            `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>` +
-            `<button class="btn-deny"    data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
-        } else if (role === 'pm') {
-          const devQaReady =
-            ['dev', 'qa'].includes(first.filer_role) &&
-            first.status === 'lead_approved';
-          const leadReady =
-            first.filer_role === 'lead' && first.status === 'pending';
-          const pmReady =
-            first.filer_role === 'pm' &&
-            first.status === 'pending' &&
-            filerUpn !== myEmail;
-          if (devQaReady || leadReady || pmReady) {
-            actionBtns =
-              `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>` +
-              `<button class="btn-deny"    data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
-          }
-        }
+    const r = item.row;
+    return {
+      type: 'single',
+      key: `single:${r.id}`,
+      id: r.id,
+      row: r,
+      sortDate: r.entry_date,
+      endDate: r.entry_date,
+      dayCount: 1,
+      hours: Number(r.hours || 0),
+      userName: r.user_name || r.user_upn || '',
+      userUpn: r.user_upn || '',
+      filerRole: r.filer_role || '',
+      status: r.status || '',
+      leaveType: r.leave_type || '',
+      notes: r.notes || '',
+      statusNote: r.denial_note || r.cancel_note || '',
+    };
+  });
+}
 
-        const cancellable = !['cancelled', 'denied'].includes(first.status);
-        const ptoNotPast =
-          first.entry_date >= new Date().toISOString().slice(0, 10);
-        const canCancel =
-          cancellable && ptoNotPast && (isPrivileged || filerUpn === myEmail);
-        const canDelete =
-          ['cancelled', 'denied'].includes(first.status) &&
-          (isPrivileged || filerUpn === myEmail);
-        const cancelBtn = canCancel
-          ? `<button class="btn-cancel" data-batch-id="${item.batchId}" data-action="cancel">Cancel</button>`
-          : '';
-        const delBtn = canDelete
-          ? `<button class="btn-del" data-batch-id="${item.batchId}" data-type="pto-batch">Delete</button>`
-          : '';
+function getPtoItemActions(item, { role, myEmail, isPrivileged, isLead, todayYmd }) {
+  const filerUpn = String(item.userUpn || '').toLowerCase();
+  let canApproveDeny = false;
 
-        const statusNote = first.denial_note || first.cancel_note || '';
-        const statusNoteHtml = statusNote
-          ? ` <span class="pto-status-note">${escapeHtml(statusNote)}</span>`
-          : '';
+  if (
+    isLead &&
+    ['dev', 'qa'].includes(item.filerRole) &&
+    item.status === 'pending' &&
+    filerUpn !== myEmail
+  ) {
+    canApproveDeny = true;
+  } else if (role === 'pm') {
+    const devQaReady =
+      ['dev', 'qa'].includes(item.filerRole) &&
+      item.status === 'lead_approved';
+    const leadReady = item.filerRole === 'lead' && item.status === 'pending';
+    const pmReady =
+      item.filerRole === 'pm' &&
+      item.status === 'pending' &&
+      filerUpn !== myEmail;
+    canApproveDeny = devQaReady || leadReady || pmReady;
+  }
 
-        return `
-      <tr>
-        <td>${escapeHtml(first.user_name || first.user_upn || '')}</td>
-        <td>${dateLabel} <span class="muted" style="font-size:.85em">(${daysLabel})</span></td>
-        <td>${fmtHours(totalHours)}</td>
-        <td>${escapeHtml(first.leave_type || '')}</td>
-        <td>${escapeHtml(first.notes || '')}</td>
-        <td>${ptoBadge(first.status)}${statusNoteHtml}</td>
-        <td>${actionBtns}${cancelBtn}${delBtn}</td>
+  const cancellable = !['cancelled', 'denied'].includes(item.status);
+  const canCancel =
+    cancellable &&
+    item.sortDate >= todayYmd &&
+    (isPrivileged || filerUpn === myEmail);
+  const canDelete =
+    ['cancelled', 'denied'].includes(item.status) &&
+    (isPrivileged || filerUpn === myEmail);
+
+  return {
+    filerUpn,
+    canApproveDeny,
+    canCancel,
+    canDelete,
+    isActionRequired: canApproveDeny,
+  };
+}
+
+function renderPtoActionCell(item, context) {
+  const actions = getPtoItemActions(item, context);
+  let html = '';
+
+  if (actions.canApproveDeny) {
+    if (item.type === 'batch') {
+      html += `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>`;
+      html += `<button class="btn-deny" data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
+    } else {
+      html += `<button class="btn-approve" data-id="${item.id}" data-action="approve">Approve</button>`;
+      html += `<button class="btn-deny" data-id="${item.id}" data-action="deny">Deny</button>`;
+    }
+  }
+
+  if (actions.canCancel) {
+    if (item.type === 'batch') {
+      html += `<button class="btn-cancel" data-batch-id="${item.batchId}" data-action="cancel">Cancel</button>`;
+    } else {
+      html += `<button class="btn-cancel" data-id="${item.id}" data-action="cancel">Cancel</button>`;
+    }
+  }
+
+  if (actions.canDelete) {
+    if (item.type === 'batch') {
+      html += `<button class="btn-del" data-batch-id="${item.batchId}" data-type="pto-batch">Delete</button>`;
+    } else {
+      html += `<button class="btn-del" data-id="${item.id}" data-type="pto">Delete</button>`;
+    }
+  }
+
+  return html ? `<div class="pto-table-actions">${html}</div>` : '';
+}
+
+function renderPtoItemRow(item, context, extraAttrs = '') {
+  const statusNoteHtml = item.statusNote
+    ? ` <span class="pto-status-note">${escapeHtml(item.statusNote)}</span>`
+    : '';
+  const dateHtml =
+    item.type === 'batch' && item.sortDate !== item.endDate
+      ? `${escapeHtml(item.sortDate)} - ${escapeHtml(item.endDate)} <span class="muted" style="font-size:.85em">(${item.dayCount} day${item.dayCount !== 1 ? 's' : ''})</span>`
+      : item.type === 'batch'
+        ? `${escapeHtml(item.sortDate)} <span class="muted" style="font-size:.85em">(${item.dayCount} day)</span>`
+        : escapeHtml(item.sortDate);
+
+  return `
+      <tr${extraAttrs}>
+        <td>${escapeHtml(item.userName)}</td>
+        <td>${dateHtml}</td>
+        <td>${fmtHours(item.hours)}</td>
+        <td>${escapeHtml(item.leaveType)}</td>
+        <td>${escapeHtml(item.notes)}</td>
+        <td>${ptoBadge(item.status)}${statusNoteHtml}</td>
+        <td>${renderPtoActionCell(item, context)}</td>
       </tr>`;
-      }
+}
 
-      // Single row
-      const r = item.row;
-      const filerUpn = (r.user_upn || '').toLowerCase();
-      const cancellable = !['cancelled', 'denied'].includes(r.status);
-      const ptoNotPast = r.entry_date >= new Date().toISOString().slice(0, 10);
-      const canCancel =
-        cancellable && ptoNotPast && (isPrivileged || filerUpn === myEmail);
-      const canDelete =
-        ['cancelled', 'denied'].includes(r.status) &&
-        (isPrivileged || filerUpn === myEmail);
-      const cancelBtn = canCancel
-        ? `<button class="btn-cancel" data-id="${r.id}" data-action="cancel">Cancel</button>`
-        : '';
-      const delBtn = canDelete
-        ? `<button class="btn-del" data-id="${r.id}" data-type="pto">Delete</button>`
-        : '';
+function renderPtoInfoRow(message, cls = 'pto-empty-row') {
+  return `<tr class="${cls}"><td colspan="7">${escapeHtml(message)}</td></tr>`;
+}
 
-      let actionBtns = '';
-      if (
-        isLead &&
-        ['dev', 'qa'].includes(r.filer_role) &&
-        r.status === 'pending' &&
-        filerUpn !== myEmail
-      ) {
-        actionBtns =
-          `<button class="btn-approve" data-id="${r.id}" data-action="approve">Approve</button>` +
-          `<button class="btn-deny"    data-id="${r.id}" data-action="deny">Deny</button>`;
-      } else if (role === 'pm') {
-        const devQaReady =
-          ['dev', 'qa'].includes(r.filer_role) && r.status === 'lead_approved';
-        const leadReady = r.filer_role === 'lead' && r.status === 'pending';
-        const pmReady =
-          r.filer_role === 'pm' &&
-          r.status === 'pending' &&
-          filerUpn !== myEmail;
-        if (devQaReady || leadReady || pmReady) {
-          actionBtns =
-            `<button class="btn-approve" data-id="${r.id}" data-action="approve">Approve</button>` +
-            `<button class="btn-deny"    data-id="${r.id}" data-action="deny">Deny</button>`;
-        }
-      }
+function renderPtoSectionRow(label) {
+  return `<tr class="pto-section-row"><td colspan="7">${escapeHtml(label)}</td></tr>`;
+}
 
-      const actionCell = `${actionBtns}${cancelBtn}${delBtn}`;
-      const statusNote = r.denial_note || r.cancel_note || '';
-      const statusNoteHtml = statusNote
-        ? ` <span class="pto-status-note">${escapeHtml(statusNote)}</span>`
-        : '';
+function renderArchiveGroups(items, context) {
+  if (!items.length) {
+    return renderPtoInfoRow(
+      'No archived PTO yet. Prior finalized months will appear here.',
+    );
+  }
 
-      return `
-      <tr>
-        <td>${escapeHtml(r.user_name || r.user_upn || '')}</td>
-        <td>${escapeHtml(r.entry_date)}</td>
-        <td>${fmtHours(r.hours)}</td>
-        <td>${escapeHtml(r.leave_type || '')}</td>
-        <td>${escapeHtml(r.notes || '')}</td>
-        <td>${ptoBadge(r.status)}${statusNoteHtml}</td>
-        <td>${actionCell}</td>
-      </tr>`;
+  const groups = new Map();
+  items.forEach((item) => {
+    const monthKey = item.sortDate.slice(0, 7);
+    if (!groups.has(monthKey)) groups.set(monthKey, []);
+    groups.get(monthKey).push(item);
+  });
+
+  return [...groups.keys()]
+    .sort((a, b) => b.localeCompare(a))
+    .map((monthKey) => {
+      const monthItems = groups
+        .get(monthKey)
+        .slice()
+        .sort((a, b) => a.sortDate.localeCompare(b.sortDate));
+      const expanded = PTO_ARCHIVE_EXPANDED.has(monthKey);
+      const totalHours = monthItems.reduce((sum, item) => sum + item.hours, 0);
+      const meta = `${monthItems.length} entr${monthItems.length === 1 ? 'y' : 'ies'} &middot; ${fmtHours(totalHours)} hours`;
+
+      return (
+        `<tr class="pto-archive-month-row">
+          <td colspan="7">
+            <button type="button" class="pto-archive-toggle" data-archive-month="${monthKey}" aria-expanded="${expanded ? 'true' : 'false'}">
+              <span class="pto-archive-label">${escapeHtml(ptoMonthLabel(monthKey))}</span>
+              <span class="pto-archive-meta">${meta}</span>
+              <span class="pto-archive-chevron">v</span>
+            </button>
+          </td>
+        </tr>` +
+        monthItems
+          .map((item) =>
+            renderPtoItemRow(
+              item,
+              context,
+              ` data-archive-group="${monthKey}"${expanded ? '' : ' hidden'}`,
+            ),
+          )
+          .join('')
+      );
     })
     .join('');
+}
+
+async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
+  const tbody = qs('tbodyPto');
+  if (!tbody) return;
+  PTO_LIST_USER_FILTER = String(userFilter || '').trim();
+  PTO_LAST_ROWS = [];
+  const filterInput = qs('pto_list_user');
+  if (filterInput && filterInput.value !== PTO_LIST_USER_FILTER) {
+    filterInput.value = PTO_LIST_USER_FILTER;
+  }
+
+  const actionRequired =
+    PTO_LIST_VIEW_MODE !== 'archive' &&
+    (qs('chkActionRequired')?.checked || false);
+  try {
+    const p = new URLSearchParams();
+    if (PTO_LIST_USER_FILTER) p.set('assignedTo', PTO_LIST_USER_FILTER);
+    if (actionRequired) p.set('actionRequired', 'true');
+    const r = await apiFetch(
+      `/api/pto${p.toString() ? '?' + p.toString() : ''}`,
+    );
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load.</td></tr>`;
+      return;
+    }
+    PTO_LAST_ROWS = Array.isArray(j.rows) ? j.rows : [];
+    renderPtoEntries(j.rows);
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">Error loading.</td></tr>`;
+  }
+}
+
+function renderPtoEntries(rows) {
+  const tbody = qs('tbodyPto');
+  const role = window.CURRENT_USER?.role;
+  const myEmail = (window.CURRENT_USER?.email || '').toLowerCase();
+  const isPrivileged = role === 'admin' || role === 'pm';
+  const isLead = role === 'lead';
+  const context = {
+    role,
+    myEmail,
+    isPrivileged,
+    isLead,
+    todayYmd: ymdTodayInReportTz(),
+  };
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">No PTO entries defined.</td></tr>`;
+    return;
+  }
+
+  const monthStart = currentPtoMonthStartYmd();
+  const items = normalizePtoItems(rows);
+  const activeItems = [];
+  const archiveItems = [];
+  items.forEach((item) => {
+    if (isFinalPtoStatus(item.status) && item.sortDate < monthStart) {
+      archiveItems.push(item);
+    } else {
+      activeItems.push(item);
+    }
+  });
+
+  const actionRank = (item) =>
+    getPtoItemActions(item, context).isActionRequired ? 0 : 1;
+  const activeItemsForAll = activeItems
+    .slice()
+    .sort((a, b) => {
+      const rankDiff = actionRank(a) - actionRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const dateDiff = a.sortDate.localeCompare(b.sortDate);
+      if (dateDiff !== 0) return dateDiff;
+      return a.key.localeCompare(b.key);
+    });
+
+  const html = [];
+
+  if (PTO_LIST_VIEW_MODE === 'archive') {
+    html.push(renderArchiveGroups(archiveItems, context));
+  } else if (PTO_LIST_VIEW_MODE === 'all') {
+    if (activeItemsForAll.length) {
+      html.push(
+        activeItemsForAll.map((item) => renderPtoItemRow(item, context)).join(''),
+      );
+    } else {
+      html.push(renderPtoInfoRow('No current or upcoming PTO entries.'));
+    }
+    html.push(renderPtoSectionRow('Archived PTO'));
+    html.push(renderArchiveGroups(archiveItems, context));
+  } else {
+    if (activeItems.length) {
+      html.push(activeItems.map((item) => renderPtoItemRow(item, context)).join(''));
+    } else {
+      html.push(renderPtoInfoRow('No current or upcoming PTO entries.'));
+    }
+    html.push(renderPtoSectionRow('Archived PTO'));
+    html.push(renderArchiveGroups(archiveItems, context));
+  }
+
+  tbody.innerHTML = html.join('');
 }
 
 async function ptoAction(id, batchId, action) {
@@ -1239,6 +1420,27 @@ document.addEventListener('click', async (e) => {
 });
 
 qs('chkActionRequired')?.addEventListener('change', () => loadPtoEntries());
+
+document.querySelectorAll('[data-pto-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.ptoView;
+    if (!mode || mode === PTO_LIST_VIEW_MODE) return;
+    PTO_LIST_VIEW_MODE = mode;
+    syncPtoViewButtons();
+    updatePtoListControlVisibility();
+    loadPtoEntries();
+  });
+});
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-archive-month]');
+  if (!btn) return;
+  const monthKey = btn.dataset.archiveMonth;
+  if (!monthKey) return;
+  if (PTO_ARCHIVE_EXPANDED.has(monthKey)) PTO_ARCHIVE_EXPANDED.delete(monthKey);
+  else PTO_ARCHIVE_EXPANDED.add(monthKey);
+  renderPtoEntries(PTO_LAST_ROWS);
+});
 
 qs('formPto')?.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1319,9 +1521,8 @@ qs('formPto')?.addEventListener('submit', async (e) => {
 });
 
 qs('btnPtoView')?.addEventListener('click', () => {
-  const user = qs('pto_user').value.trim();
+  const user = qs('pto_list_user')?.value.trim() || '';
   loadPtoEntries(user);
-  qs('pto_user').value = '';
 });
 
 // -------- Delete delegation (all three tables) --------
@@ -1481,8 +1682,6 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
 // -------- Role UI --------
 function setRoleUI(role) {
   const isPrivileged = role === 'admin' || role === 'pm';
-  const isLead = role === 'lead';
-  const canAction = isLead || role === 'pm'; // roles that can approve/deny
 
   // Non-privileged: hide Send Missing Hours Notifications panel
   const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
@@ -1504,15 +1703,8 @@ function setRoleUI(role) {
     if (formTeamOff) formTeamOff.hidden = true;
   }
 
-  // Non-privileged: hide PTO User field and View button (own data only)
-  const ptoUserWrap = qs('pto_user_wrap');
-  if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
-  const ptoViewWrap = qs('pto_view_wrap');
-  if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
-
-  // Lead and PM: show "action items" filter checkbox
-  const ptoActionFilterWrap = qs('ptoActionFilterWrap');
-  if (ptoActionFilterWrap) ptoActionFilterWrap.hidden = !canAction;
+  // PTO submission/list controls remain role-aware.
+  updatePtoListControlVisibility();
 }
 
 (async function boot() {
@@ -1562,6 +1754,8 @@ function setRoleUI(role) {
   await loadConfig();
   setTzLabels();
   setRoleUI(me.role);
+  syncPtoViewButtons();
+  updatePtoListControlVisibility();
 
   // Non-privileged: lock Assigned To filter to logged-in user
   if (me.role !== 'admin' && me.role !== 'pm') {
