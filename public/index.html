@@ -437,17 +437,29 @@
 
     .user-chip {
       display: flex;
-      align-items: center;
-      gap: 10px;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
       font-size: 13px;
       color: var(--muted);
-      white-space: nowrap;
       padding-top: 6px;
+    }
+
+    .user-chip-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      white-space: nowrap;
     }
 
     .user-chip #userChipName {
       font-weight: 600;
       color: var(--ink);
+    }
+
+    .user-chip-status {
+      font-size: 12px;
+      text-align: right;
     }
 
     .role-badge {
@@ -1028,9 +1040,12 @@
           </p>
         </div>
         <div id="userChip" class="user-chip" hidden>
-          <span id="userChipName"></span>
-          <span id="userChipRole" class="role-badge"></span>
-          <button type="button" id="btnLogout" class="ghost" style="font-size:12px;padding:6px 14px;">Logout</button>
+          <div class="user-chip-main">
+            <span id="userChipName"></span>
+            <span id="userChipRole" class="role-badge"></span>
+            <button type="button" id="btnLogout" class="ghost" style="font-size:12px;padding:6px 14px;">Logout</button>
+          </div>
+          <div id="lastSyncStatus" class="status muted user-chip-status">Last sync: loading.</div>
         </div>
       </div>
     </header>
@@ -1144,7 +1159,6 @@
         </section>
 
         <div id="status" class="status muted">Loading.</div>
-        <div id="lastSyncStatus" class="status muted">Last sync: loading.</div>
 
         <div class="table-filter-bar" id="tableFilterBar" hidden>
           <div class="tf-field">
