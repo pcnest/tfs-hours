@@ -2581,23 +2581,17 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
     if (!batchRes.rows.length)
       return res.status(404).json({ ok: false, error: 'batch not found' });
 
+    const cancelAccess = checkCancelAccess(
+      batchRes.rows,
+      req.userRole,
+      req.userEmail,
+    );
+    if (cancelAccess)
+      return res
+        .status(cancelAccess.status)
+        .json({ ok: false, error: cancelAccess.error });
+
     const entry = batchRes.rows[0];
-
-    // Ownership check: dev/qa can only cancel their own entries
-    if (OWN_DATA_ROLES.has(req.userRole)) {
-      if ((entry.user_upn || '').toLowerCase() !== req.userEmail.toLowerCase())
-        return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
-
-    const nonCancellable = ['cancelled', 'denied'];
-    const blockedStatus = batchRes.rows.find((row) =>
-      nonCancellable.includes(row.status),
-    )?.status;
-    if (blockedStatus)
-      return res.status(400).json({
-        ok: false,
-        error: `cannot cancel a batch containing ${blockedStatus} entries`,
-      });
 
     const r = await pool.query(
       `UPDATE public.pto_entries
@@ -2739,6 +2733,64 @@ function checkApprovalAccess(entry, actorRole, actorEmail, actorTeam) {
     return null;
   }
   return 'only lead or pm can approve/deny PTO';
+}
+
+function currentPtoCancelYmd() {
+  // Mirror the current client-side UTC-style comparison used for cancel visibility.
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Checks whether the requesting user is allowed to cancel a PTO entry or batch.
+ * Returns null if allowed, or an object with status/error if not.
+ */
+function checkCancelAccess(entries, actorRole, actorEmail) {
+  if (!Array.isArray(entries) || !entries.length)
+    return { status: 404, error: 'not found' };
+
+  const representative = entries[0];
+  const actorEmailKey = String(actorEmail || '').trim().toLowerCase();
+  const filerEmailKey = String(representative.user_upn || '')
+    .trim()
+    .toLowerCase();
+  const isBatch = entries.length > 1;
+
+  if (isBatch) {
+    const hasMixedFilers = entries.some(
+      (row) =>
+        String(row.user_upn || '').trim().toLowerCase() !== filerEmailKey,
+    );
+    if (hasMixedFilers)
+      return { status: 400, error: 'batch contains mixed filers' };
+  }
+
+  const blockedStatus = entries.find((row) =>
+    ['cancelled', 'denied'].includes(row.status),
+  )?.status;
+  if (blockedStatus) {
+    return isBatch
+      ? {
+          status: 400,
+          error: `cannot cancel a batch containing ${blockedStatus} entries`,
+        }
+      : { status: 400, error: `cannot cancel a ${blockedStatus} entry` };
+  }
+
+  const effectiveDate = String(representative.entry_date || '');
+  if (!effectiveDate || effectiveDate < currentPtoCancelYmd()) {
+    return isBatch
+      ? { status: 400, error: 'cannot cancel a past PTO batch' }
+      : { status: 400, error: 'cannot cancel a past PTO entry' };
+  }
+
+  if (actorRole === 'admin' || actorRole === 'pm') return null;
+
+  if (actorRole === 'lead' || OWN_DATA_ROLES.has(actorRole)) {
+    if (filerEmailKey && filerEmailKey === actorEmailKey) return null;
+    return { status: 403, error: 'forbidden' };
+  }
+
+  return { status: 403, error: 'forbidden' };
 }
 
 app.patch(
@@ -3060,18 +3112,15 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
       return res.status(404).json({ ok: false, error: 'not found' });
     const entry = entryRes.rows[0];
 
-    // Ownership check: dev/qa can only cancel their own entries
-    if (OWN_DATA_ROLES.has(req.userRole)) {
-      if ((entry.user_upn || '').toLowerCase() !== req.userEmail.toLowerCase())
-        return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
-
-    // Only cancellable if not already cancelled/denied
-    const nonCancellable = ['cancelled', 'denied'];
-    if (nonCancellable.includes(entry.status))
+    const cancelAccess = checkCancelAccess(
+      [entry],
+      req.userRole,
+      req.userEmail,
+    );
+    if (cancelAccess)
       return res
-        .status(400)
-        .json({ ok: false, error: `cannot cancel a ${entry.status} entry` });
+        .status(cancelAccess.status)
+        .json({ ok: false, error: cancelAccess.error });
 
     const r = await pool.query(
       `UPDATE public.pto_entries
