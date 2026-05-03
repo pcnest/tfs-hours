@@ -1015,6 +1015,20 @@ app.get('/api/hours/latest', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/hours/meta', requireAuth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT run_at
+       FROM public.tfs_hours_runs
+       ORDER BY run_at DESC, run_id DESC
+       LIMIT 1`,
+    );
+    res.json({ ok: true, lastSyncAt: r.rows[0]?.run_at ?? null });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Hours summary (delta-based; supports negative corrections) ----------
 app.get('/api/hours/summary', requireAuth, async (req, res) => {
   const bucketRaw = (req.query.bucket || 'day').toString().trim().toLowerCase();

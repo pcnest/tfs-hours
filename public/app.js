@@ -339,6 +339,11 @@ function setStatus(text) {
   if (el) el.textContent = text;
 }
 
+function setLastSyncStatus(text) {
+  const el = qs('lastSyncStatus');
+  if (el) el.textContent = text;
+}
+
 function updateStats(rows) {
   const totalHours = rows.reduce((acc, r) => {
     const n = Number(r.actual_hours || 0);
@@ -687,6 +692,7 @@ async function loadReport() {
   qs('tbodyDailyHours').innerHTML =
     `<tr><td colspan="3" class="muted">Loading.</td></tr>`;
   setStatus('Loading report.');
+  setLastSyncStatus('Last sync: loading.');
 
   const fromYmd = qs('from').value;
   const toYmd = qs('to').value;
@@ -695,12 +701,28 @@ async function loadReport() {
   const params = buildReportParams({ limit: '5000' });
   const endpoint = '/api/hours/entries';
 
-  const [r, annotations] = await Promise.all([
+  const [r, annotations, metaResult] = await Promise.all([
     apiFetch(`${endpoint}?${params.toString()}`),
     fromYmd && toYmd
       ? fetchDailyAnnotations(fromYmd, toYmd, assignedTo)
       : Promise.resolve(null),
+    apiFetch('/api/hours/meta')
+      .then(async (res) => ({
+        ok: res.ok,
+        data: await res.json().catch(() => ({})),
+      }))
+      .catch(() => null),
   ]);
+
+  if (metaResult?.ok && metaResult.data?.ok) {
+    setLastSyncStatus(
+      metaResult.data.lastSyncAt
+        ? `Last sync: ${fmtDateTime(metaResult.data.lastSyncAt)}`
+        : 'Last sync: Never',
+    );
+  } else {
+    setLastSyncStatus('Last sync: unavailable');
+  }
 
   const data = await r.json().catch(() => ({}));
 
