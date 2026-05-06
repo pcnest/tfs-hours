@@ -12,6 +12,7 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
+const PTO_REMINDER_API_KEY = process.env.PTO_REMINDER_API_KEY || '';
 const TFS_WORKITEM_URL_TEMPLATE = process.env.TFS_WORKITEM_URL_TEMPLATE || '';
 const REPORT_TZ_OFFSET_MINUTES = Number(
   process.env.REPORT_TZ_OFFSET_MINUTES || '0',
@@ -93,6 +94,22 @@ function createMailTransporter() {
   };
 }
 
+function requireConfiguredApiKey(req, res, configuredKey, configName) {
+  if (!configuredKey) {
+    res.status(503).json({
+      ok: false,
+      error: `${configName} not configured on server.`,
+    });
+    return false;
+  }
+  const key = req.header('x-api-key');
+  if (!key || key !== configuredKey) {
+    res.status(401).json({ ok: false, error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
 function escapeEmailHtml(v) {
   return String(v ?? '')
     .replace(/&/g, '&amp;')
@@ -149,12 +166,7 @@ app.get('/api/config', (req, res) => {
 // ---------- Helpers ----------
 function requireApiKey(req, res) {
   if (!SYNC_API_KEY) return true; // leaving empty disables auth (not recommended)
-  const key = req.header('x-api-key');
-  if (!key || key !== SYNC_API_KEY) {
-    res.status(401).json({ error: 'unauthorized' });
-    return false;
-  }
-  return true;
+  return requireConfiguredApiKey(req, res, SYNC_API_KEY, 'SYNC_API_KEY');
 }
 
 function toDateOrNull(v) {
@@ -508,6 +520,28 @@ async function getApproverEmails(filerRole, filerTeam, filerEmail) {
   }
   try {
     const r = await pool.query(q, params);
+    return r.rows.map((row) => row.email);
+  } catch {
+    return [];
+  }
+}
+
+async function getRoleEmails(roles, excludeEmail) {
+  const roleList = Array.isArray(roles)
+    ? roles.filter((role) => role && typeof role === 'string')
+    : [];
+  if (!roleList.length) return [];
+  try {
+    const params = [roleList];
+    let where = `role = ANY($1::text[])`;
+    if (excludeEmail) {
+      params.push(excludeEmail);
+      where += ` AND LOWER(email) != LOWER($2)`;
+    }
+    const r = await pool.query(
+      `SELECT email FROM public.users WHERE ${where} ORDER BY email ASC`,
+      params,
+    );
     return r.rows.map((row) => row.email);
   } catch {
     return [];
@@ -1923,6 +1957,54 @@ function weekdaysInRange(fromStr, toStr) {
     cur.setDate(cur.getDate() + 1);
   }
   return dates;
+}
+
+function formatYmd(year, month, day) {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function currentReportYmd() {
+  const now = new Date();
+  const tz = getReportTimeZone();
+  if (tz) {
+    const parts = getTimeZoneParts(now, tz);
+    return formatYmd(parts.year, parts.month, parts.day);
+  }
+  return new Date(
+    now.getTime() + getReportOffsetMinutes() * 60 * 1000,
+  ).toISOString().slice(0, 10);
+}
+
+function isWeekdayYmd(ymd) {
+  const p = parseYmd(ymd);
+  if (!p) return false;
+  const dow = new Date(Date.UTC(p.y, p.mo - 1, p.d)).getUTCDay();
+  return dow >= 1 && dow <= 5;
+}
+
+function countOverdueBusinessDays(startYmd, todayYmd, sharedOffDays) {
+  if (!startYmd || !todayYmd || startYmd >= todayYmd) return 0;
+  let count = 0;
+  let cur = addDaysToYmd(startYmd, 1);
+  while (cur && cur <= todayYmd) {
+    if (isWeekdayYmd(cur) && !sharedOffDays.has(cur)) count++;
+    cur = addDaysToYmd(cur, 1);
+  }
+  return count;
+}
+
+function dedupeEmails(emails) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of emails || []) {
+    const email = String(raw || '').trim();
+    if (!email) continue;
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(email);
+  }
+  return out;
 }
 
 async function resolveRegisteredPtoUser(userName, userUpn) {
@@ -3954,6 +4036,319 @@ app.post(
     }
   },
 );
+
+// ---------- PTO overdue reminder / escalation ----------
+function getPendingPtoStageLabel(filerRole) {
+  if (filerRole === 'dev' || filerRole === 'qa') return 'Awaiting lead approval';
+  if (filerRole === 'lead') return 'Awaiting PM approval';
+  if (filerRole === 'pm') return 'Awaiting approval from another PM';
+  return 'Awaiting approval';
+}
+
+function buildPtoThreadHeaders(messageId, threadTopic) {
+  if (!messageId) return {};
+  const threadIndex = buildReplyThreadIndex(messageId);
+  return {
+    'In-Reply-To': messageId,
+    References: messageId,
+    'Thread-Topic': threadTopic,
+    ...(threadIndex ? { 'Thread-Index': threadIndex } : {}),
+  };
+}
+
+async function fetchPendingPtoReminderCandidates() {
+  const r = await pool.query(
+    `SELECT p.id,
+            COALESCE(p.batch_id::text, '') AS batch_id,
+            p.user_upn,
+            p.user_name,
+            p.entry_date::text,
+            p.hours,
+            p.leave_type,
+            p.notes,
+            p.status,
+            p.filer_role,
+            p.email_message_id,
+            p.created_at,
+            u.team AS filer_team
+     FROM public.pto_entries p
+     LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+     WHERE p.status = 'pending'
+     ORDER BY COALESCE(p.batch_id::text, 'single:' || p.id::text), p.entry_date ASC, p.id ASC`,
+  );
+
+  const grouped = new Map();
+  for (const row of r.rows) {
+    const batchId = row.batch_id || null;
+    const requestKey = batchId ? `batch:${batchId}` : `single:${row.id}`;
+    if (!grouped.has(requestKey)) {
+      grouped.set(requestKey, {
+        requestKey,
+        ptoEntryId: row.id,
+        batchId,
+        startDate: row.entry_date,
+        endDate: row.entry_date,
+        dayCount: 0,
+        totalHours: 0,
+        userUpn: row.user_upn || '',
+        userName: row.user_name || row.user_upn || '',
+        leaveType: row.leave_type || '',
+        notes: row.notes || '',
+        filerRole: row.filer_role || '',
+        filerTeam: row.filer_team || null,
+        emailMessageId: row.email_message_id || '',
+      });
+    }
+    const request = grouped.get(requestKey);
+    request.endDate = row.entry_date;
+    request.dayCount += 1;
+    request.totalHours += Number(row.hours || 0);
+    if (!request.emailMessageId && row.email_message_id) {
+      request.emailMessageId = row.email_message_id;
+    }
+  }
+  return [...grouped.values()];
+}
+
+async function fetchSharedOffDays(fromYmd, toYmd) {
+  if (!fromYmd || !toYmd || fromYmd > toYmd) return new Set();
+  const r = await pool.query(
+    `SELECT holiday_date::text AS ymd
+     FROM public.public_holidays
+     WHERE holiday_date BETWEEN $1::date AND $2::date
+     UNION
+     SELECT entry_date::text AS ymd
+     FROM public.team_off_entries
+     WHERE entry_date BETWEEN $1::date AND $2::date`,
+    [fromYmd, toYmd],
+  );
+  return new Set(r.rows.map((row) => row.ymd));
+}
+
+async function getOverduePtoRecipients(request, notificationType) {
+  const currentApprovers = dedupeEmails(
+    await getApproverEmails(
+      request.filerRole,
+      request.filerTeam,
+      request.userUpn || null,
+    ),
+  );
+
+  if (notificationType === 'reminder') {
+    return { to: currentApprovers, cc: [] };
+  }
+
+  const oversight = dedupeEmails(
+    await getRoleEmails(
+      ['pm', 'admin'],
+      request.filerRole === 'pm' ? request.userUpn : null,
+    ),
+  );
+
+  if (request.filerRole === 'dev' || request.filerRole === 'qa') {
+    const cc = currentApprovers.filter(
+      (email) =>
+        !oversight.some(
+          (oversightEmail) =>
+            oversightEmail.toLowerCase() === String(email).toLowerCase(),
+        ),
+    );
+    return { to: oversight, cc };
+  }
+
+  return { to: oversight, cc: [] };
+}
+
+async function reserveOverduePtoNotification(
+  request,
+  notificationType,
+  overdueBusinessDays,
+  toRecipients,
+  ccRecipients,
+) {
+  const r = await pool.query(
+    `INSERT INTO public.pto_overdue_notifications
+       (request_key, pto_entry_id, batch_id, notification_type, overdue_business_days, to_recipients, cc_recipients)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (request_key, notification_type) DO NOTHING
+     RETURNING id`,
+    [
+      request.requestKey,
+      request.ptoEntryId,
+      request.batchId,
+      notificationType,
+      overdueBusinessDays,
+      toRecipients.join(', '),
+      ccRecipients.join(', '),
+    ],
+  );
+  return r.rows[0]?.id || null;
+}
+
+async function releaseOverduePtoNotification(reservationId) {
+  if (!reservationId) return;
+  await pool.query(
+    'DELETE FROM public.pto_overdue_notifications WHERE id = $1',
+    [reservationId],
+  );
+}
+
+function buildOverduePtoEmail(request, notificationType, overdueBusinessDays) {
+  const displayName = request.userName || request.userUpn || 'Unknown User';
+  const dateLabel = fmtSubjectDateRange(request.startDate, request.endDate);
+  const dayLabel =
+    request.dayCount === 1
+      ? `${fmtH(request.totalHours)} hrs`
+      : `${request.dayCount} days, ${fmtH(request.totalHours)} hrs`;
+  const pendingStage = getPendingPtoStageLabel(request.filerRole);
+  const isEscalation = notificationType === 'escalation';
+  const subjectBase = `LEAVE REQUEST – ${displayName} – ${request.leaveType} Leave on ${dateLabel}`;
+  const subject = `Re: ${subjectBase}`;
+  const actionLabel = isEscalation ? 'Escalation' : 'Reminder';
+  const intro = isEscalation
+    ? 'This pending PTO request has reached the escalation threshold and still requires action.'
+    : 'This pending PTO request is overdue and still requires action.';
+  const html = `<div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:560px;">
+<p>Hi @Team,</p>
+<p><strong>${escapeEmailHtml(actionLabel)}:</strong> ${escapeEmailHtml(intro)}</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Employee:</strong> ${escapeEmailHtml(displayName)}<br>
+  <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
+  <strong>Leave Duration:</strong> ${escapeEmailHtml(dayLabel)}<br>
+  <strong>Leave Type:</strong> ${escapeEmailHtml(request.leaveType)}<br>
+  <strong>Current Pending Stage:</strong> ${escapeEmailHtml(pendingStage)}<br>
+  <strong>Overdue Business Days:</strong> ${escapeEmailHtml(String(overdueBusinessDays))}
+</p>
+${request.notes ? `<p><strong>Reason for Leave:</strong> ${escapeEmailHtml(request.notes)}</p>` : ''}
+<p>Please review and action this PTO request in the TFS Hours app.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
+</div>`;
+  const text = `${actionLabel}: ${intro}\n\nEmployee: ${displayName}\nLeave Date: ${dateLabel}\nLeave Duration: ${dayLabel}\nLeave Type: ${request.leaveType}\nCurrent Pending Stage: ${pendingStage}\nOverdue Business Days: ${overdueBusinessDays}${request.notes ? `\nReason for Leave: ${request.notes}` : ''}\n\nPlease review and action this PTO request in the TFS Hours app.`;
+  return { subjectBase, subject, html, text };
+}
+
+app.post('/api/pto/overdue-reminders', async (req, res) => {
+  if (
+    !requireConfiguredApiKey(
+      req,
+      res,
+      PTO_REMINDER_API_KEY,
+      'PTO_REMINDER_API_KEY',
+    )
+  ) {
+    return;
+  }
+  if (!BREVO_API_KEY) {
+    return res
+      .status(503)
+      .json({ ok: false, error: 'BREVO_API_KEY not configured on server.' });
+  }
+  if (!NOTIFY_FROM_EMAIL) {
+    return res.status(503).json({
+      ok: false,
+      error: 'NOTIFY_FROM_EMAIL not configured on server.',
+    });
+  }
+
+  try {
+    const todayYmd = currentReportYmd();
+    const requests = await fetchPendingPtoReminderCandidates();
+    const earliestPendingStart = requests.reduce((minYmd, request) => {
+      if (!request.startDate || request.startDate >= todayYmd) return minYmd;
+      return !minYmd || request.startDate < minYmd ? request.startDate : minYmd;
+    }, null);
+    const sharedOffDays = earliestPendingStart
+      ? await fetchSharedOffDays(addDaysToYmd(earliestPendingStart, 1), todayYmd)
+      : new Set();
+    const transporter = createMailTransporter();
+
+    let remindersSent = 0;
+    let escalationsSent = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (const request of requests) {
+      const overdueBusinessDays = countOverdueBusinessDays(
+        request.startDate,
+        todayYmd,
+        sharedOffDays,
+      );
+
+      let notificationType = null;
+      if (overdueBusinessDays >= 3) notificationType = 'escalation';
+      else if (overdueBusinessDays >= 2) notificationType = 'reminder';
+
+      if (!notificationType) {
+        skipped++;
+        continue;
+      }
+
+      const recipients = await getOverduePtoRecipients(request, notificationType);
+      if (!recipients.to.length) {
+        skipped++;
+        errors.push({
+          requestKey: request.requestKey,
+          error: `no ${notificationType} recipients resolved`,
+        });
+        continue;
+      }
+
+      const reservationId = await reserveOverduePtoNotification(
+        request,
+        notificationType,
+        overdueBusinessDays,
+        recipients.to,
+        recipients.cc,
+      );
+      if (!reservationId) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        const email = buildOverduePtoEmail(
+          request,
+          notificationType,
+          overdueBusinessDays,
+        );
+        const headers = buildPtoThreadHeaders(
+          request.emailMessageId,
+          email.subjectBase,
+        );
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: recipients.to.join(', '),
+          ...(recipients.cc.length ? { cc: recipients.cc.join(', ') } : {}),
+          subject: email.subject,
+          html: email.html,
+          text: email.text,
+          ...(Object.keys(headers).length ? { headers } : {}),
+        });
+        if (notificationType === 'reminder') remindersSent++;
+        else escalationsSent++;
+      } catch (e) {
+        await releaseOverduePtoNotification(reservationId);
+        errors.push({
+          requestKey: request.requestKey,
+          error: String(e?.message || e),
+        });
+      }
+    }
+
+    res.json({
+      ok: true,
+      todayYmd,
+      scannedRequests: requests.length,
+      remindersSent,
+      escalationsSent,
+      skipped,
+      ...(errors.length ? { errors } : {}),
+    });
+  } catch (e) {
+    console.error('PTO overdue reminder error:', e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 // ---------- Static UI ----------
 app.use('/', express.static(path.join(__dirname, 'public')));
