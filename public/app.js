@@ -998,6 +998,10 @@ const PTO_STATUS_LABELS = {
   denied: 'Denied',
   cancelled: 'Cancelled',
 };
+const PTO_DAY_PART_LABELS = {
+  first_half: 'First half',
+  second_half: 'Second half',
+};
 
 function syncPtoRangeValidation(report = false) {
   const fromInput = qs('pto_date');
@@ -1024,6 +1028,33 @@ function ptoBadge(status) {
   const label = PTO_STATUS_LABELS[status] || status || '';
   const cls = `pto-status pto-status-${CSS.escape ? CSS.escape(status || '') : (status || '').replace(/[^a-z_]/gi, '')}`;
   return `<span class="${cls}">${escapeHtml(label)}</span>`;
+}
+
+function formatPtoDayPart(dayPart) {
+  return PTO_DAY_PART_LABELS[dayPart] || '';
+}
+
+function syncPtoDayPartVisibility(report = false) {
+  const wrap = qs('pto_day_part_wrap');
+  const input = qs('pto_day_part');
+  const hours = parseFloat(qs('pto_hours')?.value || '');
+  const requiresDayPart = Number.isFinite(hours) && hours === 4;
+
+  if (wrap) wrap.hidden = !requiresDayPart;
+  if (!input) return !requiresDayPart;
+
+  if (!requiresDayPart) {
+    input.required = false;
+    input.value = '';
+    input.setCustomValidity('');
+    return true;
+  }
+
+  input.required = true;
+  const msg = input.value ? '' : 'Select first half or second half for 4-hour PTO.';
+  input.setCustomValidity(msg);
+  if (report && msg) input.reportValidity();
+  return !msg;
 }
 
 function currentPtoMonthStartYmd() {
@@ -1114,6 +1145,7 @@ function normalizePtoItems(rows) {
         userUpn: first.user_upn || '',
         filerRole: first.filer_role || '',
         status: first.status || '',
+        dayPart: first.day_part || '',
         leaveType: first.leave_type || '',
         notes: first.notes || '',
         statusNote: first.denial_note || first.cancel_note || '',
@@ -1134,6 +1166,7 @@ function normalizePtoItems(rows) {
       userUpn: r.user_upn || '',
       filerRole: r.filer_role || '',
       status: r.status || '',
+      dayPart: r.day_part || '',
       leaveType: r.leave_type || '',
       notes: r.notes || '',
       statusNote: r.denial_note || r.cancel_note || '',
@@ -1240,6 +1273,7 @@ function renderPtoItemRow(item, context, extraAttrs = '') {
         <td>${escapeHtml(item.userName)}</td>
         <td>${dateHtml}</td>
         <td>${fmtHours(item.hours)}</td>
+        <td>${escapeHtml(formatPtoDayPart(item.dayPart))}</td>
         <td>${escapeHtml(item.leaveType)}</td>
         <td>${escapeHtml(item.notes)}</td>
         <td>${ptoBadge(item.status)}${statusNoteHtml}</td>
@@ -1248,11 +1282,11 @@ function renderPtoItemRow(item, context, extraAttrs = '') {
 }
 
 function renderPtoInfoRow(message, cls = 'pto-empty-row') {
-  return `<tr class="${cls}"><td colspan="7">${escapeHtml(message)}</td></tr>`;
+  return `<tr class="${cls}"><td colspan="8">${escapeHtml(message)}</td></tr>`;
 }
 
 function renderPtoSectionRow(label) {
-  return `<tr class="pto-section-row"><td colspan="7">${escapeHtml(label)}</td></tr>`;
+  return `<tr class="pto-section-row"><td colspan="8">${escapeHtml(label)}</td></tr>`;
 }
 
 function renderArchiveGroups(items, context) {
@@ -1282,7 +1316,7 @@ function renderArchiveGroups(items, context) {
 
       return (
         `<tr class="pto-archive-month-row">
-          <td colspan="7">
+          <td colspan="8">
             <button type="button" class="pto-archive-toggle" data-archive-month="${monthKey}" aria-expanded="${expanded ? 'true' : 'false'}">
               <span class="pto-archive-label">${escapeHtml(ptoMonthLabel(monthKey))}</span>
               <span class="pto-archive-meta">${meta}</span>
@@ -1330,13 +1364,13 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
     );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="muted">Failed to load.</td></tr>`;
       return;
     }
     PTO_LAST_ROWS = Array.isArray(j.rows) ? j.rows : [];
     renderPtoEntries(j.rows);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">Error loading.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">Error loading.</td></tr>`;
   }
 }
 
@@ -1355,7 +1389,7 @@ function renderPtoEntries(rows) {
   };
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No PTO entries defined.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">No PTO entries defined.</td></tr>`;
     return;
   }
 
@@ -1479,6 +1513,14 @@ qs('pto_date_to')?.addEventListener('input', () => {
   syncPtoRangeValidation();
 });
 
+qs('pto_hours')?.addEventListener('input', () => {
+  syncPtoDayPartVisibility();
+});
+
+qs('pto_day_part')?.addEventListener('change', () => {
+  syncPtoDayPartVisibility();
+});
+
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-archive-month]');
   if (!btn) return;
@@ -1502,6 +1544,8 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   const entry_date_to = entry_date_to_raw || entry_date_from;
   const isRange = entry_date_to !== entry_date_from;
   const hours = parseFloat(qs('pto_hours').value);
+  if (!syncPtoDayPartVisibility(true)) return;
+  const day_part = qs('pto_day_part')?.value || '';
   const leave_type = qs('pto_leave_type').value;
   const notes = qs('pto_notes').value.trim();
   if (!typed || !entry_date_from || !Number.isFinite(hours)) return;
@@ -1521,6 +1565,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
           entry_date_from,
           entry_date_to,
           hours,
+          ...(day_part ? { day_part } : {}),
           leave_type,
           notes,
         }
@@ -1529,6 +1574,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
           user_upn,
           entry_date: entry_date_from,
           hours,
+          ...(day_part ? { day_part } : {}),
           leave_type,
           notes,
         };
@@ -1544,6 +1590,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
     }
     qs('formPto').reset();
     syncPtoRangeValidation();
+    syncPtoDayPartVisibility();
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
       if (ptoUser)
@@ -1565,6 +1612,8 @@ qs('formPto')?.addEventListener('submit', async (e) => {
     alert(`Error: ${err.message}`);
   }
 });
+
+syncPtoDayPartVisibility();
 
 qs('btnPtoView')?.addEventListener('click', () => {
   const user = qs('pto_list_user')?.value.trim() || '';

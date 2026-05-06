@@ -1583,6 +1583,32 @@ function validateHours(v) {
   return n !== null && n > 0 && n <= 24 ? n : null;
 }
 
+function validatePtoDayPart(v) {
+  const s = normText(v);
+  return s && VALID_PTO_DAY_PARTS.has(s) ? s : null;
+}
+
+function requiresPtoDayPart(hours) {
+  return Number(hours) === 4;
+}
+
+function formatPtoDayPart(dayPart) {
+  if (dayPart === 'first_half') return 'First half';
+  if (dayPart === 'second_half') return 'Second half';
+  return '';
+}
+
+function buildPtoDayPartHtml(dayPart, withBreak = true) {
+  const label = formatPtoDayPart(dayPart);
+  if (!label) return '';
+  return `<strong>Day Part:</strong> ${escapeEmailHtml(label)}${withBreak ? '<br>' : ''}`;
+}
+
+function buildPtoDayPartText(dayPart) {
+  const label = formatPtoDayPart(dayPart);
+  return label ? `\nDay Part: ${label}` : '';
+}
+
 /** Format a YYYY-MM-DD string as "Month D, YYYY" for use in email subjects. */
 function fmtSubjectDate(ymd) {
   const d = new Date((ymd || '') + 'T00:00:00');
@@ -1816,6 +1842,7 @@ const VALID_LEAVE_TYPES = new Set([
   'Maternity',
   'Bereavement',
 ]);
+const VALID_PTO_DAY_PARTS = new Set(['first_half', 'second_half']);
 
 /** Roles that must enforce own-data filtering (cannot view/file for others) */
 const OWN_DATA_ROLES = new Set(['dev', 'qa']);
@@ -1827,7 +1854,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   const actionRequired = req.query.actionRequired === 'true';
 
   const SELECT = `
-    SELECT id, user_upn, user_name, entry_date::text, hours, leave_type, notes, created_at,
+    SELECT id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, created_at,
            status, filer_role, approved_by_lead, lead_actioned_at,
            approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note, batch_id,
            cancelled_by, cancelled_at, cancel_note
@@ -2054,6 +2081,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     entry_date_to: edToRaw,
     entry_date: edRaw,
     hours: hoursRaw,
+    day_part: dpRaw,
     leave_type: ltRaw,
     notes: notesRaw,
   } = req.body || {};
@@ -2065,6 +2093,8 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const dateTo = validateDateStr(edToRaw || edFromRaw || edRaw);
 
   const hours = validateHours(hoursRaw ?? 8);
+  const rawDayPart = normText(dpRaw);
+  const validatedDayPart = validatePtoDayPart(rawDayPart);
   const leave_type_raw = normText(ltRaw);
   const leave_type =
     leave_type_raw && VALID_LEAVE_TYPES.has(leave_type_raw)
@@ -2095,9 +2125,25 @@ app.post('/api/pto', requireAuth, async (req, res) => {
     return res
       .status(400)
       .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+  if (rawDayPart && !validatedDayPart)
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part must be first_half or second_half',
+    });
+  if (requiresPtoDayPart(hours) && !validatedDayPart)
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part is required when hours is 4',
+    });
+  if (!requiresPtoDayPart(hours) && validatedDayPart)
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part is only allowed when hours is 4',
+    });
 
   const isRange = dateTo !== dateFrom;
   const weekdays = isRange ? weekdaysInRange(dateFrom, dateTo) : [dateFrom];
+  const day_part = requiresPtoDayPart(hours) ? validatedDayPart : null;
 
   if (weekdays.length === 0)
     return res.status(400).json({
@@ -2137,14 +2183,15 @@ app.post('/api/pto', requireAuth, async (req, res) => {
         for (const d of weekdays) {
           const r = await client.query(
             `INSERT INTO public.pto_entries
-               (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role, batch_id)
-             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)
-             RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role, batch_id`,
+               (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, batch_id)
+             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, batch_id`,
             [
               user_upn,
               user_name,
               d,
               hours,
+              day_part,
               leave_type,
               notes,
               initialStatus,
@@ -2166,14 +2213,15 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       // Single-date: existing behaviour, batch_id = NULL
       const r = await pool.query(
         `INSERT INTO public.pto_entries
-           (user_upn, user_name, entry_date, hours, leave_type, notes, status, filer_role)
-         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8)
-         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes, status, filer_role`,
+           (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role`,
         [
           user_upn,
           user_name,
           dateFrom,
           hours,
+          day_part,
           leave_type,
           notes,
           initialStatus,
@@ -2199,6 +2247,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             entryDateTo: isRange ? dateTo : null,
             totalDays: savedRows.length,
             hours,
+            dayPart: day_part,
             leaveType: leave_type,
             notes: notes || '',
             submittedAt,
@@ -2266,12 +2315,13 @@ app.post('/api/pto', requireAuth, async (req, res) => {
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtDateLabel)}<br>
   <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
+  ${buildPtoDayPartHtml(day_part)}
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
 <p>Please see the attached Leave Request form for reference.</p>
 <p>Thank you for your review.</p>`,
-                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
+                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
                 attachments: [pdfAttachment],
               });
               // Store the pre-generated message-id on all rows for reply threading
@@ -2301,11 +2351,12 @@ app.post('/api/pto', requireAuth, async (req, res) => {
 <p>Your Leave Request for <strong>${escapeEmailHtml(_fmtDateLabel)}</strong> has been <strong>automatically approved</strong>.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
+  ${buildPtoDayPartHtml(day_part)}
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
 <p>Please see the attached Leave Request form for your records.</p>`,
-              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
+              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
               attachments: [pdfAttachment],
             });
           }
@@ -2346,7 +2397,7 @@ app.patch(
     try {
       const batchRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                status, filer_role, email_message_id, notes, created_at
+                day_part, status, filer_role, email_message_id, notes, created_at
          FROM public.pto_entries WHERE batch_id = $1
          ORDER BY entry_date ASC`,
         [batchId],
@@ -2382,7 +2433,7 @@ app.patch(
           `UPDATE public.pto_entries
            SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
            WHERE batch_id = $2
-           RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, email_message_id, batch_id`,
           [req.userEmail, batchId],
         );
@@ -2392,7 +2443,7 @@ app.patch(
           `UPDATE public.pto_entries
            SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
            WHERE batch_id = $2
-           RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, email_message_id, batch_id`,
           [req.userEmail, batchId],
         );
@@ -2441,8 +2492,9 @@ app.patch(
                   to: toList.join(', '),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
+<p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>This request is still pending final Manager's review and approval.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.`,
                   headers: replyHeaders,
                 });
               }
@@ -2476,6 +2528,7 @@ app.patch(
                         : null,
                     totalDays,
                     hours: entry.hours,
+                    dayPart: entry.day_part,
                     leaveType: entry.leave_type,
                     notes: entry.notes || '',
                     submittedAt: entry.created_at
@@ -2505,8 +2558,9 @@ app.patch(
                   ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
                   headers: replyHeaders,
                   attachments: pmBatchAttachments,
                 });
@@ -2541,7 +2595,7 @@ app.patch(
     try {
       const batchRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                status, filer_role, email_message_id
+                day_part, status, filer_role, email_message_id
          FROM public.pto_entries WHERE batch_id = $1
          ORDER BY entry_date ASC`,
         [batchId],
@@ -2574,7 +2628,7 @@ app.patch(
         `UPDATE public.pto_entries
          SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
          WHERE batch_id = $3
-         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, email_message_id, denied_by, denial_note, batch_id`,
         [req.userEmail, denialNote, batchId],
       );
@@ -2621,9 +2675,10 @@ app.patch(
               ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${entry.user_name || entry.user_upn}</strong> on <strong>${escapeEmailHtml(dateRange)}</strong> has been <strong>denied by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>`,
-              text: `Your PTO for ${dateRange} was denied by ${req.userName || req.userEmail}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+              text: `Your PTO for ${dateRange} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}`,
               headers: replyHeaders,
             });
           } catch (emailErr) {
@@ -2652,7 +2707,7 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
   try {
     const batchRes = await pool.query(
       `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
-              p.status, p.filer_role, p.email_message_id, p.notes, p.created_at,
+              p.day_part, p.status, p.filer_role, p.email_message_id, p.notes, p.created_at,
               u.team AS filer_team
        FROM public.pto_entries p
        LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
@@ -2679,7 +2734,7 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
       `UPDATE public.pto_entries
        SET status = 'cancelled', cancelled_by = $1, cancelled_at = NOW(), cancel_note = $2
        WHERE batch_id = $3
-       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+       RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                  status, filer_role, email_message_id, cancelled_by, cancel_note, batch_id`,
       [req.userEmail, cancelNote, batchId],
     );
@@ -2725,9 +2780,10 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
               to: toList.join(', '),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${batchDateRange}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(batchDateRange)}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
 <p>No further action is needed.</p>`,
-              text: `PTO for ${entry.user_name || entry.user_upn} on ${batchDateRange} has been cancelled by ${req.userName || req.userEmail}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${batchDateRange} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
               headers: replyHeaders,
             });
           }
@@ -2890,7 +2946,7 @@ app.patch(
     try {
       const entryRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              status, filer_role, email_message_id, batch_id, notes,
+              day_part, status, filer_role, email_message_id, batch_id, notes,
               created_at
        FROM public.pto_entries WHERE id = $1`,
         [id],
@@ -2926,7 +2982,7 @@ app.patch(
           `UPDATE public.pto_entries
          SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
          WHERE id = $2
-         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, email_message_id`,
           [req.userEmail, id],
         );
@@ -2937,7 +2993,7 @@ app.patch(
           `UPDATE public.pto_entries
          SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
          WHERE id = $2
-         RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, email_message_id`,
           [req.userEmail, id],
         );
@@ -2984,8 +3040,9 @@ app.patch(
                   to: toList.join(', '),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
+<p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>This request is still pending final Manager's review and approval.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} approved by lead ${req.userName || req.userEmail}. Awaiting PM final approval.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.`,
                   headers: replyHeaders,
                 });
               }
@@ -3017,6 +3074,7 @@ app.patch(
                     entryDateTo: null,
                     totalDays: 1,
                     hours: entry.hours,
+                    dayPart: entry.day_part,
                     leaveType: entry.leave_type,
                     notes: entry.notes || '',
                     submittedAt: entry.created_at
@@ -3040,8 +3098,9 @@ app.patch(
                   ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+                  <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
                   <p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
                   headers: replyHeaders,
                   attachments: pmApprovalAttachments,
                 });
@@ -3076,7 +3135,7 @@ app.patch(
     try {
       const entryRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              status, filer_role, filer_team, email_message_id
+              day_part, status, filer_role, filer_team, email_message_id
        FROM public.pto_entries WHERE id = $1`,
         [id],
       );
@@ -3109,7 +3168,7 @@ app.patch(
         `UPDATE public.pto_entries
        SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
        WHERE id = $3
-       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+       RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                  status, filer_role, email_message_id, denied_by, denial_note`,
         [req.userEmail, denialNote, id],
       );
@@ -3152,9 +3211,10 @@ app.patch(
               ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>`,
-              text: `Your PTO for ${fmtSubjectDate(entry.entry_date)} was denied by ${req.userName || req.userEmail}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+              text: `Your PTO for ${fmtSubjectDate(entry.entry_date)} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}`,
               headers: replyHeaders,
             });
           } catch (emailErr) {
@@ -3184,7 +3244,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
   try {
     const entryRes = await pool.query(
       `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
-              p.status, p.filer_role, p.email_message_id, u.team AS filer_team
+              p.day_part, p.status, p.filer_role, p.email_message_id, u.team AS filer_team
        FROM public.pto_entries p
        LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
        WHERE p.id = $1`,
@@ -3208,7 +3268,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
       `UPDATE public.pto_entries
        SET status = 'cancelled', cancelled_by = $1, cancelled_at = NOW(), cancel_note = $2
        WHERE id = $3
-       RETURNING id, user_upn, user_name, entry_date::text, hours, leave_type, notes,
+       RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                  status, filer_role, email_message_id, cancelled_by, cancel_note`,
       [req.userEmail, cancelNote, id],
     );
@@ -3251,9 +3311,10 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
               to: toList.join(', '),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
 <p>No further action is needed.</p>`,
-              text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} has been cancelled by ${req.userName || req.userEmail}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
               headers: replyHeaders,
             });
           }
@@ -3324,12 +3385,33 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
     validateDateStr(req.body?.entry_date) ||
     new Date().toISOString().slice(0, 10);
   const hours = validateHours(req.body?.hours ?? 8) ?? 8;
+  const rawDayPart = normText(req.body?.day_part);
+  const validatedDayPart = validatePtoDayPart(rawDayPart);
   const leave_type_raw = normText(req.body?.leave_type);
   const leave_type =
     leave_type_raw && VALID_LEAVE_TYPES.has(leave_type_raw)
       ? leave_type_raw
       : 'Personal';
   const notes = normText(req.body?.notes) || 'Test leave notes.';
+  if (rawDayPart && !validatedDayPart) {
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part must be first_half or second_half',
+    });
+  }
+  if (requiresPtoDayPart(hours) && !validatedDayPart) {
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part is required when hours is 4',
+    });
+  }
+  if (!requiresPtoDayPart(hours) && validatedDayPart) {
+    return res.status(400).json({
+      ok: false,
+      error: 'day_part is only allowed when hours is 4',
+    });
+  }
+  const dayPart = requiresPtoDayPart(hours) ? validatedDayPart : null;
   const dest = req.userEmail; // all test emails go only to the admin
 
   const _fmtEntryDate = (() => {
@@ -3354,6 +3436,7 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
       entryDateTo: null,
       totalDays: 1,
       hours,
+      dayPart,
       leaveType: leave_type,
       notes,
       submittedAt: new Date().toUTCString(),
@@ -3382,12 +3465,13 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
   <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  ${buildPtoDayPartHtml(dayPart)}
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
 </p>
 <p>Please see the attached Leave Request form for reference.</p>
 <p>Thank you for your review.</p>`,
-      text: `[TEST] Hi @Team,\n\n${user_name} has filed a Leave Request.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason: ${notes}`,
+      text: `[TEST] Hi @Team,\n\n${user_name} has filed a Leave Request.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nReason: ${notes}`,
       attachments: [pdfAttachment],
     });
     results.push('approval-notification (with PDF): sent');
@@ -3406,11 +3490,12 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
 <p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
+  ${buildPtoDayPartHtml(dayPart)}
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
 </p>
 <p>Please see the attached Leave Request form for your records.</p>`,
-      text: `[TEST] Hi ${user_name},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs\nLeave Type: ${leave_type}\nReason for Leave: ${notes}`,
+      text: `[TEST] Hi ${user_name},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes}`,
       attachments: [pdfAttachment],
     });
     results.push('auto-approve-receipt (with PDF): sent');
@@ -3426,8 +3511,9 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
       subject: `[TEST] PTO Lead-Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
       html: `<p><em style="color:#888">[TEST \u2014 sent to PMs + filer after lead approves]</em></p>
 <p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>approved by Test Lead</strong> (lead).</p>
+<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
 <p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} approved by lead. Awaiting PM final approval.`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} approved by lead.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nAwaiting PM final approval.`,
       headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
     });
     results.push('lead-approved-notification: sent');
@@ -3442,8 +3528,9 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
       to: dest,
       subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
       html: `<p><em style="color:#888">[TEST \u2014 sent to filer + leads after PM gives final approval]</em></p>
-<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>fully approved</strong> by Test PM.</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} fully approved by Test PM.`,
+<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>fully approved</strong> by Test PM.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} fully approved by Test PM.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}.`,
       headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
     });
     results.push('final-approval-notification: sent');
@@ -3460,9 +3547,10 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
 
       html: `<p><em style="color:#888">[TEST \u2014 sent to filer on denial]</em></p>
 <p>Your PTO request for <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>denied</strong> by Test Lead.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
 <p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
 <p>You may resubmit a new PTO request if needed.</p>`,
-      text: `[TEST] Your PTO for ${entry_date} was denied. Reason: ${notes}`,
+      text: `[TEST] Your PTO for ${entry_date} was denied.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}. Reason: ${notes}`,
       headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
     });
     results.push('denial-notification: sent');
@@ -3479,9 +3567,10 @@ app.post('/api/pto/test-email', requireAuth, async (req, res) => {
 
       html: `<p><em style="color:#888">[TEST \u2014 sent to approvers when filer cancels]</em></p>
 <p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(user_name)}.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
 <p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
 <p>No further action is needed.</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} has been cancelled. Reason: ${notes}`,
+      text: `[TEST] PTO for ${user_name} on ${entry_date} has been cancelled.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}. Reason: ${notes}`,
       headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
     });
     results.push('cancellation-notification: sent');
@@ -3499,6 +3588,7 @@ function generatePtoPdf({
   entryDateTo, // null for single-day
   totalDays, // number of working days (for range)
   hours,
+  dayPart,
   leaveType,
   notes,
   submittedAt,
@@ -3578,6 +3668,9 @@ function generatePtoPdf({
       ['Date Requested', fmtSubmitted(submittedAt)],
       ['Date of Leave(s)', dateOfLeaveLabel],
       ['Leave Type', leaveType || '—'],
+      ...(formatPtoDayPart(dayPart)
+        ? [['Day Part', formatPtoDayPart(dayPart)]]
+        : []),
       ['Total Number of Days Applied', daysStr],
       ['Reason for Leave', notes || '—'],
     ];
@@ -4064,6 +4157,7 @@ async function fetchPendingPtoReminderCandidates() {
             p.user_name,
             p.entry_date::text,
             p.hours,
+            p.day_part,
             p.leave_type,
             p.notes,
             p.status,
@@ -4092,6 +4186,7 @@ async function fetchPendingPtoReminderCandidates() {
         totalHours: 0,
         userUpn: row.user_upn || '',
         userName: row.user_name || row.user_upn || '',
+        dayPart: row.day_part || null,
         leaveType: row.leave_type || '',
         notes: row.notes || '',
         filerRole: row.filer_role || '',
@@ -4215,6 +4310,7 @@ function buildOverduePtoEmail(request, notificationType, overdueBusinessDays) {
   <strong>Employee:</strong> ${escapeEmailHtml(displayName)}<br>
   <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
   <strong>Leave Duration:</strong> ${escapeEmailHtml(dayLabel)}<br>
+  ${buildPtoDayPartHtml(request.dayPart)}
   <strong>Leave Type:</strong> ${escapeEmailHtml(request.leaveType)}<br>
   <strong>Current Pending Stage:</strong> ${escapeEmailHtml(pendingStage)}<br>
   <strong>Overdue Business Days:</strong> ${escapeEmailHtml(String(overdueBusinessDays))}
@@ -4223,7 +4319,7 @@ ${request.notes ? `<p><strong>Reason for Leave:</strong> ${escapeEmailHtml(reque
 <p>Please review and action this PTO request in the TFS Hours app.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
 </div>`;
-  const text = `${actionLabel}: ${intro}\n\nEmployee: ${displayName}\nLeave Date: ${dateLabel}\nLeave Duration: ${dayLabel}\nLeave Type: ${request.leaveType}\nCurrent Pending Stage: ${pendingStage}\nOverdue Business Days: ${overdueBusinessDays}${request.notes ? `\nReason for Leave: ${request.notes}` : ''}\n\nPlease review and action this PTO request in the TFS Hours app.`;
+  const text = `${actionLabel}: ${intro}\n\nEmployee: ${displayName}\nLeave Date: ${dateLabel}\nLeave Duration: ${dayLabel}${buildPtoDayPartText(request.dayPart)}\nLeave Type: ${request.leaveType}\nCurrent Pending Stage: ${pendingStage}\nOverdue Business Days: ${overdueBusinessDays}${request.notes ? `\nReason for Leave: ${request.notes}` : ''}\n\nPlease review and action this PTO request in the TFS Hours app.`;
   return { subjectBase, subject, html, text };
 }
 

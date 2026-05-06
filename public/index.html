@@ -1478,6 +1478,14 @@
               <label for="pto_hours">Hours</label>
               <input type="number" id="pto_hours" value="8" min="0.5" max="24" step="0.5" required />
             </div>
+            <div class="field" id="pto_day_part_wrap" hidden>
+              <label for="pto_day_part">Day Part</label>
+              <select id="pto_day_part">
+                <option value="">Select half-day</option>
+                <option value="first_half">First half</option>
+                <option value="second_half">Second half</option>
+              </select>
+            </div>
             <div class="field">
               <label for="pto_leave_type">Leave Type</label>
               <select id="pto_leave_type">
@@ -1530,6 +1538,7 @@
                 <th>User</th>
                 <th>Date</th>
                 <th>Hours</th>
+                <th>Day Part</th>
                 <th>Leave Type</th>
                 <th>Notes</th>
                 <th>Status</th>
@@ -1538,7 +1547,7 @@
             </thead>
             <tbody id="tbodyPto">
               <tr>
-                <td colspan="7" class="muted">Loading&#8230;</td>
+                <td colspan="8" class="muted">Loading&#8230;</td>
               </tr>
             </tbody>
           </table>
