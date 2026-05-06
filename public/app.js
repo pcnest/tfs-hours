@@ -615,6 +615,7 @@ async function fetchDailyAnnotations(fromYmd, toYmd, assignedTo) {
   // entry_date -> total PTO hours
   const pto = new Map();
   for (const row of pData.rows || []) {
+    if (row.status !== 'approved') continue;
     const h = Number(row.hours || 0);
     pto.set(
       row.entry_date,
@@ -1024,6 +1025,10 @@ function isFinalPtoStatus(status) {
   return PTO_FINAL_STATUSES.has(String(status || '').toLowerCase());
 }
 
+function isOverduePendingPto(item, todayYmd) {
+  return item?.status === 'pending' && item?.sortDate < todayYmd;
+}
+
 function syncPtoViewButtons() {
   document.querySelectorAll('[data-pto-view]').forEach((btn) => {
     const active = btn.dataset.ptoView === PTO_LIST_VIEW_MODE;
@@ -1190,8 +1195,17 @@ function renderPtoActionCell(item, context) {
 }
 
 function renderPtoItemRow(item, context, extraAttrs = '') {
-  const statusNoteHtml = item.statusNote
-    ? ` <span class="pto-status-note">${escapeHtml(item.statusNote)}</span>`
+  const statusNotes = [];
+  if (isOverduePendingPto(item, context.todayYmd)) {
+    statusNotes.push('Overdue - awaiting approval.');
+  }
+  if (item.statusNote) statusNotes.push(item.statusNote);
+  const statusNoteHtml = statusNotes.length
+    ? statusNotes
+        .map(
+          (note) => ` <span class="pto-status-note">${escapeHtml(note)}</span>`,
+        )
+        .join('')
     : '';
   const dateHtml =
     item.type === 'batch' && item.sortDate !== item.endDate

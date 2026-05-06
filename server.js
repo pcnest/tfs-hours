@@ -3571,7 +3571,8 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
 
     // Individual PTO (optionally filtered to one user by name/UPN)
     const ptoParams = [fromStr, toStr];
-    let ptoWhere = 'entry_date BETWEEN $1::date AND $2::date';
+    let ptoWhere = `entry_date BETWEEN $1::date AND $2::date
+      AND status = 'approved'`;
     if (!scope.broad) {
       const ownClause = buildOwnReportingAssigneeClause(
         ptoParams,
@@ -3628,6 +3629,7 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
             COALESCE(SUM(hours), 0) AS pto_hours
      FROM public.pto_entries
      WHERE entry_date BETWEEN $1::date AND $2::date
+       AND status = 'approved'
      GROUP BY 1`,
     [fromStr, toStr],
   );
