@@ -999,6 +999,27 @@ const PTO_STATUS_LABELS = {
   cancelled: 'Cancelled',
 };
 
+function syncPtoRangeValidation(report = false) {
+  const fromInput = qs('pto_date');
+  const toInput = qs('pto_date_to');
+  if (!fromInput || !toInput) return true;
+
+  const fromValue = fromInput.value || '';
+  const toValue = toInput.value || '';
+
+  if (fromValue) toInput.min = fromValue;
+  else toInput.removeAttribute('min');
+
+  const msg =
+    fromValue && toValue && toValue < fromValue
+      ? 'To date must be on or after From date.'
+      : '';
+  toInput.setCustomValidity(msg);
+
+  if (report && msg) toInput.reportValidity();
+  return !msg;
+}
+
 function ptoBadge(status) {
   const label = PTO_STATUS_LABELS[status] || status || '';
   const cls = `pto-status pto-status-${CSS.escape ? CSS.escape(status || '') : (status || '').replace(/[^a-z_]/gi, '')}`;
@@ -1450,6 +1471,14 @@ document.querySelectorAll('[data-pto-view]').forEach((btn) => {
   });
 });
 
+qs('pto_date')?.addEventListener('input', () => {
+  syncPtoRangeValidation();
+});
+
+qs('pto_date_to')?.addEventListener('input', () => {
+  syncPtoRangeValidation();
+});
+
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-archive-month]');
   if (!btn) return;
@@ -1469,10 +1498,8 @@ qs('formPto')?.addEventListener('submit', async (e) => {
     : window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
   const entry_date_from = qs('pto_date').value;
   const entry_date_to_raw = qs('pto_date_to')?.value || '';
-  const entry_date_to =
-    entry_date_to_raw && entry_date_to_raw >= entry_date_from
-      ? entry_date_to_raw
-      : entry_date_from;
+  if (!syncPtoRangeValidation(true)) return;
+  const entry_date_to = entry_date_to_raw || entry_date_from;
   const isRange = entry_date_to !== entry_date_from;
   const hours = parseFloat(qs('pto_hours').value);
   const leave_type = qs('pto_leave_type').value;
@@ -1516,6 +1543,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
       return;
     }
     qs('formPto').reset();
+    syncPtoRangeValidation();
     if (!isPrivileged) {
       const ptoUser = qs('pto_user');
       if (ptoUser)
@@ -1774,6 +1802,7 @@ function setRoleUI(role) {
   setRoleUI(me.role);
   syncPtoViewButtons();
   updatePtoListControlVisibility();
+  syncPtoRangeValidation();
 
   // Non-privileged: lock Assigned To filter to logged-in user
   if (me.role !== 'admin' && me.role !== 'pm') {
