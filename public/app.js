@@ -1037,7 +1037,7 @@ function formatPtoDayPart(dayPart) {
 function syncPtoDayPartVisibility(report = false) {
   const wrap = qs('pto_day_part_wrap');
   const input = qs('pto_day_part');
-  const hours = parseFloat(qs('pto_hours')?.value || '');
+  const hours = Number(qs('pto_hours')?.value || '');
   const requiresDayPart = Number.isFinite(hours) && hours === 4;
 
   if (wrap) wrap.hidden = !requiresDayPart;
@@ -1513,7 +1513,7 @@ qs('pto_date_to')?.addEventListener('input', () => {
   syncPtoRangeValidation();
 });
 
-qs('pto_hours')?.addEventListener('input', () => {
+qs('pto_hours')?.addEventListener('change', () => {
   syncPtoDayPartVisibility();
 });
 
@@ -1543,7 +1543,7 @@ qs('formPto')?.addEventListener('submit', async (e) => {
   if (!syncPtoRangeValidation(true)) return;
   const entry_date_to = entry_date_to_raw || entry_date_from;
   const isRange = entry_date_to !== entry_date_from;
-  const hours = parseFloat(qs('pto_hours').value);
+  const hours = Number(qs('pto_hours').value);
   if (!syncPtoDayPartVisibility(true)) return;
   const day_part = qs('pto_day_part')?.value || '';
   const leave_type = qs('pto_leave_type').value;

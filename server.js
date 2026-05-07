@@ -1583,6 +1583,11 @@ function validateHours(v) {
   return n !== null && n > 0 && n <= 24 ? n : null;
 }
 
+function validatePtoHours(v) {
+  const n = normNum(v);
+  return n === 4 || n === 8 ? n : null;
+}
+
 function validatePtoDayPart(v) {
   const s = normText(v);
   return s && VALID_PTO_DAY_PARTS.has(s) ? s : null;
@@ -2092,7 +2097,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const dateFrom = validateDateStr(edFromRaw || edRaw);
   const dateTo = validateDateStr(edToRaw || edFromRaw || edRaw);
 
-  const hours = validateHours(hoursRaw ?? 8);
+  const hours = validatePtoHours(hoursRaw ?? 8);
   const rawDayPart = normText(dpRaw);
   const validatedDayPart = validatePtoDayPart(rawDayPart);
   const leave_type_raw = normText(ltRaw);
@@ -2124,7 +2129,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   if (hours === null)
     return res
       .status(400)
-      .json({ ok: false, error: 'hours must be between 0.5 and 24' });
+      .json({ ok: false, error: 'hours must be 4 or 8 for PTO' });
   if (rawDayPart && !validatedDayPart)
     return res.status(400).json({
       ok: false,

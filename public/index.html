@@ -1476,7 +1476,10 @@
             </div>
             <div class="field field-sm">
               <label for="pto_hours">Hours</label>
-              <input type="number" id="pto_hours" value="8" min="0.5" max="24" step="0.5" required />
+              <select id="pto_hours" required>
+                <option value="8" selected>Full day (8 hours)</option>
+                <option value="4">Half day (4 hours)</option>
+              </select>
             </div>
             <div class="field" id="pto_day_part_wrap" hidden>
               <label for="pto_day_part">Day Part</label>
