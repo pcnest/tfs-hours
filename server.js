@@ -949,8 +949,7 @@ app.get('/api/hours/latest', requireAuth, async (req, res) => {
     .trim();
   const costType = costTypeRaw || null;
   const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
-  if (!scope.ok)
-    return res.status(403).json({ ok: false, error: scope.error });
+  if (!scope.ok) return res.status(403).json({ ok: false, error: scope.error });
 
   const limit = Math.min(2000, Math.max(1, Number(req.query.limit || 200)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -1096,8 +1095,7 @@ app.get('/api/hours/summary', requireAuth, async (req, res) => {
     .trim();
   const costType = costTypeRaw || null;
   const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
-  if (!scope.ok)
-    return res.status(403).json({ ok: false, error: scope.error });
+  if (!scope.ok) return res.status(403).json({ ok: false, error: scope.error });
 
   const params = [
     from.toISOString(),
@@ -1183,8 +1181,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
     .trim();
   const costType = costTypeRaw || null;
   const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
-  if (!scope.ok)
-    return res.status(403).json({ ok: false, error: scope.error });
+  if (!scope.ok) return res.status(403).json({ ok: false, error: scope.error });
 
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit || 500)));
   const offset = Math.max(0, Number(req.query.offset || 0));
@@ -2002,9 +1999,9 @@ function currentReportYmd() {
     const parts = getTimeZoneParts(now, tz);
     return formatYmd(parts.year, parts.month, parts.day);
   }
-  return new Date(
-    now.getTime() + getReportOffsetMinutes() * 60 * 1000,
-  ).toISOString().slice(0, 10);
+  return new Date(now.getTime() + getReportOffsetMinutes() * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 }
 
 function isWeekdayYmd(ymd) {
@@ -2069,7 +2066,8 @@ async function resolveRegisteredPtoUser(userName, userUpn) {
     if (byName.rows.length === 1) return { user: byName.rows[0] };
     if (byName.rows.length > 1) {
       return {
-        error: 'Multiple registered users share this name. Please use email/UPN.',
+        error:
+          'Multiple registered users share this name. Please use email/UPN.',
       };
     }
   }
@@ -2892,7 +2890,9 @@ function checkCancelAccess(entries, actorRole, actorEmail) {
     return { status: 404, error: 'not found' };
 
   const representative = entries[0];
-  const actorEmailKey = String(actorEmail || '').trim().toLowerCase();
+  const actorEmailKey = String(actorEmail || '')
+    .trim()
+    .toLowerCase();
   const filerEmailKey = String(representative.user_upn || '')
     .trim()
     .toLowerCase();
@@ -2901,7 +2901,9 @@ function checkCancelAccess(entries, actorRole, actorEmail) {
   if (isBatch) {
     const hasMixedFilers = entries.some(
       (row) =>
-        String(row.user_upn || '').trim().toLowerCase() !== filerEmailKey,
+        String(row.user_upn || '')
+          .trim()
+          .toLowerCase() !== filerEmailKey,
     );
     if (hasMixedFilers)
       return { status: 400, error: 'batch contains mixed filers' };
@@ -3377,215 +3379,6 @@ app.delete('/api/pto/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- PTO email/PDF preview (admin only, remove after testing) ----------
-app.post('/api/pto/test-email', requireAuth, async (req, res) => {
-  if (req.userRole !== 'admin')
-    return res.status(403).json({ ok: false, error: 'forbidden' });
-  if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL)
-    return res.status(503).json({ ok: false, error: 'email not configured' });
-
-  const user_name =
-    normText(req.body?.user_name) || req.userName || 'Test User';
-  const entry_date =
-    validateDateStr(req.body?.entry_date) ||
-    new Date().toISOString().slice(0, 10);
-  const hours = validateHours(req.body?.hours ?? 8) ?? 8;
-  const rawDayPart = normText(req.body?.day_part);
-  const validatedDayPart = validatePtoDayPart(rawDayPart);
-  const leave_type_raw = normText(req.body?.leave_type);
-  const leave_type =
-    leave_type_raw && VALID_LEAVE_TYPES.has(leave_type_raw)
-      ? leave_type_raw
-      : 'Personal';
-  const notes = normText(req.body?.notes) || 'Test leave notes.';
-  if (rawDayPart && !validatedDayPart) {
-    return res.status(400).json({
-      ok: false,
-      error: 'day_part must be first_half or second_half',
-    });
-  }
-  if (requiresPtoDayPart(hours) && !validatedDayPart) {
-    return res.status(400).json({
-      ok: false,
-      error: 'day_part is required when hours is 4',
-    });
-  }
-  if (!requiresPtoDayPart(hours) && validatedDayPart) {
-    return res.status(400).json({
-      ok: false,
-      error: 'day_part is only allowed when hours is 4',
-    });
-  }
-  const dayPart = requiresPtoDayPart(hours) ? validatedDayPart : null;
-  const dest = req.userEmail; // all test emails go only to the admin
-
-  const _fmtEntryDate = (() => {
-    const d = new Date(entry_date + 'T00:00:00');
-    const day = String(d.getDate()).padStart(2, '0');
-    const month = d.toLocaleDateString('en-US', { month: 'long' });
-    const year = d.getFullYear();
-    const weekday = d.toLocaleDateString('en-US', { weekday: 'long' });
-    return `${day} ${month} ${year}, ${weekday}`;
-  })();
-
-  const results = [];
-  const transporter = createMailTransporter();
-  const fakeMessageId = '<test-preview@tfs-hours>';
-
-  // Generate PDF once — reused in email 1
-  let pdfBuf;
-  try {
-    pdfBuf = await generatePtoPdf({
-      userName: user_name,
-      entryDate: entry_date,
-      entryDateTo: null,
-      totalDays: 1,
-      hours,
-      dayPart,
-      leaveType: leave_type,
-      notes,
-      submittedAt: new Date().toUTCString(),
-    });
-  } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: `PDF generation failed: ${e.message}` });
-  }
-  const pdfAttachment = {
-    filename: `pto_receipt_${entry_date}.pdf`,
-    content: pdfBuf,
-    contentType: 'application/pdf',
-  };
-
-  // 1. Approval notification with PDF attached (what approvers receive when PTO is submitted; filer is CC'd)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] LEAVE REQUEST \u2013 ${user_name} \u2013 ${leave_type} Leave on ${fmtSubjectDate(entry_date)}`,
-
-      html: `<p><em style="color:#888">[TEST \u2014 approval notification sent to approvers; filer is CC]</em></p>
-<p>Hi @Team,</p>
-<p><strong>${escapeEmailHtml(user_name)}</strong> has filed a Leave Request and it needs your approval.</p>
-<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
-  <strong>Leave Date:</strong> ${escapeEmailHtml(_fmtEntryDate)}<br>
-  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
-  ${buildPtoDayPartHtml(dayPart)}
-  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
-  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
-</p>
-<p>Please see the attached Leave Request form for reference.</p>
-<p>Thank you for your review.</p>`,
-      text: `[TEST] Hi @Team,\n\n${user_name} has filed a Leave Request.\n\nLeave Date: ${_fmtEntryDate}\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nReason: ${notes}`,
-      attachments: [pdfAttachment],
-    });
-    results.push('approval-notification (with PDF): sent');
-  } catch (e) {
-    results.push(`approval-notification: FAILED \u2014 ${e.message}`);
-  }
-
-  // 2. Auto-approve receipt (what filer gets when PTO_APPROVAL_ENABLED=false or admin files own PTO)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
-      html: `<p><em style="color:#888">[TEST \u2014 auto-approve receipt sent to filer]</em></p>
-<p>Hi ${escapeEmailHtml(user_name)},</p>
-<p>Your Leave Request for <strong>${escapeEmailHtml(_fmtEntryDate)}</strong> has been <strong>automatically approved</strong>.</p>
-<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
-  <strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>
-  ${buildPtoDayPartHtml(dayPart)}
-  <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
-  <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes)}
-</p>
-<p>Please see the attached Leave Request form for your records.</p>`,
-      text: `[TEST] Hi ${user_name},\n\nYour Leave Request for ${_fmtEntryDate} has been automatically approved.\n\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes}`,
-      attachments: [pdfAttachment],
-    });
-    results.push('auto-approve-receipt (with PDF): sent');
-  } catch (e) {
-    results.push(`auto-approve-receipt: FAILED \u2014 ${e.message}`);
-  }
-
-  // 3. Lead-approved notification (what PMs + filer receive after lead approves)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] PTO Lead-Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
-      html: `<p><em style="color:#888">[TEST \u2014 sent to PMs + filer after lead approves]</em></p>
-<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>approved by Test Lead</strong> (lead).</p>
-<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
-<p>A PM still needs to give final approval. Please log in to the TFS Hours app.</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} approved by lead.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}\nAwaiting PM final approval.`,
-      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
-    });
-    results.push('lead-approved-notification: sent');
-  } catch (e) {
-    results.push(`lead-approved-notification: FAILED \u2014 ${e.message}`);
-  }
-
-  // 4. Final PM approval notification (what filer + leads receive)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] PTO Approved \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
-      html: `<p><em style="color:#888">[TEST \u2014 sent to filer + leads after PM gives final approval]</em></p>
-<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on ${escapeEmailHtml(entry_date)} has been <strong>fully approved</strong> by Test PM.</p>
-<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} fully approved by Test PM.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}.`,
-      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
-    });
-    results.push('final-approval-notification: sent');
-  } catch (e) {
-    results.push(`final-approval-notification: FAILED \u2014 ${e.message}`);
-  }
-
-  // 5. Denial notification (what filer receives when denied)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] PTO Denied \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
-
-      html: `<p><em style="color:#888">[TEST \u2014 sent to filer on denial]</em></p>
-<p>Your PTO request for <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>denied</strong> by Test Lead.</p>
-<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
-<p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
-<p>You may resubmit a new PTO request if needed.</p>`,
-      text: `[TEST] Your PTO for ${entry_date} was denied.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}. Reason: ${notes}`,
-      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
-    });
-    results.push('denial-notification: sent');
-  } catch (e) {
-    results.push(`denial-notification: FAILED \u2014 ${e.message}`);
-  }
-
-  // 6. Cancellation notification (what approvers receive when filer cancels)
-  try {
-    await transporter.sendMail({
-      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-      to: dest,
-      subject: `[TEST] PTO Cancelled \u2013 ${user_name} \u2013 ${fmtSubjectDate(entry_date)}`,
-
-      html: `<p><em style="color:#888">[TEST \u2014 sent to approvers when filer cancels]</em></p>
-<p>The PTO request for <strong>${escapeEmailHtml(user_name)}</strong> on <strong>${escapeEmailHtml(entry_date)}</strong> has been <strong>cancelled</strong> by ${escapeEmailHtml(user_name)}.</p>
-<p><strong>Leave Duration:</strong> ${fmtH(hours)} hrs<br>${buildPtoDayPartHtml(dayPart)}<strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}</p>
-<p><strong>Reason:</strong> ${escapeEmailHtml(notes)}</p>
-<p>No further action is needed.</p>`,
-      text: `[TEST] PTO for ${user_name} on ${entry_date} has been cancelled.\nLeave Duration: ${fmtH(hours)} hrs${buildPtoDayPartText(dayPart)}\nLeave Type: ${leave_type}. Reason: ${notes}`,
-      headers: { 'In-Reply-To': fakeMessageId, References: fakeMessageId },
-    });
-    results.push('cancellation-notification: sent');
-  } catch (e) {
-    results.push(`cancellation-notification: FAILED \u2014 ${e.message}`);
-  }
-
-  res.json({ ok: true, sentTo: dest, results });
-});
-
 // ---------- PTO PDF receipt ----------
 function generatePtoPdf({
   userName,
@@ -3726,8 +3519,7 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
   const assignedTo = normText(req.query.assignedTo);
   const assignedToUPN = normText(req.query.assignedToUPN);
   const scope = resolveReportingScope(req, assignedTo, assignedToUPN);
-  if (!scope.ok)
-    return res.status(403).json({ ok: false, error: scope.error });
+  if (!scope.ok) return res.status(403).json({ ok: false, error: scope.error });
   try {
     // Mon–Fri weekday count × 8
     const wdR = await pool.query(
@@ -4137,7 +3929,8 @@ app.post(
 
 // ---------- PTO overdue reminder / escalation ----------
 function getPendingPtoStageLabel(filerRole) {
-  if (filerRole === 'dev' || filerRole === 'qa') return 'Awaiting lead approval';
+  if (filerRole === 'dev' || filerRole === 'qa')
+    return 'Awaiting lead approval';
   if (filerRole === 'lead') return 'Awaiting PM approval';
   if (filerRole === 'pm') return 'Awaiting approval from another PM';
   return 'Awaiting approval';
@@ -4321,7 +4114,7 @@ function buildOverduePtoEmail(request, notificationType, overdueBusinessDays) {
   <strong>Overdue Business Days:</strong> ${escapeEmailHtml(String(overdueBusinessDays))}
 </p>
 ${request.notes ? `<p><strong>Reason for Leave:</strong> ${escapeEmailHtml(request.notes)}</p>` : ''}
-<p>Please review and action this PTO request in the TFS Hours app.</p>
+<p>Please review and process this PTO request in the TFS Hours app.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
 </div>`;
   const text = `${actionLabel}: ${intro}\n\nEmployee: ${displayName}\nLeave Date: ${dateLabel}\nLeave Duration: ${dayLabel}${buildPtoDayPartText(request.dayPart)}\nLeave Type: ${request.leaveType}\nCurrent Pending Stage: ${pendingStage}\nOverdue Business Days: ${overdueBusinessDays}${request.notes ? `\nReason for Leave: ${request.notes}` : ''}\n\nPlease review and action this PTO request in the TFS Hours app.`;
@@ -4359,7 +4152,10 @@ app.post('/api/pto/overdue-reminders', async (req, res) => {
       return !minYmd || request.startDate < minYmd ? request.startDate : minYmd;
     }, null);
     const sharedOffDays = earliestPendingStart
-      ? await fetchSharedOffDays(addDaysToYmd(earliestPendingStart, 1), todayYmd)
+      ? await fetchSharedOffDays(
+          addDaysToYmd(earliestPendingStart, 1),
+          todayYmd,
+        )
       : new Set();
     const transporter = createMailTransporter();
 
@@ -4384,7 +4180,10 @@ app.post('/api/pto/overdue-reminders', async (req, res) => {
         continue;
       }
 
-      const recipients = await getOverduePtoRecipients(request, notificationType);
+      const recipients = await getOverduePtoRecipients(
+        request,
+        notificationType,
+      );
       if (!recipients.to.length) {
         skipped++;
         errors.push({
