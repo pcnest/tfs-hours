@@ -1169,6 +1169,297 @@
       color: var(--muted);
       margin-bottom: 0;
     }
+
+    @media (max-width: 900px) {
+      body {
+        padding: 20px;
+      }
+
+      .hero-top {
+        flex-direction: column;
+      }
+
+      .user-chip {
+        align-items: flex-start;
+        padding-top: 0;
+      }
+
+      .user-chip-main {
+        flex-wrap: wrap;
+        white-space: normal;
+      }
+
+      .user-chip-status {
+        text-align: left;
+      }
+
+      .tab-nav {
+        flex-wrap: wrap;
+      }
+
+      .tab-btn {
+        flex: 1 1 220px;
+        text-align: center;
+      }
+
+      .range {
+        flex-wrap: wrap;
+      }
+
+      .range input {
+        flex: 1 1 180px;
+        min-width: 0;
+      }
+
+      .pto-archive-toggle {
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+
+      .pto-archive-meta {
+        margin-left: 0;
+      }
+
+      .pg-controls {
+        flex-wrap: wrap;
+      }
+    }
+
+    @media (max-width: 760px) {
+      body {
+        padding: 16px;
+      }
+
+      .app {
+        gap: 14px;
+      }
+
+      .panel {
+        padding: 14px;
+        margin-bottom: 1rem;
+      }
+
+      .sub {
+        font-size: 14px;
+      }
+
+      .tab-nav {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+
+      .tab-btn {
+        width: 100%;
+      }
+
+      .filters,
+      .pto-form-row,
+      .pto-list-bar,
+      .table-filter-bar {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .filter-dates,
+      .filter-assigned,
+      .filters .actions,
+      .field,
+      .field-grow,
+      .field-sm,
+      .tf-field,
+      .tf-field-grow,
+      .tf-field-actions {
+        width: 100%;
+        min-width: 0;
+        flex: none;
+      }
+
+      .field-sm {
+        max-width: none;
+      }
+
+      .filters .actions,
+      .actions {
+        margin-left: 0;
+        justify-content: flex-start;
+      }
+
+      .actions>button,
+      .filters .actions>button,
+      .pto-form-row .field>button,
+      .tf-field-actions>button,
+      #pto_view_wrap>button {
+        width: 100%;
+      }
+
+      .presets {
+        gap: 8px;
+      }
+
+      .preset-btn {
+        flex: 1 1 calc(50% - 8px);
+        min-width: 120px;
+        text-align: center;
+      }
+
+      .segmented {
+        display: grid;
+        grid-template-columns: 1fr;
+        border-radius: 16px;
+      }
+
+      .segmented-btn {
+        width: 100%;
+        text-align: center;
+      }
+
+      .stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .table-pagination {
+        padding-inline: 0;
+      }
+
+      .pg-info,
+      .pg-size {
+        white-space: normal;
+      }
+
+      dialog#dailyModal {
+        width: calc(100% - 24px);
+        max-width: none;
+        margin: 12px;
+      }
+
+      .mobile-card-table,
+      .mobile-card-table tbody,
+      .mobile-card-table tr,
+      .mobile-card-table td {
+        display: block;
+        width: 100%;
+      }
+
+      .mobile-card-table {
+        min-width: 0;
+      }
+
+      .mobile-card-table thead {
+        display: none;
+      }
+
+      .mobile-card-table tbody {
+        display: grid;
+        gap: 12px;
+      }
+
+      .mobile-card-table tbody tr {
+        border: 1px solid var(--stroke);
+        border-radius: 14px;
+        padding: 10px 12px;
+        background: white;
+        box-shadow: 0 10px 24px rgba(16, 24, 24, 0.08);
+      }
+
+      .mobile-card-table tbody tr:hover {
+        background: white;
+      }
+
+      .mobile-card-table td {
+        display: grid;
+        grid-template-columns: minmax(92px, 112px) minmax(0, 1fr);
+        gap: 10px;
+        align-items: start;
+        padding: 7px 0;
+        white-space: normal;
+        border-bottom: 1px solid #ece8df;
+      }
+
+      .mobile-card-table td:last-child {
+        border-bottom: none;
+      }
+
+      .mobile-card-table td::before {
+        content: attr(data-label);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .mobile-card-table td[colspan] {
+        display: block;
+        padding: 6px 0;
+        border-bottom: none;
+      }
+
+      .mobile-card-table td[colspan]::before {
+        content: none;
+      }
+
+      .mobile-card-table td.cell-actions {
+        display: block;
+        padding-top: 10px;
+      }
+
+      .mobile-card-table td.cell-actions::before {
+        display: block;
+        margin-bottom: 8px;
+      }
+
+      .mobile-card-table td.cell-actions[data-empty="true"] {
+        display: none;
+      }
+
+      .mobile-card-table .title-cell {
+        max-width: none;
+      }
+
+      .mobile-card-table .tag {
+        max-width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .mobile-card-table tbody tr.pto-section-row,
+      .mobile-card-table tbody tr.pto-empty-row,
+      .mobile-card-table tbody tr.pto-archive-month-row {
+        padding: 0;
+        border: none;
+        box-shadow: none;
+        background: transparent;
+      }
+
+      .mobile-card-table tbody tr.pto-section-row td,
+      .mobile-card-table tbody tr.pto-empty-row td {
+        padding: 10px 12px;
+      }
+
+      .mobile-card-table tbody tr.pto-archive-month-row td {
+        padding: 0;
+      }
+
+      .pto-table-actions {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .stats {
+        grid-template-columns: 1fr;
+      }
+
+      .preset-btn {
+        flex-basis: 100%;
+      }
+
+      .mobile-card-table td {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+    }
   </style>
 </head>
 
@@ -1343,7 +1634,7 @@
         </div>
 
         <section class="table-wrap">
-          <table>
+          <table class="report-table mobile-card-table">
             <thead>
               <tr>
                 <th>Ticket Type</th>
@@ -1397,7 +1688,7 @@
           </div>
         </form>
         <div class="pto-table-wrap">
-          <table class="pto-table">
+          <table class="pto-table mobile-card-table">
             <thead>
               <tr>
                 <th>Date</th>
@@ -1438,7 +1729,7 @@
           </div>
         </form>
         <div class="pto-table-wrap">
-          <table class="pto-table">
+          <table class="pto-table mobile-card-table">
             <thead>
               <tr>
                 <th>Date</th>
@@ -1535,7 +1826,7 @@
           </div>
         </div>
         <div class="pto-table-wrap">
-          <table class="pto-table">
+          <table class="pto-table mobile-card-table">
             <thead>
               <tr>
                 <th>User</th>
@@ -1567,7 +1858,7 @@
       <button type="button" class="modal-close" id="btnDailyClose" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
-      <table>
+      <table class="daily-table mobile-card-table">
         <thead>
           <tr>
             <th>Date</th>

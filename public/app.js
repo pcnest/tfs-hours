@@ -367,16 +367,16 @@ function renderReportRows(rows) {
     .map(
       (x) => `
       <tr>
-        <td>${escapeHtml(x.ticket_type || '')}</td>
-        <td>${renderIdTag(x.ticket_id)}</td>
-        <td class="title-cell">${escapeHtml(x.ticket_title || '')}</td>
-        <td>${renderIdTag(x.task_id)}</td>
-        <td class="title-cell">${escapeHtml(x.task_title || '')}</td>
-        <td>${escapeHtml(x.task_activity || '')}</td>
-        <td>${escapeHtml(fmtDateTime(x.changed_at))}</td>
-        <td>${escapeHtml(fmtCostType(x.cost_type))}</td>
-        <td>${fmtHours(x.actual_hours)}</td>
-        <td>${escapeHtml(x.task_assigned_to || '')}</td>
+        <td data-label="Ticket Type">${escapeHtml(x.ticket_type || '')}</td>
+        <td data-label="Ticket ID">${renderIdTag(x.ticket_id)}</td>
+        <td class="title-cell" data-label="Ticket Title">${escapeHtml(x.ticket_title || '')}</td>
+        <td data-label="Task ID">${renderIdTag(x.task_id)}</td>
+        <td class="title-cell" data-label="Task Title">${escapeHtml(x.task_title || '')}</td>
+        <td data-label="Task Activity">${escapeHtml(x.task_activity || '')}</td>
+        <td data-label="Changed Date">${escapeHtml(fmtDateTime(x.changed_at))}</td>
+        <td data-label="Cost Type">${escapeHtml(fmtCostType(x.cost_type))}</td>
+        <td data-label="Actual Hours">${fmtHours(x.actual_hours)}</td>
+        <td data-label="Assigned To">${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
     `,
     )
@@ -681,7 +681,7 @@ function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
         hoursLabel = fmtHours(0);
       }
       html.push(
-        `<tr${rowClass}><td>${escapeHtml(ymd)}</td><td>${DAY_NAMES[dow]}</td><td>${escapeHtml(hoursLabel)}</td></tr>`,
+        `<tr${rowClass}><td data-label="Date">${escapeHtml(ymd)}</td><td data-label="Day">${DAY_NAMES[dow]}</td><td data-label="Total Hours">${escapeHtml(hoursLabel)}</td></tr>`,
       );
     }
     cur.setUTCDate(cur.getUTCDate() + 1);
@@ -894,10 +894,10 @@ function renderHolidays(rows) {
     .map(
       (r) => `
       <tr>
-        <td>${escapeHtml(r.holiday_date)}</td>
-        <td>${escapeHtml(r.name || '')}</td>
-        <td>${fmtHours(r.hours)}</td>
-        <td>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button>` : ''}</td>
+        <td data-label="Date">${escapeHtml(r.holiday_date)}</td>
+        <td data-label="Holiday">${escapeHtml(r.name || '')}</td>
+        <td data-label="Hours">${fmtHours(r.hours)}</td>
+        <td class="cell-actions" data-label="Actions"${isPrivileged ? '' : ' data-empty="true"'}>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button>` : ''}</td>
       </tr>`,
     )
     .join('');
@@ -956,10 +956,10 @@ function renderTeamOff(rows) {
     .map(
       (r) => `
       <tr>
-        <td>${escapeHtml(r.entry_date)}</td>
-        <td>${escapeHtml(r.notes || '')}</td>
-        <td>${fmtHours(r.hours)}</td>
-        <td>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button>` : ''}</td>
+        <td data-label="Date">${escapeHtml(r.entry_date)}</td>
+        <td data-label="Notes">${escapeHtml(r.notes || '')}</td>
+        <td data-label="Hours">${fmtHours(r.hours)}</td>
+        <td class="cell-actions" data-label="Actions"${isPrivileged ? '' : ' data-empty="true"'}>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button>` : ''}</td>
       </tr>`,
     )
     .join('');
@@ -1267,17 +1267,18 @@ function renderPtoItemRow(item, context, extraAttrs = '') {
       : item.type === 'batch'
         ? `${escapeHtml(item.sortDate)} <span class="muted" style="font-size:.85em">(${item.dayCount} day)</span>`
         : escapeHtml(item.sortDate);
+  const actionHtml = renderPtoActionCell(item, context);
 
   return `
       <tr${extraAttrs}>
-        <td>${escapeHtml(item.userName)}</td>
-        <td>${dateHtml}</td>
-        <td>${fmtHours(item.hours)}</td>
-        <td>${escapeHtml(formatPtoDayPart(item.dayPart))}</td>
-        <td>${escapeHtml(item.leaveType)}</td>
-        <td>${escapeHtml(item.notes)}</td>
-        <td>${ptoBadge(item.status)}${statusNoteHtml}</td>
-        <td>${renderPtoActionCell(item, context)}</td>
+        <td data-label="User">${escapeHtml(item.userName)}</td>
+        <td data-label="Date">${dateHtml}</td>
+        <td data-label="Hours">${fmtHours(item.hours)}</td>
+        <td data-label="Day Part">${escapeHtml(formatPtoDayPart(item.dayPart))}</td>
+        <td data-label="Leave Type">${escapeHtml(item.leaveType)}</td>
+        <td data-label="Notes">${escapeHtml(item.notes)}</td>
+        <td data-label="Status">${ptoBadge(item.status)}${statusNoteHtml}</td>
+        <td class="cell-actions" data-label="Actions"${actionHtml ? '' : ' data-empty="true"'}>${actionHtml}</td>
       </tr>`;
 }
 
