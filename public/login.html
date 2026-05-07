@@ -89,6 +89,26 @@
       font-family: var(--font-display);
       font-size: 32px;
       font-weight: 700;
+      line-height: 1.15;
+    }
+
+    .beta-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.28rem 0.72rem;
+      margin-left: 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 122, 107, 0.22);
+      background: rgba(31, 122, 107, 0.12);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+      font-family: var(--font-body);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      vertical-align: middle;
     }
 
     .panel {
@@ -194,7 +214,7 @@
   <div class="wrap">
     <header class="hero">
       <div class="eyebrow">Lemontech Solutions</div>
-      <h1>TFS Hours Report <span class="role-badge">BETA</span></h1>
+      <h1>TFS Hours Report <span class="beta-chip">BETA</span></h1>
     </header>
 
     <section class="panel">
