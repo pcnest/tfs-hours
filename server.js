@@ -1628,6 +1628,27 @@ function fmtSubjectDateRange(from, to) {
   return `${fmtSubjectDate(from)} \u2013 ${fmtSubjectDate(to)}`;
 }
 
+function fmtReportCalendarDateFromTimestamp(value) {
+  const d = value instanceof Date ? value : new Date(value || '');
+  if (isNaN(d)) return value ? String(value) : '';
+  const timeZone = getReportTimeZone();
+  if (timeZone) {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(d);
+  }
+  const shifted = new Date(d.getTime() + getReportOffsetMinutes() * 60000);
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(shifted);
+}
+
 // ---------- Public Holidays ----------
 app.get('/api/holidays', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
@@ -2075,6 +2096,36 @@ async function resolveRegisteredPtoUser(userName, userUpn) {
   return { error: 'Selected user is not a registered app user' };
 }
 
+async function resolveUserDisplayNameByEmail(email) {
+  const upn = normText(email);
+  if (!upn) return '';
+  const r = await pool.query(
+    `SELECT COALESCE(NULLIF(name, ''), email) AS name
+     FROM public.users
+     WHERE email IS NOT NULL
+       AND email <> ''
+       AND LOWER(email) = LOWER($1)`,
+    [upn],
+  );
+  return r.rows[0]?.name || upn;
+}
+
+async function buildLeadApprovalEmailDetails(approvedByLead, leadActionedAt) {
+  const leadEmail = normText(approvedByLead);
+  if (!leadEmail) return { html: '', text: '' };
+  const leadName = await resolveUserDisplayNameByEmail(leadEmail);
+  const leadDate = normText(leadActionedAt)
+    ? fmtReportCalendarDateFromTimestamp(leadActionedAt)
+    : '';
+  const summaryText = leadDate
+    ? `Lead approval: ${leadName} on ${leadDate}.`
+    : `Lead approval: ${leadName}.`;
+  return {
+    html: `<p>${escapeEmailHtml(summaryText)}</p>`,
+    text: `\n${summaryText}`,
+  };
+}
+
 app.post('/api/pto', requireAuth, async (req, res) => {
   const {
     user_name: unRaw,
@@ -2400,7 +2451,8 @@ app.patch(
     try {
       const batchRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                day_part, status, filer_role, email_message_id, notes, created_at
+                day_part, status, filer_role, approved_by_lead, lead_actioned_at,
+                email_message_id, notes, created_at
          FROM public.pto_entries WHERE batch_id = $1
          ORDER BY entry_date ASC`,
         [batchId],
@@ -2503,6 +2555,10 @@ app.patch(
               }
             } else {
               let leadEmails = [];
+              const leadApprovalDetails = await buildLeadApprovalEmailDetails(
+                entry.approved_by_lead,
+                entry.lead_actioned_at,
+              );
               if (
                 ['dev', 'qa'].includes(entry.filer_role) ||
                 entry.filer_role === 'lead'
@@ -2561,9 +2617,10 @@ app.patch(
                   ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+${leadApprovalDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
                   headers: replyHeaders,
                   attachments: pmBatchAttachments,
                 });
@@ -2953,8 +3010,8 @@ app.patch(
     try {
       const entryRes = await pool.query(
         `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              day_part, status, filer_role, email_message_id, batch_id, notes,
-              created_at
+              day_part, status, filer_role, approved_by_lead, lead_actioned_at,
+              email_message_id, batch_id, notes, created_at
        FROM public.pto_entries WHERE id = $1`,
         [id],
       );
@@ -3056,6 +3113,10 @@ app.patch(
             } else {
               // PM final approval: notify filer + leads in filer's team
               let leadEmails = [];
+              const leadApprovalDetails = await buildLeadApprovalEmailDetails(
+                entry.approved_by_lead,
+                entry.lead_actioned_at,
+              );
               if (
                 ['dev', 'qa'].includes(entry.filer_role) ||
                 entry.filer_role === 'lead'
@@ -3105,9 +3166,10 @@ app.patch(
                   ...(ccList.length ? { cc: ccList.join(', ') } : {}),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
+                  ${leadApprovalDetails.html}
                   <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
                   <p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
                   headers: replyHeaders,
                   attachments: pmApprovalAttachments,
                 });
