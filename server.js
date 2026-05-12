@@ -2118,8 +2118,8 @@ async function buildLeadApprovalEmailDetails(approvedByLead, leadActionedAt) {
     ? fmtReportCalendarDateFromTimestamp(leadActionedAt)
     : '';
   const summaryText = leadDate
-    ? `Lead approval: ${leadName} on ${leadDate}.`
-    : `Lead approval: ${leadName}.`;
+    ? `Lead approval: <strong>${leadName}</strong> on <strong>${leadDate}</strong>.`
+    : `Lead approval: <strong>${leadName}</strong>.`;
   return {
     html: `<p>${escapeEmailHtml(summaryText)}</p>`,
     text: `\n${summaryText}`,
@@ -2374,8 +2374,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
 <p>Please see the attached Leave Request form for reference.</p>
-<p>Thank you for your review.</p>`,
-                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.`,
+<p>Thank you for your review.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+                text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                 attachments: [pdfAttachment],
               });
               // Store the pre-generated message-id on all rows for reply threading
@@ -2409,8 +2410,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   <strong>Leave Type:</strong> ${escapeEmailHtml(leave_type)}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(notes || '—')}
 </p>
-<p>Please see the attached Leave Request form for your records.</p>`,
-              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}`,
+<p>Please see the attached Leave Request form for your records.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+              text: `Hi ${user_name || user_upn},\n\nYour Leave Request for ${_fmtDateLabel} has been automatically approved.\n\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
               attachments: [pdfAttachment],
             });
           }
@@ -2548,8 +2550,9 @@ app.patch(
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
-<p>This request is still pending final Manager's review and approval.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.`,
+<p>This request is still pending final Manager's review and approval.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                   headers: replyHeaders,
                 });
               }
@@ -2619,8 +2622,9 @@ app.patch(
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 ${leadApprovalDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
-<p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
+<p>The approved request has been added to the team calendar.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                   headers: replyHeaders,
                   attachments: pmBatchAttachments,
                 });
@@ -2737,8 +2741,9 @@ app.patch(
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${entry.user_name || entry.user_upn}</strong> on <strong>${escapeEmailHtml(dateRange)}</strong> has been <strong>denied by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
-<p>You may resubmit a new PTO request if needed.</p>`,
-              text: `Your PTO for ${dateRange} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+<p>You may resubmit a new PTO request if needed.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+              text: `Your PTO for ${dateRange} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
               headers: replyHeaders,
             });
           } catch (emailErr) {
@@ -2842,8 +2847,9 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(batchDateRange)}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
-<p>No further action is needed.</p>`,
-              text: `PTO for ${entry.user_name || entry.user_upn} on ${batchDateRange} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+<p>No further action is needed.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${batchDateRange} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
               headers: replyHeaders,
             });
           }
@@ -3105,8 +3111,9 @@ app.patch(
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
-<p>This request is still pending final Manager's review and approval.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.`,
+<p>This request is still pending final Manager's review and approval.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} approved by lead ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nAwaiting PM final approval.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                   headers: replyHeaders,
                 });
               }
@@ -3168,8 +3175,9 @@ app.patch(
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   ${leadApprovalDetails.html}
                   <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
-                  <p>The approved request has been added to the team calendar.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.`,
+                  <p>The approved request has been added to the team calendar.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                   headers: replyHeaders,
                   attachments: pmApprovalAttachments,
                 });
@@ -3282,8 +3290,9 @@ app.patch(
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
-<p>You may resubmit a new PTO request if needed.</p>`,
-              text: `Your PTO for ${fmtSubjectDate(entry.entry_date)} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}`,
+<p>You may resubmit a new PTO request if needed.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+              text: `Your PTO for ${fmtSubjectDate(entry.entry_date)} was denied by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
               headers: replyHeaders,
             });
           } catch (emailErr) {
@@ -3382,8 +3391,9 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${cancelNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(cancelNote)}</p>` : ''}
-<p>No further action is needed.</p>`,
-              text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}`,
+<p>No further action is needed.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+              text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} has been cancelled by ${req.userName || req.userEmail}.\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${cancelNote ? ' Reason: ' + cancelNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
               headers: replyHeaders,
             });
           }
