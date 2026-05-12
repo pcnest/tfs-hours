@@ -490,7 +490,7 @@ function buildOwnReportingAssigneeClause(params, upnExpr, nameExpr, self) {
   const emailIdx = params.push(self.email);
   if (self.name) {
     const nameIdx = params.push(self.name);
-    return `(LOWER(COALESCE(${upnExpr}, '')) = LOWER($${emailIdx}) OR (COALESCE(NULLIF(${upnExpr}, ''), '') = '' AND LOWER(COALESCE(${nameExpr}, '')) = LOWER($${nameIdx})))`;
+    return `(LOWER(COALESCE(${upnExpr}, '')) = LOWER($${emailIdx}) OR LOWER(COALESCE(${nameExpr}, '')) = LOWER($${nameIdx}))`;
   }
   return `LOWER(COALESCE(${upnExpr}, '')) = LOWER($${emailIdx})`;
 }
