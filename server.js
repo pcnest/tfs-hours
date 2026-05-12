@@ -444,7 +444,7 @@ function requireLeadOrPm(req, res, next) {
 }
 
 const REPORT_BROAD_ROLES = new Set(['admin', 'pm']);
-const REPORT_OWN_ONLY_ROLES = new Set(['lead', 'dev', 'qa']);
+const REPORT_OWN_ONLY_ROLES = new Set(['lead', 'dev', 'qa', 'ts']);
 
 function normIdentity(v) {
   return String(v ?? '')
