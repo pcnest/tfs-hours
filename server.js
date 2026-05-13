@@ -515,6 +515,9 @@ async function getApproverEmails(filerRole, filerTeam, filerEmail) {
   } else if (filerRole === 'pm') {
     q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(email) != LOWER($1)`;
     params = [filerEmail];
+  } else if (filerRole === 'ts') {
+    q = `SELECT email FROM public.users WHERE role = 'pm'`;
+    params = [];
   } else {
     return [];
   }
@@ -1868,7 +1871,7 @@ const VALID_LEAVE_TYPES = new Set([
 const VALID_PTO_DAY_PARTS = new Set(['first_half', 'second_half']);
 
 /** Roles that must enforce own-data filtering (cannot view/file for others) */
-const OWN_DATA_ROLES = new Set(['dev', 'qa']);
+const OWN_DATA_ROLES = new Set(['dev', 'qa', 'ts']);
 
 app.get('/api/pto', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
@@ -1975,7 +1978,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
       params.push(req.userEmail);
       const pmEmail = params.length;
       where.push(
-        `((status = 'lead_approved') OR (status = 'pending' AND filer_role IN ('lead','pm') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
+        `((status = 'lead_approved') OR (status = 'pending' AND filer_role IN ('lead','pm','ts') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
       );
     }
     const r = await pool.query(
@@ -2932,7 +2935,8 @@ function checkApprovalAccess(entry, actorRole, actorEmail, actorTeam) {
       filer_role === 'pm' &&
       status === 'pending' &&
       user_upn.toLowerCase() !== actorEmail.toLowerCase();
-    if (!devQaReady && !leadReady && !pmReady)
+    const tsReady = filer_role === 'ts' && status === 'pending';
+    if (!devQaReady && !leadReady && !pmReady && !tsReady)
       return 'entry is not in an approvable state for this PM';
     return null;
   }
