@@ -2120,11 +2120,14 @@ async function buildLeadApprovalEmailDetails(approvedByLead, leadActionedAt) {
   const leadDate = normText(leadActionedAt)
     ? fmtReportCalendarDateFromTimestamp(leadActionedAt)
     : '';
+  const summaryHtml = leadDate
+    ? `Lead approval: <strong>${escapeEmailHtml(leadName)}</strong> on <strong>${escapeEmailHtml(leadDate)}</strong>.`
+    : `Lead approval: <strong>${escapeEmailHtml(leadName)}</strong>.`;
   const summaryText = leadDate
-    ? `Lead approval: <strong>${leadName}</strong> on <strong>${leadDate}</strong>.`
-    : `Lead approval: <strong>${leadName}</strong>.`;
+    ? `Lead approval: ${leadName} on ${leadDate}.`
+    : `Lead approval: ${leadName}.`;
   return {
-    html: `<p>${escapeEmailHtml(summaryText)}</p>`,
+    html: `<p>${summaryHtml}</p>`,
     text: `\n${summaryText}`,
   };
 }
@@ -2626,8 +2629,8 @@ app.patch(
 ${leadApprovalDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>
-<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. </p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
                   headers: replyHeaders,
                   attachments: pmBatchAttachments,
                 });
@@ -3180,8 +3183,8 @@ app.patch(
                   ${leadApprovalDetails.html}
                   <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
                   <p>The approved request has been added to the team calendar.</p>
-<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report.</p>`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
                   headers: replyHeaders,
                   attachments: pmApprovalAttachments,
                 });
