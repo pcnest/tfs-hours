@@ -1328,7 +1328,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
       d.prev_hours,
       d.actual_hours,
       d.delta_hours,
-      d.delta_hours AS logged_hours,
+      d.actual_hours AS logged_hours,
       d.ticket_id,
       l.ticket_type,
       l.ticket_title,
@@ -1338,7 +1338,7 @@ app.get('/api/hours/entries', requireAuth, async (req, res) => {
       COUNT(*) OVER() AS total_count
     FROM d
     LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
-    WHERE d.delta_hours <> 0
+    WHERE d.actual_hours <> 0
       ${filters.join('\n ')}
     ORDER BY d.changed_at ASC, d.task_id ASC
     LIMIT $${idx - 1} OFFSET $${idx};
@@ -3689,59 +3689,27 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
     ptoR.rows.map((r) => [r.name_key, Number(r.pto_hours)]),
   );
 
-  // Sum net hour changes for each distinct (task, changed_date) snapshot within
-  // the range, matching /api/hours/entries and the report stat cards.
+  // Sum logged hour transactions, including negative corrections, for each
+  // distinct (task, changed_date) snapshot within the range.
   const loggedR = await pool.query(
-    `WITH snaps AS (
+    `SELECT
+       LOWER(TRIM(task_assigned_to)) AS name_key,
+       SUM(h)                        AS logged_hours
+     FROM (
        SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
-         s.task_id,
-         s.snapshot_at,
-         COALESCE(s.task_changed_date, s.snapshot_at) AS t,
          s.task_assigned_to,
          COALESCE(s.task_actual_hours, 0) AS h
        FROM public.tfs_task_hours_snapshots s
+       WHERE COALESCE(s.task_changed_date, s.snapshot_at) >= $1::timestamptz
+         AND COALESCE(s.task_changed_date, s.snapshot_at) < $2::timestamptz
+         AND s.task_assigned_to IS NOT NULL
+         AND s.task_assigned_to <> ''
        ORDER BY s.task_id,
                 COALESCE(s.task_changed_date, s.snapshot_at),
                 s.snapshot_at DESC,
                 s.run_id DESC
-     ),
-     prior AS (
-       SELECT DISTINCT ON (task_id)
-         task_id, snapshot_at, t, task_assigned_to, h
-       FROM snaps
-       WHERE t < $1::timestamptz
-       ORDER BY task_id, t DESC, snapshot_at DESC
-     ),
-     inrange AS (
-       SELECT task_id, snapshot_at, t, task_assigned_to, h
-       FROM snaps
-       WHERE t >= $1::timestamptz
-         AND t < $2::timestamptz
-     ),
-     sequenced AS (
-       SELECT * FROM prior
-       UNION ALL
-       SELECT * FROM inrange
-     ),
-     deltas AS (
-       SELECT
-         task_assigned_to,
-         t,
-         h - COALESCE(
-           LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at),
-           0
-         ) AS delta_hours
-       FROM sequenced
-     )
-     SELECT
-       LOWER(TRIM(task_assigned_to)) AS name_key,
-       SUM(delta_hours)              AS logged_hours
-     FROM deltas
-     WHERE t >= $1::timestamptz
-       AND t < $2::timestamptz
-       AND task_assigned_to IS NOT NULL
-       AND task_assigned_to <> ''
-       AND delta_hours <> 0
+     ) sub
+     WHERE h <> 0
      GROUP BY 1`,
     [fromUtc.toISOString(), toExclusiveUtc.toISOString()],
   );
