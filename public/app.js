@@ -333,6 +333,18 @@ function fmtHours(v) {
   }).format(n);
 }
 
+function rowLoggedHours(row) {
+  const n = Number(
+    row?.logged_hours ?? row?.delta_hours ?? row?.actual_hours ?? 0,
+  );
+  return Number.isFinite(n) ? n : 0;
+}
+
+function hasNonZeroHours(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && Math.abs(n) > 0.000001;
+}
+
 const COST_TYPE_LABELS = { 1: 'Capitalized', 2: 'Expense' };
 function fmtCostType(v) {
   const key = String(v ?? '').trim();
@@ -351,8 +363,7 @@ function setLastSyncStatus(text) {
 
 function updateStats(rows) {
   const totalHours = rows.reduce((acc, r) => {
-    const n = Number(r.actual_hours || 0);
-    return acc + (Number.isFinite(n) ? n : 0);
+    return acc + rowLoggedHours(r);
   }, 0);
   qs('m_hours').textContent = fmtHours(totalHours);
   // m_required and m_missing are updated by loadMetrics()
@@ -375,7 +386,7 @@ function renderReportRows(rows) {
         <td data-label="Task Activity">${escapeHtml(x.task_activity || '')}</td>
         <td data-label="Changed Date">${escapeHtml(fmtDateTime(x.changed_at))}</td>
         <td data-label="Cost Type">${escapeHtml(fmtCostType(x.cost_type))}</td>
-        <td data-label="Actual Hours">${fmtHours(x.actual_hours)}</td>
+        <td data-label="Logged Hours">${fmtHours(rowLoggedHours(x))}</td>
         <td data-label="Assigned To">${escapeHtml(x.task_assigned_to || '')}</td>
       </tr>
     `,
@@ -631,7 +642,7 @@ function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
     return `<tr><td colspan="3" class="muted">No date range selected.</td></tr>`;
   }
 
-  // Build a map of localDate -> total actual_hours
+  // Build a map of localDate -> total logged hours.
   const tz = reportTimeZone();
   const off = tzOffsetMinutes();
   const dayTotals = new Map();
@@ -642,10 +653,9 @@ function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
     const localYmd = tz
       ? formatYmdInZone(d, tz)
       : shiftDateByOffset(d, off).toISOString().slice(0, 10);
-    const h = Number(row.actual_hours || 0);
     dayTotals.set(
       localYmd,
-      (dayTotals.get(localYmd) || 0) + (Number.isFinite(h) ? h : 0),
+      (dayTotals.get(localYmd) || 0) + rowLoggedHours(row),
     );
   }
 
@@ -668,7 +678,7 @@ function renderDailyHoursTable(rows, fromYmd, toYmd, annotations) {
       const total = dayTotals.get(ymd) || 0;
       let hoursLabel;
       let rowClass = ' class="day-zero"';
-      if (total > 0) {
+      if (hasNonZeroHours(total)) {
         hoursLabel = fmtHours(total);
         rowClass = '';
       } else if (holidays.has(ymd)) {
@@ -780,7 +790,7 @@ function exportCsv() {
     'Task Activity',
     'Changed Date',
     'Cost Type',
-    'Actual Hours',
+    'Logged Hours',
     'Assigned To',
   ];
 
@@ -795,7 +805,7 @@ function exportCsv() {
       x.task_activity,
       fmtDateTime(x.changed_at),
       fmtCostType(x.cost_type),
-      x.actual_hours,
+      rowLoggedHours(x),
       x.task_assigned_to,
     ];
     lines.push(row.map(csvEscape).join(','));
@@ -1678,9 +1688,8 @@ async function loadMetrics(rows) {
       return;
     }
 
-    const totalActual = rows.reduce((acc, row) => {
-      const n = Number(row.actual_hours || 0);
-      return acc + (Number.isFinite(n) ? n : 0);
+    const totalLogged = rows.reduce((acc, row) => {
+      return acc + rowLoggedHours(row);
     }, 0);
 
     let workingHours = m.weekdayHours;
@@ -1700,7 +1709,7 @@ async function loadMetrics(rows) {
     }
 
     const missing =
-      workingHours - teamOffHours - individualPtoHours - totalActual;
+      workingHours - teamOffHours - individualPtoHours - totalLogged;
 
     qs('m_required').textContent = fmtHours(workingHours);
     qs('m_pto').textContent = fmtHours(individualPtoHours);
