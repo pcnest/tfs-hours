@@ -1154,6 +1154,7 @@ function normalizePtoItems(rows) {
         userName: first.user_name || first.user_upn || '',
         userUpn: first.user_upn || '',
         filerRole: first.filer_role || '',
+        filerTeam: first.filer_team || '',
         status: first.status || '',
         dayPart: first.day_part || '',
         leaveType: first.leave_type || '',
@@ -1175,6 +1176,7 @@ function normalizePtoItems(rows) {
       userName: r.user_name || r.user_upn || '',
       userUpn: r.user_upn || '',
       filerRole: r.filer_role || '',
+      filerTeam: r.filer_team || '',
       status: r.status || '',
       dayPart: r.day_part || '',
       leaveType: r.leave_type || '',
@@ -1204,7 +1206,8 @@ function getPtoItemActions(item, { role, myEmail, isPrivileged, isLead, todayYmd
       item.filerRole === 'pm' &&
       item.status === 'pending' &&
       filerUpn !== myEmail;
-    canApproveDeny = devQaReady || leadReady || pmReady;
+    const tsReady = item.filerRole === 'ts' && item.status === 'pending';
+    canApproveDeny = devQaReady || leadReady || pmReady || tsReady;
   }
 
   const cancellable = !['cancelled', 'denied'].includes(item.status);

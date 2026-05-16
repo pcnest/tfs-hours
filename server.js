@@ -1882,11 +1882,13 @@ app.get('/api/pto', requireAuth, async (req, res) => {
   const actionRequired = req.query.actionRequired === 'true';
 
   const SELECT = `
-    SELECT id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, created_at,
-           status, filer_role, approved_by_lead, lead_actioned_at,
-           approved_by_pm, pm_actioned_at, denied_by, denied_at, denial_note, batch_id,
-           cancelled_by, cancelled_at, cancel_note
-    FROM public.pto_entries`;
+    SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.day_part, p.leave_type, p.notes, p.created_at,
+           p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+           p.approved_by_lead, p.lead_actioned_at,
+           p.approved_by_pm, p.pm_actioned_at, p.denied_by, p.denied_at, p.denial_note, p.batch_id,
+           p.cancelled_by, p.cancelled_at, p.cancel_note
+    FROM public.pto_entries p
+    LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)`;
 
   try {
     // Own-data roles: dev, qa — see only their own entries
@@ -1934,9 +1936,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
       let teamClause;
       if (req.userTeam) {
         params.push(req.userTeam);
-        teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND user_upn IN (
-          SELECT email FROM public.users WHERE team = $${params.length}
-        )`;
+        teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${params.length}`;
       } else {
         teamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
       }
@@ -1980,7 +1980,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
       params.push(req.userEmail);
       const pmEmail = params.length;
       where.push(
-        `((status = 'lead_approved') OR (status = 'pending' AND filer_role IN ('lead','pm','ts') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
+        `((status = 'lead_approved' AND filer_role IN ('dev','qa')) OR (status = 'pending' AND filer_role IN ('lead','pm','ts') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
       );
     }
     const r = await pool.query(
@@ -2066,7 +2066,7 @@ async function resolveRegisteredPtoUser(userName, userUpn) {
   const upn = normText(userUpn);
   if (upn) {
     const byEmail = await pool.query(
-      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name
+      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name, team
        FROM public.users
        WHERE email IS NOT NULL
          AND email <> ''
@@ -2079,7 +2079,7 @@ async function resolveRegisteredPtoUser(userName, userUpn) {
   const name = normText(userName);
   if (name) {
     const byName = await pool.query(
-      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name
+      `SELECT email, COALESCE(NULLIF(name, ''), email) AS name, team
        FROM public.users
        WHERE email IS NOT NULL
          AND email <> ''
@@ -2099,6 +2099,24 @@ async function resolveRegisteredPtoUser(userName, userUpn) {
   }
 
   return { error: 'Selected user is not a registered app user' };
+}
+
+async function resolvePtoFilerTeam(userUpn, fallbackTeam = null) {
+  const upn = normText(userUpn);
+  if (!upn) return normText(fallbackTeam);
+  try {
+    const r = await pool.query(
+      `SELECT team
+       FROM public.users
+       WHERE email IS NOT NULL
+         AND email <> ''
+         AND LOWER(email) = LOWER($1)`,
+      [upn],
+    );
+    return normText(r.rows[0]?.team) || normText(fallbackTeam);
+  } catch {
+    return normText(fallbackTeam);
+  }
 }
 
 async function resolveUserDisplayNameByEmail(email) {
@@ -2222,6 +2240,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const initialStatus =
     req.userRole === 'admin' || !PTO_APPROVAL_ENABLED ? 'approved' : 'pending';
   const filerRole = req.userRole;
+  let filerTeam = req.userTeam || null;
   const batchId = isRange ? crypto.randomUUID() : null;
 
   try {
@@ -2232,7 +2251,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       }
       user_upn = resolved.user.email;
       user_name = resolved.user.name;
+      filerTeam = resolved.user.team || null;
     }
+    filerTeam = await resolvePtoFilerTeam(user_upn, filerTeam);
 
     let savedRows;
 
@@ -2245,9 +2266,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
         for (const d of weekdays) {
           const r = await client.query(
             `INSERT INTO public.pto_entries
-               (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, batch_id)
-             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10)
-             RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, batch_id`,
+               (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id)
+             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id`,
             [
               user_upn,
               user_name,
@@ -2258,6 +2279,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               notes,
               initialStatus,
               filerRole,
+              filerTeam,
               batchId,
             ],
           );
@@ -2275,9 +2297,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       // Single-date: existing behaviour, batch_id = NULL
       const r = await pool.query(
         `INSERT INTO public.pto_entries
-           (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role)
-         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)
-         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role`,
+           (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team`,
         [
           user_upn,
           user_name,
@@ -2288,6 +2310,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
           notes,
           initialStatus,
           filerRole,
+          filerTeam,
         ],
       );
       savedRows = [r.rows[0]];
@@ -2349,7 +2372,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             // Approval notification with PDF → approvers + CC filer
             const approverEmails = await getApproverEmails(
               filerRole,
-              req.userTeam,
+              filerTeam,
               req.userEmail,
             );
             if (approverEmails.length) {
@@ -2460,15 +2483,23 @@ app.patch(
       return res.status(400).json({ ok: false, error: 'invalid batchId' });
     try {
       const batchRes = await pool.query(
-        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                day_part, status, filer_role, approved_by_lead, lead_actioned_at,
-                email_message_id, notes, created_at
-         FROM public.pto_entries WHERE batch_id = $1
-         ORDER BY entry_date ASC`,
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+                p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+                p.approved_by_lead, p.lead_actioned_at,
+                p.email_message_id, p.notes, p.created_at
+         FROM public.pto_entries p
+         LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+         WHERE p.batch_id = $1
+         ORDER BY p.entry_date ASC`,
         [batchId],
       );
       if (!batchRes.rows.length)
         return res.status(404).json({ ok: false, error: 'batch not found' });
+      const batchError = validatePtoBatchTransitionRows(batchRes.rows);
+      if (batchError)
+        return res
+          .status(batchError.status)
+          .json({ ok: false, error: batchError.error });
 
       const entry = batchRes.rows[0]; // use first row for access checks
       const accessError = checkApprovalAccess(
@@ -2480,18 +2511,6 @@ app.patch(
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
 
-      // For lead: verify filer is in the lead's team
-      if (req.userRole === 'lead' && req.userTeam) {
-        const teamCheck = await pool.query(
-          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
-          [entry.user_upn, req.userTeam],
-        );
-        if (!teamCheck.rows.length)
-          return res
-            .status(403)
-            .json({ ok: false, error: 'filer is not in your team' });
-      }
-
       let updatedRows;
       if (req.userRole === 'lead') {
         const r = await pool.query(
@@ -2499,7 +2518,7 @@ app.patch(
            SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
            WHERE batch_id = $2
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                     status, filer_role, email_message_id, batch_id`,
+                     status, filer_role, filer_team, email_message_id, batch_id`,
           [req.userEmail, batchId],
         );
         updatedRows = r.rows;
@@ -2509,7 +2528,7 @@ app.patch(
            SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
            WHERE batch_id = $2
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                     status, filer_role, email_message_id, batch_id`,
+                     status, filer_role, filer_team, email_message_id, batch_id`,
           [req.userEmail, batchId],
         );
         updatedRows = r.rows;
@@ -2666,14 +2685,22 @@ app.patch(
     const denialNote = normText(req.body?.note) || null;
     try {
       const batchRes = await pool.query(
-        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-                day_part, status, filer_role, email_message_id
-         FROM public.pto_entries WHERE batch_id = $1
-         ORDER BY entry_date ASC`,
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+                p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+                p.email_message_id
+         FROM public.pto_entries p
+         LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+         WHERE p.batch_id = $1
+         ORDER BY p.entry_date ASC`,
         [batchId],
       );
       if (!batchRes.rows.length)
         return res.status(404).json({ ok: false, error: 'batch not found' });
+      const batchError = validatePtoBatchTransitionRows(batchRes.rows);
+      if (batchError)
+        return res
+          .status(batchError.status)
+          .json({ ok: false, error: batchError.error });
 
       const entry = batchRes.rows[0];
       const accessError = checkApprovalAccess(
@@ -2681,27 +2708,17 @@ app.patch(
         req.userRole,
         req.userEmail,
         req.userTeam,
+        'deny',
       );
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
-
-      if (req.userRole === 'lead' && req.userTeam) {
-        const teamCheck = await pool.query(
-          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
-          [entry.user_upn, req.userTeam],
-        );
-        if (!teamCheck.rows.length)
-          return res
-            .status(403)
-            .json({ ok: false, error: 'filer is not in your team' });
-      }
 
       const r = await pool.query(
         `UPDATE public.pto_entries
          SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
          WHERE batch_id = $3
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                   status, filer_role, email_message_id, denied_by, denial_note, batch_id`,
+                   status, filer_role, filer_team, email_message_id, denied_by, denial_note, batch_id`,
         [req.userEmail, denialNote, batchId],
       );
       const updatedRows = r.rows;
@@ -2781,7 +2798,7 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
     const batchRes = await pool.query(
       `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
               p.day_part, p.status, p.filer_role, p.email_message_id, p.notes, p.created_at,
-              u.team AS filer_team
+              COALESCE(p.filer_team, u.team) AS filer_team
        FROM public.pto_entries p
        LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
        WHERE p.batch_id = $1
@@ -2918,34 +2935,81 @@ app.delete('/api/pto/batch/:batchId', requireAuth, async (req, res) => {
 
 // ---------- PTO Approval / Denial ----------
 
-/**
- * Checks whether the requesting user is allowed to act (approve/deny) on a PTO entry.
- * Returns null if allowed, or an error string if not.
- */
-function checkApprovalAccess(entry, actorRole, actorEmail, actorTeam) {
-  const { status, filer_role, user_upn } = entry;
+function hasSameKnownTeam(entry, actorTeam) {
+  const actorTeamKey = normIdentity(actorTeam);
+  if (!actorTeamKey) return true;
+  return normIdentity(entry?.filer_team) === actorTeamKey;
+}
+
+function isCurrentPtoReadyForLead(entry) {
+  return ['dev', 'qa'].includes(entry?.filer_role) && entry?.status === 'pending';
+}
+
+function isCurrentPtoReadyForPm(entry, actorEmail) {
+  const { status, filer_role, user_upn } = entry || {};
+  const filerEmailKey = normIdentity(user_upn);
+  const actorEmailKey = normIdentity(actorEmail);
+  const devQaReady =
+    ['dev', 'qa'].includes(filer_role) && status === 'lead_approved';
+  const leadReady = filer_role === 'lead' && status === 'pending';
+  const pmReady =
+    filer_role === 'pm' && status === 'pending' && filerEmailKey !== actorEmailKey;
+  const tsReady = filer_role === 'ts' && status === 'pending';
+  return devQaReady || leadReady || pmReady || tsReady;
+}
+
+function canApprovePto(entry, actorRole, actorEmail, actorTeam) {
+  const { status, filer_role } = entry || {};
   if (actorRole === 'lead') {
     if (!['dev', 'qa'].includes(filer_role))
       return 'leads can only action dev/qa PTO';
-    if (status !== 'pending') return 'entry is not pending lead approval';
-    // Team check: if actor has a team, filer must be in the same team
-    // (validated via the DB query below — skip here; we check team membership in the route)
+    if (!isCurrentPtoReadyForLead(entry))
+      return 'entry is not pending lead approval';
+    if (!hasSameKnownTeam(entry, actorTeam)) return 'filer is not in your team';
     return null;
   }
   if (actorRole === 'pm') {
-    const devQaReady =
-      ['dev', 'qa'].includes(filer_role) && status === 'lead_approved';
-    const leadReady = filer_role === 'lead' && status === 'pending';
-    const pmReady =
-      filer_role === 'pm' &&
-      status === 'pending' &&
-      user_upn.toLowerCase() !== actorEmail.toLowerCase();
-    const tsReady = filer_role === 'ts' && status === 'pending';
-    if (!devQaReady && !leadReady && !pmReady && !tsReady)
+    if (!isCurrentPtoReadyForPm(entry, actorEmail))
       return 'entry is not in an approvable state for this PM';
     return null;
   }
   return 'only lead or pm can approve/deny PTO';
+}
+
+function canDenyPto(entry, actorRole, actorEmail, actorTeam) {
+  return canApprovePto(entry, actorRole, actorEmail, actorTeam);
+}
+
+function checkApprovalAccess(
+  entry,
+  actorRole,
+  actorEmail,
+  actorTeam,
+  action = 'approve',
+) {
+  if (action === 'deny')
+    return canDenyPto(entry, actorRole, actorEmail, actorTeam);
+  return canApprovePto(entry, actorRole, actorEmail, actorTeam);
+}
+
+function validatePtoBatchTransitionRows(rows) {
+  if (!Array.isArray(rows) || !rows.length)
+    return { status: 404, error: 'batch not found' };
+  const first = rows[0];
+  const firstFiler = normIdentity(first.user_upn);
+  const firstRole = String(first.filer_role || '');
+  const firstStatus = String(first.status || '');
+  const firstTeam = normIdentity(first.filer_team);
+  const isMixed = rows.some(
+    (row) =>
+      normIdentity(row.user_upn) !== firstFiler ||
+      String(row.filer_role || '') !== firstRole ||
+      String(row.status || '') !== firstStatus ||
+      normIdentity(row.filer_team) !== firstTeam,
+  );
+  if (isMixed)
+    return { status: 400, error: 'batch contains mixed PTO approval states' };
+  return null;
 }
 
 function currentPtoCancelYmd() {
@@ -3024,10 +3088,13 @@ app.patch(
       return res.status(400).json({ ok: false, error: 'invalid id' });
     try {
       const entryRes = await pool.query(
-        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              day_part, status, filer_role, approved_by_lead, lead_actioned_at,
-              email_message_id, batch_id, notes, created_at
-       FROM public.pto_entries WHERE id = $1`,
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+              p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+              p.approved_by_lead, p.lead_actioned_at,
+              p.email_message_id, p.batch_id, p.notes, p.created_at
+       FROM public.pto_entries p
+       LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+       WHERE p.id = $1`,
         [id],
       );
       if (!entryRes.rows.length)
@@ -3043,18 +3110,6 @@ app.patch(
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
 
-      // For lead: verify filer is in the lead's team (if team is set)
-      if (req.userRole === 'lead' && req.userTeam) {
-        const teamCheck = await pool.query(
-          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
-          [entry.user_upn, req.userTeam],
-        );
-        if (!teamCheck.rows.length)
-          return res
-            .status(403)
-            .json({ ok: false, error: 'filer is not in your team' });
-      }
-
       let updatedRow;
       if (req.userRole === 'lead') {
         const r = await pool.query(
@@ -3062,7 +3117,7 @@ app.patch(
          SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
          WHERE id = $2
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                   status, filer_role, email_message_id`,
+                   status, filer_role, filer_team, email_message_id`,
           [req.userEmail, id],
         );
         updatedRow = r.rows[0];
@@ -3073,7 +3128,7 @@ app.patch(
          SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
          WHERE id = $2
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                   status, filer_role, email_message_id`,
+                   status, filer_role, filer_team, email_message_id`,
           [req.userEmail, id],
         );
         updatedRow = r.rows[0];
@@ -3220,9 +3275,12 @@ app.patch(
     const denialNote = normText(req.body?.note) || null;
     try {
       const entryRes = await pool.query(
-        `SELECT id, user_upn, user_name, entry_date::text, hours, leave_type,
-              day_part, status, filer_role, filer_team, email_message_id
-       FROM public.pto_entries WHERE id = $1`,
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+              p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+              p.email_message_id
+       FROM public.pto_entries p
+       LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+       WHERE p.id = $1`,
         [id],
       );
       if (!entryRes.rows.length)
@@ -3234,28 +3292,17 @@ app.patch(
         req.userRole,
         req.userEmail,
         req.userTeam,
+        'deny',
       );
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
-
-      // For lead: verify filer is in the lead's team (if team is set)
-      if (req.userRole === 'lead' && req.userTeam) {
-        const teamCheck = await pool.query(
-          `SELECT email FROM public.users WHERE LOWER(email) = LOWER($1) AND team = $2`,
-          [entry.user_upn, req.userTeam],
-        );
-        if (!teamCheck.rows.length)
-          return res
-            .status(403)
-            .json({ ok: false, error: 'filer is not in your team' });
-      }
 
       const r = await pool.query(
         `UPDATE public.pto_entries
        SET status = 'denied', denied_by = $1, denied_at = NOW(), denial_note = $2
        WHERE id = $3
        RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                 status, filer_role, email_message_id, denied_by, denial_note`,
+                 status, filer_role, filer_team, email_message_id, denied_by, denial_note`,
         [req.userEmail, denialNote, id],
       );
       const updatedRow = r.rows[0];
@@ -3331,7 +3378,8 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
   try {
     const entryRes = await pool.query(
       `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
-              p.day_part, p.status, p.filer_role, p.email_message_id, u.team AS filer_team
+              p.day_part, p.status, p.filer_role, p.email_message_id,
+              COALESCE(p.filer_team, u.team) AS filer_team
        FROM public.pto_entries p
        LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
        WHERE p.id = $1`,
@@ -4009,7 +4057,7 @@ app.post(
 );
 
 // ---------- PTO overdue reminder / escalation ----------
-function getPendingPtoStageLabel(filerRole) {
+function getPendingPtoStageLabel(filerRole, status = 'pending', filerTeam = null) {
   if (filerRole === 'dev' || filerRole === 'qa')
     return 'Awaiting lead approval';
   if (filerRole === 'lead') return 'Awaiting PM approval';
@@ -4043,7 +4091,7 @@ async function fetchPendingPtoReminderCandidates() {
             p.filer_role,
             p.email_message_id,
             p.created_at,
-            u.team AS filer_team
+            COALESCE(p.filer_team, u.team) AS filer_team
      FROM public.pto_entries p
      LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
      WHERE p.status = 'pending'
@@ -4068,6 +4116,7 @@ async function fetchPendingPtoReminderCandidates() {
         dayPart: row.day_part || null,
         leaveType: row.leave_type || '',
         notes: row.notes || '',
+        status: row.status || '',
         filerRole: row.filer_role || '',
         filerTeam: row.filer_team || null,
         emailMessageId: row.email_message_id || '',
@@ -4174,7 +4223,11 @@ function buildOverduePtoEmail(request, notificationType, overdueBusinessDays) {
     request.dayCount === 1
       ? `${fmtH(request.totalHours)} hrs`
       : `${request.dayCount} days, ${fmtH(request.totalHours)} hrs`;
-  const pendingStage = getPendingPtoStageLabel(request.filerRole);
+  const pendingStage = getPendingPtoStageLabel(
+    request.filerRole,
+    request.status,
+    request.filerTeam,
+  );
   const isEscalation = notificationType === 'escalation';
   const subjectBase = `LEAVE REQUEST – ${displayName} – ${request.leaveType} Leave on ${dateLabel}`;
   const subject = `Re: ${subjectBase}`;
