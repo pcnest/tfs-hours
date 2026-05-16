@@ -1710,6 +1710,45 @@ function fmtReportCalendarDateFromTimestamp(value) {
   }).format(shifted);
 }
 
+function fmtReportYmdFromTimestamp(value) {
+  const d = value instanceof Date ? value : new Date(value || '');
+  if (isNaN(d)) return '';
+  const timeZone = getReportTimeZone();
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(d);
+    const map = {};
+    for (const p of parts) {
+      if (p.type !== 'literal') map[p.type] = p.value;
+    }
+    return `${map.year}-${map.month}-${map.day}`;
+  }
+  const shifted = new Date(d.getTime() + getReportOffsetMinutes() * 60000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+function sanitizeFilenamePart(value, fallback) {
+  const cleaned = String(value || '')
+    .replace(/[\\/:*?"<>|\x00-\x1F]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '');
+  return cleaned || fallback;
+}
+
+function buildPtoPdfFilename(userName, submittedAt) {
+  const safeName = sanitizeFilenamePart(userName, 'Employee');
+  const requestedDate = sanitizeFilenamePart(
+    fmtReportYmdFromTimestamp(submittedAt),
+    'Unknown Date',
+  );
+  return `Leave Form - ${safeName} - ${requestedDate}.pdf`;
+}
+
 // ---------- Public Holidays ----------
 app.get('/api/holidays', requireAuth, async (req, res) => {
   const fromStr = validateDateStr(req.query.from);
@@ -2419,6 +2458,9 @@ async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
 
   let attachments = [];
   try {
+    const submittedAt = entry.created_at
+      ? new Date(entry.created_at).toUTCString()
+      : new Date().toUTCString();
     const pdfBuf = await generatePtoPdf({
       userName: displayName,
       entryDate: rows[0].entry_date,
@@ -2428,18 +2470,11 @@ async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
       dayPart: entry.day_part,
       leaveType: entry.leave_type,
       notes: entry.notes || '',
-      submittedAt: entry.created_at
-        ? new Date(entry.created_at).toUTCString()
-        : new Date().toUTCString(),
+      submittedAt,
     });
-    const dateFrom = rows[0].entry_date;
-    const dateTo = rows[rows.length - 1].entry_date;
     attachments = [
       {
-        filename:
-          totalDays > 1
-            ? `pto_approved_${dateFrom}_to_${dateTo}.pdf`
-            : `pto_approved_${dateFrom}.pdf`,
+        filename: buildPtoPdfFilename(displayName, submittedAt),
         content: pdfBuf,
         contentType: 'application/pdf',
       },
@@ -2912,11 +2947,8 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             notes: notes || '',
             submittedAt,
           });
-          const pdfFilename = isRange
-            ? `pto_receipt_${dateFrom}_to_${dateTo}.pdf`
-            : `pto_receipt_${dateFrom}.pdf`;
           const pdfAttachment = {
-            filename: pdfFilename,
+            filename: buildPtoPdfFilename(user_name || user_upn, submittedAt),
             content: pdfBuf,
             contentType: 'application/pdf',
           };
@@ -3214,6 +3246,9 @@ app.patch(
                 let pmBatchAttachments = [];
                 try {
                   const totalDays = batchRes.rows.length;
+                  const submittedAt = entry.created_at
+                    ? new Date(entry.created_at).toUTCString()
+                    : new Date().toUTCString();
                   const pdfBuf = await generatePtoPdf({
                     userName: entry.user_name || entry.user_upn,
                     entryDate: batchRes.rows[0].entry_date,
@@ -3226,19 +3261,14 @@ app.patch(
                     dayPart: entry.day_part,
                     leaveType: entry.leave_type,
                     notes: entry.notes || '',
-                    submittedAt: entry.created_at
-                      ? new Date(entry.created_at).toUTCString()
-                      : new Date().toUTCString(),
+                    submittedAt,
                   });
-                  const dateFrom = batchRes.rows[0].entry_date;
-                  const dateTo =
-                    batchRes.rows[batchRes.rows.length - 1].entry_date;
                   pmBatchAttachments = [
                     {
-                      filename:
-                        totalDays > 1
-                          ? `pto_approved_${dateFrom}_to_${dateTo}.pdf`
-                          : `pto_approved_${dateFrom}.pdf`,
+                      filename: buildPtoPdfFilename(
+                        entry.user_name || entry.user_upn,
+                        submittedAt,
+                      ),
                       content: pdfBuf,
                       contentType: 'application/pdf',
                     },
@@ -4191,6 +4221,9 @@ app.patch(
                 // Regenerate PDF for attachment
                 let pmApprovalAttachments = [];
                 try {
+                  const submittedAt = entry.created_at
+                    ? new Date(entry.created_at).toUTCString()
+                    : new Date().toUTCString();
                   const pdfBuf = await generatePtoPdf({
                     userName: entry.user_name || entry.user_upn,
                     entryDate: entry.entry_date,
@@ -4200,13 +4233,14 @@ app.patch(
                     dayPart: entry.day_part,
                     leaveType: entry.leave_type,
                     notes: entry.notes || '',
-                    submittedAt: entry.created_at
-                      ? new Date(entry.created_at).toUTCString()
-                      : new Date().toUTCString(),
+                    submittedAt,
                   });
                   pmApprovalAttachments = [
                     {
-                      filename: `pto_approved_${entry.entry_date}.pdf`,
+                      filename: buildPtoPdfFilename(
+                        entry.user_name || entry.user_upn,
+                        submittedAt,
+                      ),
                       content: pdfBuf,
                       contentType: 'application/pdf',
                     },
