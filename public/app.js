@@ -1132,6 +1132,16 @@ function updatePtoListControlVisibility() {
 
   const ptoUserWrap = qs('pto_user_wrap');
   if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
+  const ptoUserInput = qs('pto_user');
+  if (ptoUserInput) {
+    ptoUserInput.required = isPrivileged;
+    ptoUserInput.disabled = !isPrivileged;
+    if (!isPrivileged) {
+      ptoUserInput.value =
+        window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
+      ptoUserInput.setCustomValidity('');
+    }
+  }
 
   const ptoListUserWrap = qs('pto_list_user_wrap');
   if (ptoListUserWrap) ptoListUserWrap.hidden = !isPrivileged;
