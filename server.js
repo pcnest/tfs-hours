@@ -30,6 +30,16 @@ const EXTRA_CC_EMAILS = (process.env.EXTRA_CC_EMAILS || '')
   .split(',')
   .map((e) => e.trim())
   .filter((e) => e.includes('@'));
+const SPECIAL_PTO_WORKFLOW_TEAM = (
+  process.env.SPECIAL_PTO_WORKFLOW_TEAM || ''
+).trim();
+const SPECIAL_PTO_WORKFLOW_TEAM_KEY = SPECIAL_PTO_WORKFLOW_TEAM.toLowerCase();
+const SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS = (
+  process.env.SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS || ''
+)
+  .split(',')
+  .map((e) => e.trim())
+  .filter((e) => e.includes('@'));
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
 const PTO_APPROVAL_ENABLED =
   String(process.env.PTO_APPROVAL_ENABLED).trim().toLowerCase() !== 'false';
@@ -161,6 +171,7 @@ app.get('/api/config', (req, res) => {
     reportTzIana: REPORT_TZ_IANA || null,
     notifyManagerEmail: NOTIFY_MANAGER_EMAIL || null,
     smtpConfigured: !!(BREVO_API_KEY && NOTIFY_FROM_EMAIL),
+    specialPtoWorkflowTeam: SPECIAL_PTO_WORKFLOW_TEAM || null,
   });
 });
 
@@ -453,6 +464,13 @@ function normIdentity(v) {
     .toLowerCase();
 }
 
+function isSpecialPtoTeamName(team) {
+  return (
+    !!SPECIAL_PTO_WORKFLOW_TEAM_KEY &&
+    normIdentity(team) === SPECIAL_PTO_WORKFLOW_TEAM_KEY
+  );
+}
+
 function getReportingSelf(req) {
   const email = normText(req.userEmail);
   const name = normText(req.userName) || email;
@@ -502,20 +520,48 @@ function buildOwnReportingAssigneeClause(params, upnExpr, nameExpr, self) {
  */
 async function getApproverEmails(filerRole, filerTeam, filerEmail) {
   let q, params;
+  const specialTeam = isSpecialPtoTeamName(filerTeam);
   if (filerRole === 'dev' || filerRole === 'qa') {
     if (filerTeam) {
-      q = `SELECT email FROM public.users WHERE role = 'lead' AND team = $1`;
+      q = specialTeam
+        ? `SELECT email FROM public.users WHERE role = 'lead' AND LOWER(COALESCE(team, '')) = LOWER($1)`
+        : `SELECT email FROM public.users WHERE role = 'lead' AND team = $1`;
       params = [filerTeam];
     } else {
       q = `SELECT email FROM public.users WHERE role = 'lead'`;
       params = [];
     }
   } else if (filerRole === 'lead') {
-    q = `SELECT email FROM public.users WHERE role = 'pm'`;
-    params = [];
+    if (specialTeam) {
+      q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(COALESCE(team, '')) = LOWER($1)`;
+      params = [filerTeam];
+    } else {
+      q = `SELECT email FROM public.users WHERE role = 'pm'`;
+      params = [];
+    }
   } else if (filerRole === 'pm') {
-    q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(email) != LOWER($1)`;
-    params = [filerEmail];
+    if (specialTeam) {
+      if (filerEmail) {
+        q = `SELECT email FROM public.users
+             WHERE role = 'pm'
+               AND LOWER(COALESCE(team, '')) = LOWER($1)
+               AND LOWER(email) != LOWER($2)`;
+        params = [filerTeam, filerEmail];
+      } else {
+        q = `SELECT email FROM public.users
+             WHERE role = 'pm'
+               AND LOWER(COALESCE(team, '')) = LOWER($1)`;
+        params = [filerTeam];
+      }
+    } else {
+      if (filerEmail) {
+        q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(email) != LOWER($1)`;
+        params = [filerEmail];
+      } else {
+        q = `SELECT email FROM public.users WHERE role = 'pm'`;
+        params = [];
+      }
+    }
   } else if (filerRole === 'ts') {
     q = `SELECT email FROM public.users WHERE role = 'pm'`;
     params = [];
@@ -1886,7 +1932,9 @@ app.get('/api/pto', requireAuth, async (req, res) => {
            p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
            p.approved_by_lead, p.lead_actioned_at,
            p.approved_by_pm, p.pm_actioned_at, p.denied_by, p.denied_at, p.denial_note, p.batch_id,
-           p.cancelled_by, p.cancelled_at, p.cancel_note
+           p.cancelled_by, p.cancelled_at, p.cancel_note,
+           p.external_requested_at, p.external_requested_by, p.external_request_recipients,
+           p.external_received_at, p.external_received_by, p.external_received_note
     FROM public.pto_entries p
     LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)`;
 
@@ -1930,15 +1978,23 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         ? 'AND ' + dateWhere.join(' AND ')
         : '';
 
-      params.push(req.userEmail);
-      const ownIdx = params.length;
-
       let teamClause;
       if (req.userTeam) {
         params.push(req.userTeam);
-        teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${params.length}`;
+        const teamIdx = params.length;
+        const pendingTeamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
+        if (isSpecialPtoTeamName(req.userTeam)) {
+          teamClause = `((${pendingTeamClause}) OR (filer_role = 'qa' AND status IN ('pending','external_pending') AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})))`;
+        } else {
+          teamClause = pendingTeamClause;
+        }
       } else {
-        teamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
+        if (SPECIAL_PTO_WORKFLOW_TEAM_KEY) {
+          params.push(SPECIAL_PTO_WORKFLOW_TEAM);
+          teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND NOT (filer_role = 'qa' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${params.length}))`;
+        } else {
+          teamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
+        }
       }
 
       if (actionRequired) {
@@ -1949,6 +2005,9 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         );
         return res.json({ ok: true, rows: r.rows });
       }
+
+      params.push(req.userEmail);
+      const ownIdx = params.length;
 
       const r = await pool.query(
         `${SELECT} WHERE (LOWER(COALESCE(user_upn,'')) = LOWER($${ownIdx}) ${dateClause})
@@ -1976,18 +2035,29 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         `(COALESCE(user_upn,'') ILIKE $${params.length} OR COALESCE(user_name,'') ILIKE $${params.length})`,
       );
     }
-    if (actionRequired && req.userRole === 'pm') {
-      params.push(req.userEmail);
-      const pmEmail = params.length;
-      where.push(
-        `((status = 'lead_approved' AND filer_role IN ('dev','qa')) OR (status = 'pending' AND filer_role IN ('lead','pm','ts') AND LOWER(COALESCE(user_upn,'')) != LOWER($${pmEmail})))`,
-      );
-    }
     const r = await pool.query(
       `${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY entry_date ASC, user_name ASC`,
       params,
     );
-    res.json({ ok: true, rows: r.rows });
+    let rows = r.rows;
+    if (actionRequired && req.userRole === 'pm') {
+      const actor = {
+        role: req.userRole,
+        email: req.userEmail,
+        team: req.userTeam,
+      };
+      rows = rows.filter((row) => {
+        const internalError = checkApprovalAccess(
+          row,
+          req.userRole,
+          req.userEmail,
+          req.userTeam,
+        );
+        const externalTransition = getExternalReceivedTransition(row, actor);
+        return !internalError || !externalTransition.error;
+      });
+    }
+    res.json({ ok: true, rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -2150,6 +2220,156 @@ async function buildLeadApprovalEmailDetails(approvedByLead, leadActionedAt) {
     html: `<p>${summaryHtml}</p>`,
     text: `\n${summaryText}`,
   };
+}
+
+function ptoRowsDateRange(rows) {
+  const list = Array.isArray(rows) && rows.length ? rows : [];
+  const first = list[0];
+  const last = list[list.length - 1] || first;
+  return fmtSubjectDateRange(first?.entry_date, last?.entry_date);
+}
+
+function ptoRowsTotalHours(rows) {
+  return (rows || []).reduce((sum, row) => sum + Number(row.hours || 0), 0);
+}
+
+function ptoThreadTopic(entry, dateLabel) {
+  return `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateLabel}`;
+}
+
+function ptoReplyHeaders(entry, dateLabel) {
+  return buildPtoThreadHeaders(
+    entry.email_message_id,
+    ptoThreadTopic(entry, dateLabel),
+  );
+}
+
+async function sendSpecialExternalApprovalRequestEmail(entry, rows, actorLabel) {
+  const toList = dedupeEmails(SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS);
+  if (!toList.length) return;
+
+  const transporter = createMailTransporter();
+  const dateLabel = ptoRowsDateRange(rows);
+  const displayName = entry.user_name || entry.user_upn;
+  const totalHours = ptoRowsTotalHours(rows);
+  const headers = ptoReplyHeaders(entry, dateLabel);
+
+  await transporter.sendMail({
+    from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    to: toList.join(', '),
+    subject: `External PTO Approval Request \u2013 ${displayName} \u2013 ${entry.leave_type} Leave on ${dateLabel}`,
+    html: `<p>Hi @Team,</p>
+<p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
+<p style="font-family:sans-serif;font-size:13px;line-height:1.8">
+  <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
+  <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
+  ${buildPtoDayPartHtml(entry.day_part)}
+  <strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}<br>
+  <strong>Internal Reviewer:</strong> ${escapeEmailHtml(actorLabel || '')}<br>
+  <strong>Reason for Leave:</strong> ${escapeEmailHtml(entry.notes || '\u2014')}
+</p>
+<p>Please reply through the established external approval process. No approval links are included in this email.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+    text: `Hi @Team,\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nPlease reply through the established external approval process. No approval links are included in this email.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    headers,
+  });
+}
+
+async function sendSpecialExternalReceivedLeadApprovedEmail(
+  entry,
+  rows,
+  actorLabel,
+) {
+  const pmEmails = await getApproverEmails('lead', entry.filer_team, null);
+  const toList = dedupeEmails(pmEmails);
+  if (!toList.length) return;
+
+  const transporter = createMailTransporter();
+  const dateLabel = ptoRowsDateRange(rows);
+  const displayName = entry.user_name || entry.user_upn;
+  const totalHours = ptoRowsTotalHours(rows);
+  const headers = ptoReplyHeaders(entry, dateLabel);
+
+  await transporter.sendMail({
+    from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    to: toList.join(', '),
+    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    html: `<p>Hi @Team,</p>
+<p>External approval for <strong>${escapeEmailHtml(displayName)}</strong>'s PTO request on <strong>${escapeEmailHtml(dateLabel)}</strong> has been marked received by <strong>${escapeEmailHtml(actorLabel || '')}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
+<p>This request is ready for same-team PM final approval.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+    text: `External approval for ${displayName}'s PTO request on ${dateLabel} has been marked received by ${actorLabel || ''}.\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nThis request is ready for same-team PM final approval.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    headers,
+  });
+}
+
+async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
+  const transporter = createMailTransporter();
+  const dateLabel = ptoRowsDateRange(rows);
+  const displayName = entry.user_name || entry.user_upn;
+  const totalHours = ptoRowsTotalHours(rows);
+  const headers = ptoReplyHeaders(entry, dateLabel);
+  const totalDays = rows.length;
+
+  let leadEmails = [];
+  const leadApprovalDetails = await buildLeadApprovalEmailDetails(
+    entry.approved_by_lead,
+    entry.lead_actioned_at,
+  );
+  if (['dev', 'qa'].includes(entry.filer_role) || entry.filer_role === 'lead') {
+    leadEmails = await getApproverEmails('dev', entry.filer_team, null);
+  }
+
+  const toList = dedupeEmails([entry.user_upn, ...leadEmails]);
+  if (!toList.length) return;
+
+  let attachments = [];
+  try {
+    const pdfBuf = await generatePtoPdf({
+      userName: displayName,
+      entryDate: rows[0].entry_date,
+      entryDateTo: totalDays > 1 ? rows[rows.length - 1].entry_date : null,
+      totalDays,
+      hours: entry.hours,
+      dayPart: entry.day_part,
+      leaveType: entry.leave_type,
+      notes: entry.notes || '',
+      submittedAt: entry.created_at
+        ? new Date(entry.created_at).toUTCString()
+        : new Date().toUTCString(),
+    });
+    const dateFrom = rows[0].entry_date;
+    const dateTo = rows[rows.length - 1].entry_date;
+    attachments = [
+      {
+        filename:
+          totalDays > 1
+            ? `pto_approved_${dateFrom}_to_${dateTo}.pdf`
+            : `pto_approved_${dateFrom}.pdf`,
+        content: pdfBuf,
+        contentType: 'application/pdf',
+      },
+    ];
+  } catch (pdfErr) {
+    console.error('PTO final approval PDF error:', pdfErr);
+  }
+
+  const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
+  await transporter.sendMail({
+    from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    to: toList.join(', '),
+    ...(ccList.length ? { cc: ccList.join(', ') } : {}),
+    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>fully approved by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
+${leadApprovalDetails.html}
+<p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
+<p>The approved request has been added to the team calendar.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report.</p>`,
+    text: `PTO for ${displayName} (${dateLabel}) fully approved by ${actorLabel || ''}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
+    headers,
+    attachments,
+  });
 }
 
 app.post('/api/pto', requireAuth, async (req, res) => {
@@ -2511,25 +2731,49 @@ app.patch(
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
 
+      const transition = getInternalApprovalTransition(entry, {
+        role: req.userRole,
+        email: req.userEmail,
+        team: req.userTeam,
+      });
+      const externalRecipients = SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
       let updatedRows;
-      if (req.userRole === 'lead') {
+      if (transition.approvalStage === 'lead') {
         const r = await pool.query(
-          `UPDATE public.pto_entries
-           SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
-           WHERE batch_id = $2
+          transition.notification === 'external_request'
+            ? `UPDATE public.pto_entries
+           SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW(),
+               external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+           WHERE batch_id = $4
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                     status, filer_role, filer_team, email_message_id, batch_id`
+            : `UPDATE public.pto_entries
+           SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW()
+           WHERE batch_id = $3
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
-          [req.userEmail, batchId],
+          transition.notification === 'external_request'
+            ? [transition.nextStatus, req.userEmail, externalRecipients, batchId]
+            : [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
       } else {
         const r = await pool.query(
-          `UPDATE public.pto_entries
-           SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
-           WHERE batch_id = $2
+          transition.notification === 'external_request'
+            ? `UPDATE public.pto_entries
+           SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
+               external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+           WHERE batch_id = $4
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                     status, filer_role, filer_team, email_message_id, batch_id`
+            : `UPDATE public.pto_entries
+           SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW()
+           WHERE batch_id = $3
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
-          [req.userEmail, batchId],
+          transition.notification === 'external_request'
+            ? [transition.nextStatus, req.userEmail, externalRecipients, batchId]
+            : [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
       }
@@ -2565,7 +2809,13 @@ app.patch(
             );
             const dateRange = _batchDateRange;
 
-            if (req.userRole === 'lead') {
+            if (transition.notification === 'external_request') {
+              await sendSpecialExternalApprovalRequestEmail(
+                entry,
+                batchRes.rows,
+                req.userName || req.userEmail,
+              );
+            } else if (transition.notification === 'lead_approved') {
               const pmEmails = await getApproverEmails('lead', null, null);
               const toList = [...new Set([...pmEmails, entry.user_upn])].filter(
                 Boolean,
@@ -2784,6 +3034,92 @@ ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` 
   },
 );
 
+app.patch(
+  '/api/pto/batch/:batchId/external-approve',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
+    const { batchId } = req.params;
+    if (!batchId)
+      return res.status(400).json({ ok: false, error: 'invalid batchId' });
+    const note = normText(req.body?.note) || null;
+
+    try {
+      const batchRes = await pool.query(
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+                p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+                p.approved_by_lead, p.lead_actioned_at, p.approved_by_pm, p.pm_actioned_at,
+                p.email_message_id, p.notes, p.created_at
+         FROM public.pto_entries p
+         LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+         WHERE p.batch_id = $1
+         ORDER BY p.entry_date ASC`,
+        [batchId],
+      );
+      if (!batchRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'batch not found' });
+      const batchError = validatePtoBatchTransitionRows(batchRes.rows);
+      if (batchError)
+        return res
+          .status(batchError.status)
+          .json({ ok: false, error: batchError.error });
+
+      const entry = batchRes.rows[0];
+      const transition = getExternalReceivedTransition(entry, {
+        role: req.userRole,
+        email: req.userEmail,
+        team: req.userTeam,
+      });
+      if (transition.error)
+        return res.status(403).json({ ok: false, error: transition.error });
+
+      const r = await pool.query(
+        `UPDATE public.pto_entries
+         SET status = $1,
+             external_received_at = NOW(),
+             external_received_by = $2,
+             external_received_note = $3
+         WHERE batch_id = $4
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id, batch_id,
+                   external_received_at, external_received_by, external_received_note`,
+        [transition.nextStatus, req.userEmail, note, batchId],
+      );
+      const updatedRows = r.rows;
+
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            if (transition.notification === 'lead_approved') {
+              await sendSpecialExternalReceivedLeadApprovedEmail(
+                entry,
+                batchRes.rows,
+                req.userName || req.userEmail,
+              );
+            } else if (transition.notification === 'final_approved') {
+              await sendPtoFinalApprovalEmail(
+                entry,
+                batchRes.rows,
+                req.userName || req.userEmail,
+              );
+            }
+          } catch (emailErr) {
+            console.error('PTO batch external approval email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, rows: updatedRows });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
 app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
   const { batchId } = req.params;
   if (!batchId)
@@ -2935,10 +3271,25 @@ app.delete('/api/pto/batch/:batchId', requireAuth, async (req, res) => {
 
 // ---------- PTO Approval / Denial ----------
 
+const SPECIAL_PTO_WORKFLOW_ROLES = new Set(['qa', 'lead', 'pm']);
+
 function hasSameKnownTeam(entry, actorTeam) {
   const actorTeamKey = normIdentity(actorTeam);
   if (!actorTeamKey) return true;
   return normIdentity(entry?.filer_team) === actorTeamKey;
+}
+
+function hasStrictSameTeam(entry, actorTeam) {
+  const actorTeamKey = normIdentity(actorTeam);
+  return !!actorTeamKey && normIdentity(entry?.filer_team) === actorTeamKey;
+}
+
+function isSpecialPtoWorkflow(entry) {
+  const filerRole = normIdentity(entry?.filer_role);
+  return (
+    SPECIAL_PTO_WORKFLOW_ROLES.has(filerRole) &&
+    isSpecialPtoTeamName(entry?.filer_team)
+  );
 }
 
 function isCurrentPtoReadyForLead(entry) {
@@ -2958,26 +3309,192 @@ function isCurrentPtoReadyForPm(entry, actorEmail) {
   return devQaReady || leadReady || pmReady || tsReady;
 }
 
-function canApprovePto(entry, actorRole, actorEmail, actorTeam) {
+function getDefaultInternalApprovalTransition(entry, actor) {
+  const actorRole = actor?.role;
+  const actorEmail = actor?.email;
+  const actorTeam = actor?.team;
   const { status, filer_role } = entry || {};
   if (actorRole === 'lead') {
     if (!['dev', 'qa'].includes(filer_role))
-      return 'leads can only action dev/qa PTO';
+      return { error: 'leads can only action dev/qa PTO' };
     if (!isCurrentPtoReadyForLead(entry))
-      return 'entry is not pending lead approval';
-    if (!hasSameKnownTeam(entry, actorTeam)) return 'filer is not in your team';
-    return null;
+      return { error: 'entry is not pending lead approval' };
+    if (!hasSameKnownTeam(entry, actorTeam))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'lead_approved',
+      approvalStage: 'lead',
+      notification: 'lead_approved',
+    };
   }
   if (actorRole === 'pm') {
     if (!isCurrentPtoReadyForPm(entry, actorEmail))
-      return 'entry is not in an approvable state for this PM';
-    return null;
+      return { error: 'entry is not in an approvable state for this PM' };
+    return {
+      nextStatus: 'approved',
+      approvalStage: 'pm',
+      notification: 'final_approved',
+    };
   }
-  return 'only lead or pm can approve/deny PTO';
+  return { error: 'only lead or pm can approve/deny PTO' };
+}
+
+function getSpecialInternalApprovalTransition(entry, actor) {
+  const { status, filer_role, user_upn } = entry || {};
+  const actorRole = actor?.role;
+  const actorEmailKey = normIdentity(actor?.email);
+  const filerEmailKey = normIdentity(user_upn);
+
+  if (filer_role === 'qa') {
+    if (status === 'pending') {
+      if (actorRole !== 'lead')
+        return { error: 'special-team QA PTO requires same-team lead approval' };
+      if (!hasStrictSameTeam(entry, actor?.team))
+        return { error: 'filer is not in your team' };
+      return {
+        nextStatus: 'external_pending',
+        approvalStage: 'lead',
+        notification: 'external_request',
+      };
+    }
+    if (status === 'lead_approved') {
+      if (actorRole !== 'pm')
+        return { error: 'special-team QA PTO requires same-team PM final approval' };
+      if (!hasStrictSameTeam(entry, actor?.team))
+        return { error: 'filer is not in your team' };
+      return {
+        nextStatus: 'approved',
+        approvalStage: 'pm',
+        notification: 'final_approved',
+      };
+    }
+    return {
+      error:
+        status === 'external_pending'
+          ? 'entry is awaiting external approval confirmation'
+          : 'entry is not in an approvable state',
+    };
+  }
+
+  if (filer_role === 'lead') {
+    if (status !== 'pending')
+      return {
+        error:
+          status === 'external_pending'
+            ? 'entry is awaiting external approval confirmation'
+            : 'entry is not pending PM approval',
+      };
+    if (actorRole !== 'pm')
+      return { error: 'special-team lead PTO requires same-team PM approval' };
+    if (!hasStrictSameTeam(entry, actor?.team))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'external_pending',
+      approvalStage: 'pm',
+      notification: 'external_request',
+    };
+  }
+
+  if (filer_role === 'pm') {
+    if (status !== 'pending')
+      return {
+        error:
+          status === 'external_pending'
+            ? 'entry is awaiting external approval confirmation'
+            : 'entry is not pending PM approval',
+      };
+    if (actorRole !== 'pm')
+      return { error: 'special-team PM PTO requires same-team PM approval' };
+    if (filerEmailKey === actorEmailKey)
+      return { error: 'PMs cannot action their own PTO' };
+    if (!hasStrictSameTeam(entry, actor?.team))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'external_pending',
+      approvalStage: 'pm',
+      notification: 'external_request',
+    };
+  }
+
+  return getDefaultInternalApprovalTransition(entry, actor);
+}
+
+function getInternalApprovalTransition(entry, actor) {
+  if (isSpecialPtoWorkflow(entry))
+    return getSpecialInternalApprovalTransition(entry, actor);
+  return getDefaultInternalApprovalTransition(entry, actor);
+}
+
+function getExternalReceivedTransition(entry, actor) {
+  const { status, filer_role, user_upn } = entry || {};
+  const actorRole = actor?.role;
+  const actorEmailKey = normIdentity(actor?.email);
+  const filerEmailKey = normIdentity(user_upn);
+
+  if (!isSpecialPtoWorkflow(entry))
+    return { error: 'entry is not in the special PTO workflow' };
+  if (status !== 'external_pending')
+    return { error: 'entry is not awaiting external approval confirmation' };
+
+  if (filer_role === 'qa') {
+    if (actorRole !== 'lead')
+      return { error: 'special-team QA PTO requires same-team lead confirmation' };
+    if (!hasStrictSameTeam(entry, actor?.team))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'lead_approved',
+      notification: 'lead_approved',
+    };
+  }
+
+  if (filer_role === 'lead') {
+    if (actorRole !== 'pm')
+      return { error: 'special-team lead PTO requires same-team PM confirmation' };
+    if (!hasStrictSameTeam(entry, actor?.team))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'approved',
+      notification: 'final_approved',
+    };
+  }
+
+  if (filer_role === 'pm') {
+    if (actorRole !== 'pm')
+      return { error: 'special-team PM PTO requires same-team PM confirmation' };
+    if (filerEmailKey === actorEmailKey)
+      return { error: 'PMs cannot action their own PTO' };
+    if (!hasStrictSameTeam(entry, actor?.team))
+      return { error: 'filer is not in your team' };
+    return {
+      nextStatus: 'approved',
+      notification: 'final_approved',
+    };
+  }
+
+  return { error: 'entry is not in the special PTO workflow' };
+}
+
+function canApprovePto(entry, actorRole, actorEmail, actorTeam) {
+  const transition = getInternalApprovalTransition(entry, {
+    role: actorRole,
+    email: actorEmail,
+    team: actorTeam,
+  });
+  return transition.error || null;
 }
 
 function canDenyPto(entry, actorRole, actorEmail, actorTeam) {
-  return canApprovePto(entry, actorRole, actorEmail, actorTeam);
+  const actor = { role: actorRole, email: actorEmail, team: actorTeam };
+  if (!isSpecialPtoWorkflow(entry))
+    return canApprovePto(entry, actorRole, actorEmail, actorTeam);
+
+  if (entry?.status === 'external_pending') {
+    const transition = getExternalReceivedTransition(entry, actor);
+    return transition.error || null;
+  }
+
+  const transition = getSpecialInternalApprovalTransition(entry, actor);
+  return transition.error || null;
 }
 
 function checkApprovalAccess(
@@ -3075,6 +3592,86 @@ function checkCancelAccess(entries, actorRole, actorEmail) {
 }
 
 app.patch(
+  '/api/pto/:id/external-approve',
+  requireAuth,
+  requireLeadOrPm,
+  async (req, res) => {
+    if (!PTO_APPROVAL_ENABLED)
+      return res
+        .status(503)
+        .json({ ok: false, error: 'approval workflow is disabled' });
+    const id = normInt(req.params.id);
+    if (!id || id < 1)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    const note = normText(req.body?.note) || null;
+
+    try {
+      const entryRes = await pool.query(
+        `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+                p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+                p.approved_by_lead, p.lead_actioned_at, p.approved_by_pm, p.pm_actioned_at,
+                p.email_message_id, p.batch_id, p.notes, p.created_at
+         FROM public.pto_entries p
+         LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+         WHERE p.id = $1`,
+        [id],
+      );
+      if (!entryRes.rows.length)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      const entry = entryRes.rows[0];
+
+      const transition = getExternalReceivedTransition(entry, {
+        role: req.userRole,
+        email: req.userEmail,
+        team: req.userTeam,
+      });
+      if (transition.error)
+        return res.status(403).json({ ok: false, error: transition.error });
+
+      const r = await pool.query(
+        `UPDATE public.pto_entries
+         SET status = $1,
+             external_received_at = NOW(),
+             external_received_by = $2,
+             external_received_note = $3
+         WHERE id = $4
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id,
+                   external_received_at, external_received_by, external_received_note`,
+        [transition.nextStatus, req.userEmail, note, id],
+      );
+      const updatedRow = r.rows[0];
+
+      if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
+        (async () => {
+          try {
+            if (transition.notification === 'lead_approved') {
+              await sendSpecialExternalReceivedLeadApprovedEmail(
+                entry,
+                [entry],
+                req.userName || req.userEmail,
+              );
+            } else if (transition.notification === 'final_approved') {
+              await sendPtoFinalApprovalEmail(
+                entry,
+                [entry],
+                req.userName || req.userEmail,
+              );
+            }
+          } catch (emailErr) {
+            console.error('PTO external approval email error:', emailErr);
+          }
+        })();
+      }
+
+      res.json({ ok: true, row: updatedRow });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
   '/api/pto/:id/approve',
   requireAuth,
   requireLeadOrPm,
@@ -3110,26 +3707,50 @@ app.patch(
       if (accessError)
         return res.status(403).json({ ok: false, error: accessError });
 
+      const transition = getInternalApprovalTransition(entry, {
+        role: req.userRole,
+        email: req.userEmail,
+        team: req.userTeam,
+      });
+      const externalRecipients = SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
       let updatedRow;
-      if (req.userRole === 'lead') {
+      if (transition.approvalStage === 'lead') {
         const r = await pool.query(
-          `UPDATE public.pto_entries
-         SET status = 'lead_approved', approved_by_lead = $1, lead_actioned_at = NOW()
-         WHERE id = $2
+          transition.notification === 'external_request'
+            ? `UPDATE public.pto_entries
+         SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW(),
+             external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+         WHERE id = $4
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id`
+            : `UPDATE public.pto_entries
+         SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW()
+         WHERE id = $3
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, filer_team, email_message_id`,
-          [req.userEmail, id],
+          transition.notification === 'external_request'
+            ? [transition.nextStatus, req.userEmail, externalRecipients, id]
+            : [transition.nextStatus, req.userEmail, id],
         );
         updatedRow = r.rows[0];
       } else {
         // PM final approval
         const r = await pool.query(
-          `UPDATE public.pto_entries
-         SET status = 'approved', approved_by_pm = $1, pm_actioned_at = NOW()
-         WHERE id = $2
+          transition.notification === 'external_request'
+            ? `UPDATE public.pto_entries
+         SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
+             external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+         WHERE id = $4
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id`
+            : `UPDATE public.pto_entries
+         SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW()
+         WHERE id = $3
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, filer_team, email_message_id`,
-          [req.userEmail, id],
+          transition.notification === 'external_request'
+            ? [transition.nextStatus, req.userEmail, externalRecipients, id]
+            : [transition.nextStatus, req.userEmail, id],
         );
         updatedRow = r.rows[0];
       }
@@ -3162,7 +3783,13 @@ app.patch(
             );
             const entryDate = escapeEmailHtml(fmtSubjectDate(entry.entry_date));
 
-            if (req.userRole === 'lead') {
+            if (transition.notification === 'external_request') {
+              await sendSpecialExternalApprovalRequestEmail(
+                entry,
+                [entry],
+                req.userName || req.userEmail,
+              );
+            } else if (transition.notification === 'lead_approved') {
               // Notify all PMs + filer
               const pmEmails = await getApproverEmails('lead', null, null);
               const toList = [...new Set([...pmEmails, filerEmail])].filter(
@@ -4058,6 +4685,8 @@ app.post(
 
 // ---------- PTO overdue reminder / escalation ----------
 function getPendingPtoStageLabel(filerRole, status = 'pending', filerTeam = null) {
+  if (status === 'external_pending')
+    return 'Awaiting external approval confirmation';
   if (filerRole === 'dev' || filerRole === 'qa')
     return 'Awaiting lead approval';
   if (filerRole === 'lead') return 'Awaiting PM approval';
@@ -4094,7 +4723,7 @@ async function fetchPendingPtoReminderCandidates() {
             COALESCE(p.filer_team, u.team) AS filer_team
      FROM public.pto_entries p
      LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
-     WHERE p.status = 'pending'
+     WHERE p.status IN ('pending','external_pending')
      ORDER BY COALESCE(p.batch_id::text, 'single:' || p.id::text), p.entry_date ASC, p.id ASC`,
   );
 
@@ -4148,7 +4777,39 @@ async function fetchSharedOffDays(fromYmd, toYmd) {
   return new Set(r.rows.map((row) => row.ymd));
 }
 
+async function getExternalPendingPtoOwnerEmails(request) {
+  const entry = {
+    status: request.status,
+    filer_role: request.filerRole,
+    filer_team: request.filerTeam,
+    user_upn: request.userUpn,
+  };
+  if (!isSpecialPtoWorkflow(entry)) return [];
+  if (request.filerRole === 'qa') {
+    return dedupeEmails(
+      await getApproverEmails('qa', request.filerTeam, request.userUpn),
+    );
+  }
+  if (request.filerRole === 'lead' || request.filerRole === 'pm') {
+    return dedupeEmails(
+      await getApproverEmails(
+        request.filerRole,
+        request.filerTeam,
+        request.userUpn,
+      ),
+    );
+  }
+  return [];
+}
+
 async function getOverduePtoRecipients(request, notificationType) {
+  if (request.status === 'external_pending') {
+    return {
+      to: await getExternalPendingPtoOwnerEmails(request),
+      cc: [],
+    };
+  }
+
   const currentApprovers = dedupeEmails(
     await getApproverEmails(
       request.filerRole,

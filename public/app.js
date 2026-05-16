@@ -1004,6 +1004,7 @@ qs('formTeamOff')?.addEventListener('submit', async (e) => {
 const PTO_STATUS_LABELS = {
   pending: 'Pending',
   lead_approved: 'Lead Approved',
+  external_pending: 'External Pending',
   approved: 'Approved',
   denied: 'Denied',
   cancelled: 'Cancelled',
@@ -1042,6 +1043,30 @@ function ptoBadge(status) {
 
 function formatPtoDayPart(dayPart) {
   return PTO_DAY_PART_LABELS[dayPart] || '';
+}
+
+function ptoKey(v) {
+  return String(v || '')
+    .trim()
+    .toLowerCase();
+}
+
+function specialPtoWorkflowTeamKey() {
+  return ptoKey(APP_CFG?.specialPtoWorkflowTeam);
+}
+
+function isSpecialPtoItem(item) {
+  const specialTeam = specialPtoWorkflowTeamKey();
+  return (
+    !!specialTeam &&
+    ['qa', 'lead', 'pm'].includes(ptoKey(item?.filerRole)) &&
+    ptoKey(item?.filerTeam) === specialTeam
+  );
+}
+
+function hasSamePtoTeam(item, team) {
+  const actorTeam = ptoKey(team);
+  return !!actorTeam && actorTeam === ptoKey(item?.filerTeam);
 }
 
 function syncPtoDayPartVisibility(report = false) {
@@ -1186,17 +1211,56 @@ function normalizePtoItems(rows) {
   });
 }
 
-function getPtoItemActions(item, { role, myEmail, isPrivileged, isLead, todayYmd }) {
+function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, todayYmd }) {
   const filerUpn = String(item.userUpn || '').toLowerCase();
-  let canApproveDeny = false;
+  const sameTeam = hasSamePtoTeam(item, myTeam);
+  let canApprove = false;
+  let canDeny = false;
+  let canExternalApprove = false;
 
-  if (
+  if (isSpecialPtoItem(item)) {
+    if (item.filerRole === 'qa') {
+      if (item.status === 'pending' && isLead && sameTeam && filerUpn !== myEmail) {
+        canApprove = true;
+        canDeny = true;
+      } else if (
+        item.status === 'external_pending' &&
+        isLead &&
+        sameTeam &&
+        filerUpn !== myEmail
+      ) {
+        canExternalApprove = true;
+        canDeny = true;
+      } else if (item.status === 'lead_approved' && role === 'pm' && sameTeam) {
+        canApprove = true;
+        canDeny = true;
+      }
+    } else if (item.filerRole === 'lead') {
+      if (role === 'pm' && sameTeam && item.status === 'pending') {
+        canApprove = true;
+        canDeny = true;
+      } else if (role === 'pm' && sameTeam && item.status === 'external_pending') {
+        canExternalApprove = true;
+        canDeny = true;
+      }
+    } else if (item.filerRole === 'pm') {
+      const otherPm = role === 'pm' && sameTeam && filerUpn !== myEmail;
+      if (otherPm && item.status === 'pending') {
+        canApprove = true;
+        canDeny = true;
+      } else if (otherPm && item.status === 'external_pending') {
+        canExternalApprove = true;
+        canDeny = true;
+      }
+    }
+  } else if (
     isLead &&
     ['dev', 'qa'].includes(item.filerRole) &&
     item.status === 'pending' &&
     filerUpn !== myEmail
   ) {
-    canApproveDeny = true;
+    canApprove = true;
+    canDeny = true;
   } else if (role === 'pm') {
     const devQaReady =
       ['dev', 'qa'].includes(item.filerRole) &&
@@ -1207,7 +1271,8 @@ function getPtoItemActions(item, { role, myEmail, isPrivileged, isLead, todayYmd
       item.status === 'pending' &&
       filerUpn !== myEmail;
     const tsReady = item.filerRole === 'ts' && item.status === 'pending';
-    canApproveDeny = devQaReady || leadReady || pmReady || tsReady;
+    canApprove = devQaReady || leadReady || pmReady || tsReady;
+    canDeny = canApprove;
   }
 
   const cancellable = !['cancelled', 'denied'].includes(item.status);
@@ -1221,10 +1286,12 @@ function getPtoItemActions(item, { role, myEmail, isPrivileged, isLead, todayYmd
 
   return {
     filerUpn,
-    canApproveDeny,
+    canApprove,
+    canDeny,
+    canExternalApprove,
     canCancel,
     canDelete,
-    isActionRequired: canApproveDeny,
+    isActionRequired: canApprove || canDeny || canExternalApprove,
   };
 }
 
@@ -1232,12 +1299,26 @@ function renderPtoActionCell(item, context) {
   const actions = getPtoItemActions(item, context);
   let html = '';
 
-  if (actions.canApproveDeny) {
+  if (actions.canApprove) {
     if (item.type === 'batch') {
       html += `<button class="btn-approve" data-batch-id="${item.batchId}" data-action="approve">Approve</button>`;
-      html += `<button class="btn-deny" data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
     } else {
       html += `<button class="btn-approve" data-id="${item.id}" data-action="approve">Approve</button>`;
+    }
+  }
+
+  if (actions.canExternalApprove) {
+    if (item.type === 'batch') {
+      html += `<button class="btn-external" data-batch-id="${item.batchId}" data-action="external-approve">Mark External Approval Received</button>`;
+    } else {
+      html += `<button class="btn-external" data-id="${item.id}" data-action="external-approve">Mark External Approval Received</button>`;
+    }
+  }
+
+  if (actions.canDeny) {
+    if (item.type === 'batch') {
+      html += `<button class="btn-deny" data-batch-id="${item.batchId}" data-action="deny">Deny</button>`;
+    } else {
       html += `<button class="btn-deny" data-id="${item.id}" data-action="deny">Deny</button>`;
     }
   }
@@ -1392,11 +1473,13 @@ function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
   const role = window.CURRENT_USER?.role;
   const myEmail = (window.CURRENT_USER?.email || '').toLowerCase();
+  const myTeam = window.CURRENT_USER?.team || '';
   const isPrivileged = role === 'admin' || role === 'pm';
   const isLead = role === 'lead';
   const context = {
     role,
     myEmail,
+    myTeam,
     isPrivileged,
     isLead,
     todayYmd: ymdTodayInReportTz(),
@@ -1473,6 +1556,11 @@ async function ptoAction(id, batchId, action) {
       return;
     }
   }
+  if (action === 'external-approve') {
+    note = window.prompt('External approval note (optional):');
+    if (note === null) return;
+    note = (note || '').trim();
+  }
   const url = batchId
     ? `/api/pto/batch/${batchId}/${action}`
     : `/api/pto/${id}/${action}`;
@@ -1496,7 +1584,7 @@ async function ptoAction(id, batchId, action) {
 // Delegated click for approve/deny/cancel buttons (single and batch)
 document.addEventListener('click', async (e) => {
   const btn = e.target.closest(
-    '[data-action="approve"],[data-action="deny"],[data-action="cancel"]',
+    '[data-action="approve"],[data-action="deny"],[data-action="cancel"],[data-action="external-approve"]',
   );
   if (!btn) return;
   const id = btn.dataset.id || null;
