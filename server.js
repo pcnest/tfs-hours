@@ -31,7 +31,8 @@ const EXTRA_CC_EMAILS = (process.env.EXTRA_CC_EMAILS || '')
   .map((e) => e.trim())
   .filter((e) => e.includes('@'));
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
-const PTO_APPROVAL_ENABLED = process.env.PTO_APPROVAL_ENABLED !== 'false';
+const PTO_APPROVAL_ENABLED =
+  String(process.env.PTO_APPROVAL_ENABLED).trim().toLowerCase() !== 'false';
 
 function parseEmailList(str) {
   if (!str) return [];
