@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>External PTO Approval</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8f5;
+      --panel: #ffffff;
+      --ink: #17211f;
+      --muted: #66736f;
+      --line: #dbe4dd;
+      --accent: #1c6b58;
+      --accent-dark: #145041;
+      --danger: #b42318;
+      --danger-dark: #8b1a12;
+      --soft: #eef5f1;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(760px, calc(100% - 32px));
+      margin: 40px auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 18px 45px rgba(23, 33, 31, 0.08);
+      overflow: hidden;
+    }
+
+    header {
+      padding: 24px 28px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--soft);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .subtle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .body {
+      padding: 24px 28px 28px;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #fff7e6;
+      border: 1px solid #f1d19b;
+      color: #77530c;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 12px 18px;
+      margin: 22px 0;
+    }
+
+    dt {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    dd {
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    label {
+      display: block;
+      margin: 20px 0 8px;
+      font-weight: 700;
+    }
+
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 110px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    textarea:focus {
+      border-color: var(--accent);
+      outline: 3px solid rgba(28, 107, 88, 0.16);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    button {
+      min-height: 40px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 16px;
+      color: #ffffff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.68;
+    }
+
+    .approve {
+      background: var(--accent);
+    }
+
+    .approve:hover:not(:disabled) {
+      background: var(--accent-dark);
+    }
+
+    .deny {
+      background: var(--danger);
+    }
+
+    .deny:hover:not(:disabled) {
+      background: var(--danger-dark);
+    }
+
+    .message {
+      margin: 0;
+      padding: 16px;
+      border-radius: 6px;
+      background: var(--soft);
+      border: 1px solid var(--line);
+    }
+
+    .message.error {
+      background: #fff2f0;
+      border-color: #f4b8b2;
+      color: var(--danger-dark);
+    }
+
+    .message.success {
+      background: #eef8f2;
+      border-color: #b9dec8;
+      color: #14522c;
+    }
+
+    @media (max-width: 620px) {
+      main {
+        width: calc(100% - 20px);
+        margin: 10px auto;
+      }
+
+      header,
+      .body {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      dl {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+
+      dd {
+        margin-bottom: 10px;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>PTO Approval</h1>
+      <p class="subtle" id="recipient"></p>
+    </header>
+    <section class="body" id="app">
+      <p class="message">Loading request...</p>
+    </section>
+  </main>
+
+  <script>
+    const app = document.getElementById('app');
+    const recipient = document.getElementById('recipient');
+    const token = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+    const requestedAction = new URLSearchParams(location.search).get('action');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function fmtHours(value) {
+      const n = Number(value || 0);
+      return Number.isFinite(n) ? n.toFixed(2).replace(/\.00$/, '') : '0';
+    }
+
+    function fmtDateTime(value) {
+      if (!value) return '';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+
+    function setMessage(text, type = '') {
+      app.innerHTML = `<p class="message ${type}">${escapeHtml(text)}</p>`;
+    }
+
+    async function submitDecision(action) {
+      const note = document.getElementById('note')?.value.trim() || '';
+      if (action === 'deny' && !note) {
+        setInlineError('A denial reason is required.');
+        return;
+      }
+
+      const buttons = Array.from(document.querySelectorAll('button'));
+      buttons.forEach((btn) => {
+        btn.disabled = true;
+      });
+      clearInlineError();
+
+      try {
+        const res = await fetch(`/api/external/pto/${encodeURIComponent(token)}/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Unable to record decision.');
+        setMessage(data.message || 'Decision recorded.', 'success');
+      } catch (err) {
+        buttons.forEach((btn) => {
+          btn.disabled = false;
+        });
+        setInlineError(err.message || 'Unable to record decision.');
+      }
+    }
+
+    function setInlineError(text) {
+      const el = document.getElementById('inline-error');
+      if (el) {
+        el.textContent = text;
+        el.hidden = false;
+      }
+    }
+
+    function clearInlineError() {
+      const el = document.getElementById('inline-error');
+      if (el) {
+        el.textContent = '';
+        el.hidden = true;
+      }
+    }
+
+    function render(request) {
+      recipient.textContent = request.recipientEmail
+        ? `Sent to ${request.recipientEmail}`
+        : '';
+      const action = requestedAction === 'deny' ? 'deny' : requestedAction === 'approve' ? 'approve' : '';
+      const noteLabel = action === 'deny' ? 'Denial reason' : 'Note';
+      const noteHelp = action === 'deny'
+        ? 'Required'
+        : 'Optional';
+      const actionButtons = action
+        ? `<button class="${action === 'deny' ? 'deny' : 'approve'}" type="button" id="primary-action">
+             ${action === 'deny' ? 'Deny PTO' : 'Approve PTO'}
+           </button>`
+        : `<button class="approve" type="button" id="approve-btn">Approve PTO</button>
+           <button class="deny" type="button" id="deny-btn">Deny PTO</button>`;
+
+      app.innerHTML = `
+        <span class="status">${escapeHtml(request.status || 'external_pending')}</span>
+        <dl>
+          <dt>Employee</dt>
+          <dd>${escapeHtml(request.employee)}</dd>
+          <dt>Email</dt>
+          <dd>${escapeHtml(request.userUpn)}</dd>
+          <dt>Date</dt>
+          <dd>${escapeHtml(request.dateLabel)}</dd>
+          <dt>Duration</dt>
+          <dd>${fmtHours(request.totalHours)} hours${request.dayCount > 1 ? ` across ${request.dayCount} days` : ''}</dd>
+          <dt>Day Part</dt>
+          <dd>${escapeHtml(request.dayPart || 'Full Day')}</dd>
+          <dt>Leave Type</dt>
+          <dd>${escapeHtml(request.leaveType)}</dd>
+          <dt>Team</dt>
+          <dd>${escapeHtml(request.filerTeam || '')}</dd>
+          <dt>Expires</dt>
+          <dd>${escapeHtml(fmtDateTime(request.expiresAt))}</dd>
+          <dt>Reason</dt>
+          <dd>${escapeHtml(request.reason || '')}</dd>
+        </dl>
+        <label for="note">${escapeHtml(noteLabel)} <span class="subtle">${escapeHtml(noteHelp)}</span></label>
+        <textarea id="note" maxlength="2000"></textarea>
+        <p class="message error" id="inline-error" hidden></p>
+        <div class="actions">${actionButtons}</div>
+      `;
+
+      document.getElementById('primary-action')?.addEventListener('click', () => submitDecision(action));
+      document.getElementById('approve-btn')?.addEventListener('click', () => submitDecision('approve'));
+      document.getElementById('deny-btn')?.addEventListener('click', () => submitDecision('deny'));
+    }
+
+    async function boot() {
+      if (!token) {
+        setMessage('Invalid or expired link.', 'error');
+        return;
+      }
+      try {
+        const res = await fetch(`/api/external/pto/${encodeURIComponent(token)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Invalid or expired link.');
+        render(data.request);
+      } catch (err) {
+        setMessage(err.message || 'Invalid or expired link.', 'error');
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

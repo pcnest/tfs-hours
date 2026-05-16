@@ -40,6 +40,16 @@ const SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS = (
   .split(',')
   .map((e) => e.trim())
   .filter((e) => e.includes('@'));
+const EXTERNAL_PTO_TOKEN_TTL_DAYS = Math.max(
+  1,
+  Number(process.env.EXTERNAL_PTO_TOKEN_TTL_DAYS || '14') || 14,
+);
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ||
+  process.env.APP_BASE_URL ||
+  process.env.RENDER_EXTERNAL_URL ||
+  ''
+).trim();
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
 const PTO_APPROVAL_ENABLED =
   String(process.env.PTO_APPROVAL_ENABLED).trim().toLowerCase() !== 'false';
@@ -2132,6 +2142,34 @@ function dedupeEmails(emails) {
   return out;
 }
 
+function makeExternalPtoToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function hashExternalPtoToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function getRequestBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL.replace(/\/+$/, '');
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
+  return `${proto}://${req.get('host')}`;
+}
+
+function externalPtoRequestKey(entry) {
+  if (entry?.batch_id) return `batch:${entry.batch_id}`;
+  return `single:${entry?.id}`;
+}
+
+function externalPtoActionLinks(baseUrl, token) {
+  const page = `${baseUrl}/external/pto/${encodeURIComponent(token)}`;
+  return {
+    page,
+    approve: `${page}?action=approve`,
+    deny: `${page}?action=deny`,
+  };
+}
+
 async function resolveRegisteredPtoUser(userName, userUpn) {
   const upn = normText(userUpn);
   if (upn) {
@@ -2244,9 +2282,58 @@ function ptoReplyHeaders(entry, dateLabel) {
   );
 }
 
-async function sendSpecialExternalApprovalRequestEmail(entry, rows, actorLabel) {
+async function createExternalApprovalTokens(entry, baseUrl) {
   const toList = dedupeEmails(SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS);
-  if (!toList.length) return;
+  if (!toList.length) return [];
+
+  const requestKey = externalPtoRequestKey(entry);
+  const expiresAt = new Date(
+    Date.now() + EXTERNAL_PTO_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+  );
+
+  await pool.query(
+    `UPDATE public.pto_external_approval_tokens
+     SET revoked_at = NOW()
+     WHERE request_key = $1
+       AND used_at IS NULL
+       AND revoked_at IS NULL`,
+    [requestKey],
+  );
+
+  const created = [];
+  for (const email of toList) {
+    const token = makeExternalPtoToken();
+    const tokenHash = hashExternalPtoToken(token);
+    await pool.query(
+      `INSERT INTO public.pto_external_approval_tokens
+         (token_hash, request_key, pto_entry_id, batch_id, recipient_email, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        tokenHash,
+        requestKey,
+        entry.id || null,
+        entry.batch_id || null,
+        email,
+        expiresAt.toISOString(),
+      ],
+    );
+    created.push({
+      email,
+      token,
+      links: externalPtoActionLinks(baseUrl, token),
+    });
+  }
+  return created;
+}
+
+async function sendSpecialExternalApprovalRequestEmail(
+  entry,
+  rows,
+  actorLabel,
+  baseUrl,
+) {
+  const tokenRecords = await createExternalApprovalTokens(entry, baseUrl);
+  if (!tokenRecords.length) return;
 
   const transporter = createMailTransporter();
   const dateLabel = ptoRowsDateRange(rows);
@@ -2254,11 +2341,12 @@ async function sendSpecialExternalApprovalRequestEmail(entry, rows, actorLabel) 
   const totalHours = ptoRowsTotalHours(rows);
   const headers = ptoReplyHeaders(entry, dateLabel);
 
-  await transporter.sendMail({
-    from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
-    to: toList.join(', '),
-    subject: `External PTO Approval Request \u2013 ${displayName} \u2013 ${entry.leave_type} Leave on ${dateLabel}`,
-    html: `<p>Hi @Team,</p>
+  for (const tokenRecord of tokenRecords) {
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      to: tokenRecord.email,
+      subject: `External PTO Approval Request \u2013 ${displayName} \u2013 ${entry.leave_type} Leave on ${dateLabel}`,
+      html: `<p>Hi @Team,</p>
 <p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
@@ -2268,11 +2356,16 @@ async function sendSpecialExternalApprovalRequestEmail(entry, rows, actorLabel) 
   <strong>Internal Reviewer:</strong> ${escapeEmailHtml(actorLabel || '')}<br>
   <strong>Reason for Leave:</strong> ${escapeEmailHtml(entry.notes || '\u2014')}
 </p>
-<p>Please reply through the established external approval process. No approval links are included in this email.</p>
+<p>
+  <a href="${escapeEmailHtml(tokenRecord.links.approve)}" style="display:inline-block;padding:9px 14px;background:#1f7a6b;color:#ffffff;text-decoration:none;border-radius:4px;margin-right:8px;">Approve</a>
+  <a href="${escapeEmailHtml(tokenRecord.links.deny)}" style="display:inline-block;padding:9px 14px;background:#c8742b;color:#ffffff;text-decoration:none;border-radius:4px;">Deny</a>
+</p>
+<p>If the buttons do not open, use this link: <a href="${escapeEmailHtml(tokenRecord.links.page)}">${escapeEmailHtml(tokenRecord.links.page)}</a></p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-    text: `Hi @Team,\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nPlease reply through the established external approval process. No approval links are included in this email.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
-    headers,
-  });
+      text: `Hi @Team,\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+      headers,
+    });
+  }
 }
 
 async function sendSpecialExternalReceivedLeadApprovedEmail(
@@ -2370,6 +2463,268 @@ ${leadApprovalDetails.html}
     headers,
     attachments,
   });
+}
+
+async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
+  const transporter = createMailTransporter();
+  const dateLabel = ptoRowsDateRange(rows);
+  const displayName = entry.user_name || entry.user_upn;
+  const totalHours = ptoRowsTotalHours(rows);
+  const headers = ptoReplyHeaders(entry, dateLabel);
+  const approverEmails = await getApproverEmails(
+    entry.filer_role,
+    entry.filer_team,
+    entry.user_upn,
+  );
+  const ccEmails = dedupeEmails(approverEmails);
+
+  await transporter.sendMail({
+    from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    to: entry.user_upn,
+    ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
+    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>denied by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
+<p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
+${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
+<p>You may resubmit a new PTO request if needed.</p>
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
+    text: `PTO for ${displayName} (${dateLabel}) was denied by ${actorLabel || ''}.\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    headers,
+  });
+}
+
+function getExternalTokenApprovalTransition(entry) {
+  if (!isSpecialPtoWorkflow(entry))
+    return { error: 'entry is not in the special PTO workflow' };
+  if (entry?.status !== 'external_pending')
+    return { error: 'entry is not awaiting external approval' };
+  if (entry.filer_role === 'qa')
+    return { nextStatus: 'lead_approved', notification: 'lead_approved' };
+  if (entry.filer_role === 'lead' || entry.filer_role === 'pm')
+    return { nextStatus: 'approved', notification: 'final_approved' };
+  return { error: 'entry is not in the special PTO workflow' };
+}
+
+async function fetchExternalPtoRowsForToken(tokenRow, client = pool, forUpdate = false) {
+  const lockSql = forUpdate ? ' FOR UPDATE OF p' : '';
+  if (tokenRow.batch_id) {
+    const r = await client.query(
+      `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+              p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+              p.approved_by_lead, p.lead_actioned_at, p.approved_by_pm, p.pm_actioned_at,
+              p.email_message_id, p.batch_id, p.notes, p.created_at
+       FROM public.pto_entries p
+       LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+       WHERE p.batch_id = $1
+       ORDER BY p.entry_date ASC${lockSql}`,
+      [tokenRow.batch_id],
+    );
+    return r.rows;
+  }
+
+  const r = await client.query(
+    `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
+            p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
+            p.approved_by_lead, p.lead_actioned_at, p.approved_by_pm, p.pm_actioned_at,
+            p.email_message_id, p.batch_id, p.notes, p.created_at
+     FROM public.pto_entries p
+     LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
+     WHERE p.id = $1
+     ORDER BY p.entry_date ASC${lockSql}`,
+    [tokenRow.pto_entry_id],
+  );
+  return r.rows;
+}
+
+function isExternalTokenUsable(tokenRow) {
+  if (!tokenRow) return false;
+  if (tokenRow.used_at || tokenRow.revoked_at) return false;
+  return new Date(tokenRow.expires_at).getTime() > Date.now();
+}
+
+function buildExternalPtoSummary(tokenRow, rows) {
+  const entry = rows[0];
+  return {
+    recipientEmail: tokenRow.recipient_email,
+    employee: entry.user_name || entry.user_upn,
+    userUpn: entry.user_upn,
+    dateLabel: ptoRowsDateRange(rows),
+    totalHours: ptoRowsTotalHours(rows),
+    dayCount: rows.length,
+    dayPart: formatPtoDayPart(entry.day_part),
+    leaveType: entry.leave_type,
+    reason: entry.notes || '',
+    status: entry.status,
+    filerRole: entry.filer_role,
+    filerTeam: entry.filer_team,
+    expiresAt: tokenRow.expires_at,
+  };
+}
+
+async function loadExternalPtoTokenContext(token, client = pool, forUpdate = false) {
+  const tokenHash = hashExternalPtoToken(token);
+  const tokenSql = `SELECT token_hash, request_key, pto_entry_id, batch_id, recipient_email,
+                          expires_at, used_at, revoked_at, action, note
+                   FROM public.pto_external_approval_tokens
+                   WHERE token_hash = $1${forUpdate ? ' FOR UPDATE' : ''}`;
+  const tokenRes = await client.query(tokenSql, [tokenHash]);
+  const tokenRow = tokenRes.rows[0];
+  if (!isExternalTokenUsable(tokenRow)) return null;
+
+  const rows = await fetchExternalPtoRowsForToken(tokenRow, client, forUpdate);
+  if (!rows.length) return null;
+  const batchError = rows.length > 1 ? validatePtoBatchTransitionRows(rows) : null;
+  if (batchError) return null;
+
+  const entry = rows[0];
+  if (entry.status !== 'external_pending' || !isSpecialPtoWorkflow(entry))
+    return null;
+  return { tokenRow, rows, entry };
+}
+
+async function processExternalPtoDecision(req, res, action) {
+  const token = normText(req.params.token);
+  const note = normText(req.body?.note) || null;
+  if (!token)
+    return res.status(404).json({ ok: false, error: 'invalid or expired link' });
+  if (action === 'denied' && !note)
+    return res.status(400).json({ ok: false, error: 'denial reason is required' });
+
+  const client = await pool.connect();
+  let notification = null;
+  let tokenRow = null;
+  let rows = [];
+  let entry = null;
+  try {
+    await client.query('BEGIN');
+    const ctx = await loadExternalPtoTokenContext(token, client, true);
+    if (!ctx) {
+      await client.query('ROLLBACK');
+      return res.status(410).json({ ok: false, error: 'invalid or expired link' });
+    }
+    ({ tokenRow, rows, entry } = ctx);
+
+    let nextStatus;
+    if (action === 'approved') {
+      const transition = getExternalTokenApprovalTransition(entry);
+      if (transition.error) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ ok: false, error: transition.error });
+      }
+      nextStatus = transition.nextStatus;
+      notification = transition.notification;
+    } else {
+      nextStatus = 'denied';
+      notification = 'denied';
+    }
+
+    if (tokenRow.batch_id) {
+      await client.query(
+        action === 'approved'
+          ? `UPDATE public.pto_entries
+             SET status = $1,
+                 external_received_at = NOW(),
+                 external_received_by = $2,
+                 external_received_note = $3
+             WHERE batch_id = $4`
+          : `UPDATE public.pto_entries
+             SET status = 'denied',
+                 denied_by = $1,
+                 denied_at = NOW(),
+                 denial_note = $2,
+                 external_received_at = NOW(),
+                 external_received_by = $1,
+                 external_received_note = $2
+             WHERE batch_id = $3`,
+        action === 'approved'
+          ? [nextStatus, tokenRow.recipient_email, note, tokenRow.batch_id]
+          : [tokenRow.recipient_email, note, tokenRow.batch_id],
+      );
+    } else {
+      await client.query(
+        action === 'approved'
+          ? `UPDATE public.pto_entries
+             SET status = $1,
+                 external_received_at = NOW(),
+                 external_received_by = $2,
+                 external_received_note = $3
+             WHERE id = $4`
+          : `UPDATE public.pto_entries
+             SET status = 'denied',
+                 denied_by = $1,
+                 denied_at = NOW(),
+                 denial_note = $2,
+                 external_received_at = NOW(),
+                 external_received_by = $1,
+                 external_received_note = $2
+             WHERE id = $3`,
+        action === 'approved'
+          ? [nextStatus, tokenRow.recipient_email, note, tokenRow.pto_entry_id]
+          : [tokenRow.recipient_email, note, tokenRow.pto_entry_id],
+      );
+    }
+
+    await client.query(
+      `UPDATE public.pto_external_approval_tokens
+       SET used_at = NOW(), action = $1, note = $2
+       WHERE token_hash = $3`,
+      [action, note, tokenRow.token_hash],
+    );
+    await client.query(
+      `UPDATE public.pto_external_approval_tokens
+       SET revoked_at = NOW()
+       WHERE request_key = $1
+         AND token_hash <> $2
+         AND used_at IS NULL
+         AND revoked_at IS NULL`,
+      [tokenRow.request_key, tokenRow.token_hash],
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      ok: true,
+      action,
+      status: nextStatus,
+      message:
+        action === 'approved'
+          ? 'External approval recorded.'
+          : 'External denial recorded.',
+    });
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* ignore */
+    }
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  } finally {
+    client.release();
+  }
+
+  if (BREVO_API_KEY && NOTIFY_FROM_EMAIL && notification) {
+    (async () => {
+      try {
+        if (notification === 'lead_approved') {
+          await sendSpecialExternalReceivedLeadApprovedEmail(
+            entry,
+            rows,
+            tokenRow.recipient_email,
+          );
+        } else if (notification === 'final_approved') {
+          await sendPtoFinalApprovalEmail(entry, rows, tokenRow.recipient_email);
+        } else if (notification === 'denied') {
+          await sendPtoExternalDenialEmail(
+            entry,
+            rows,
+            tokenRow.recipient_email,
+            note,
+          );
+        }
+      } catch (emailErr) {
+        console.error('External PTO decision email error:', emailErr);
+      }
+    })();
+  }
 }
 
 app.post('/api/pto', requireAuth, async (req, res) => {
@@ -2705,7 +3060,7 @@ app.patch(
       const batchRes = await pool.query(
         `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
                 p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
-                p.approved_by_lead, p.lead_actioned_at,
+                p.approved_by_lead, p.lead_actioned_at, p.batch_id,
                 p.email_message_id, p.notes, p.created_at
          FROM public.pto_entries p
          LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
@@ -2814,6 +3169,7 @@ app.patch(
                 entry,
                 batchRes.rows,
                 req.userName || req.userEmail,
+                getRequestBaseUrl(req),
               );
             } else if (transition.notification === 'lead_approved') {
               const pmEmails = await getApproverEmails('lead', null, null);
@@ -3788,6 +4144,7 @@ app.patch(
                 entry,
                 [entry],
                 req.userName || req.userEmail,
+                getRequestBaseUrl(req),
               );
             } else if (transition.notification === 'lead_approved') {
               // Notify all PMs + filer
@@ -5043,6 +5400,38 @@ app.post('/api/pto/overdue-reminders', async (req, res) => {
     console.error('PTO overdue reminder error:', e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
+});
+
+app.get('/external/pto/:token', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'external-pto.html'));
+});
+
+app.get('/api/external/pto/:token', async (req, res) => {
+  try {
+    const token = normText(req.params.token);
+    if (!token)
+      return res.status(404).json({ ok: false, error: 'invalid or expired link' });
+
+    const ctx = await loadExternalPtoTokenContext(token);
+    if (!ctx)
+      return res.status(410).json({ ok: false, error: 'invalid or expired link' });
+
+    res.json({
+      ok: true,
+      request: buildExternalPtoSummary(ctx.tokenRow, ctx.rows),
+    });
+  } catch (e) {
+    console.error('External PTO summary error:', e);
+    res.status(500).json({ ok: false, error: 'Unable to load request.' });
+  }
+});
+
+app.post('/api/external/pto/:token/approve', async (req, res) => {
+  await processExternalPtoDecision(req, res, 'approved');
+});
+
+app.post('/api/external/pto/:token/deny', async (req, res) => {
+  await processExternalPtoDecision(req, res, 'denied');
 });
 
 // ---------- Static UI ----------
