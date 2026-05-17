@@ -2017,7 +2017,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
       return res.json({ ok: true, rows: r.rows });
     }
 
-    // Lead: own entries UNION team's pending dev/qa entries
+    // Lead: own entries UNION team's visible dev/qa entries
     if (req.userRole === 'lead') {
       const params = [];
       const dateWhere = [];
@@ -2033,29 +2033,33 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         ? 'AND ' + dateWhere.join(' AND ')
         : '';
 
-      let teamClause;
+      let actionableTeamClause;
+      let visibleTeamClause;
       if (req.userTeam) {
         params.push(req.userTeam);
         const teamIdx = params.length;
         const pendingTeamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
+        const approvedTeamClause = `filer_role IN ('dev','qa') AND status = 'approved' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
         if (isSpecialPtoTeamName(req.userTeam)) {
-          teamClause = `((${pendingTeamClause}) OR (filer_role = 'qa' AND status IN ('pending','external_pending') AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})))`;
+          actionableTeamClause = `((${pendingTeamClause}) OR (filer_role = 'qa' AND status IN ('pending','external_pending') AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})))`;
         } else {
-          teamClause = pendingTeamClause;
+          actionableTeamClause = pendingTeamClause;
         }
+        visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}))`;
       } else {
         if (SPECIAL_PTO_WORKFLOW_TEAM_KEY) {
           params.push(SPECIAL_PTO_WORKFLOW_TEAM);
-          teamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND NOT (filer_role = 'qa' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${params.length}))`;
+          actionableTeamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND NOT (filer_role = 'qa' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${params.length}))`;
         } else {
-          teamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
+          actionableTeamClause = `filer_role IN ('dev','qa') AND status = 'pending'`;
         }
+        visibleTeamClause = actionableTeamClause;
       }
 
       if (actionRequired) {
-        // Only show actionable: team's pending dev/qa entries
+        // Only show actionable team entries; approved rows are visible-only.
         const r = await pool.query(
-          `${SELECT} WHERE ${teamClause} ${dateClause} ORDER BY entry_date ASC, user_name ASC`,
+          `${SELECT} WHERE ${actionableTeamClause} ${dateClause} ORDER BY entry_date ASC, user_name ASC`,
           params,
         );
         return res.json({ ok: true, rows: r.rows });
@@ -2066,7 +2070,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
 
       const r = await pool.query(
         `${SELECT} WHERE (LOWER(COALESCE(user_upn,'')) = LOWER($${ownIdx}) ${dateClause})
-           OR (${teamClause} ${dateClause})
+           OR (${visibleTeamClause} ${dateClause})
          ORDER BY entry_date ASC, user_name ASC`,
         params,
       );
