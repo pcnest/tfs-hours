@@ -1,0 +1,57 @@
+name: Missing Hours Notifications
+
+on:
+  schedule:
+    # Every Wednesday at 9:00 AM UTC
+    - cron: '0 9 * * 3'
+  workflow_dispatch:
+    inputs:
+      period:
+        description: 'Report period'
+        required: false
+        default: 'this_month'
+        type: choice
+        options:
+          - this_month
+          - prev_week
+          - prev_month
+          - this_week
+      dry_run:
+        description: 'Dry run (preview only, no emails sent)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  notify:
+    name: Send Missing Hours Notifications
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call missing-hours-auto endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          MISSING_HOURS_NOTIFY_API_KEY: ${{ secrets.MISSING_HOURS_NOTIFY_API_KEY }}
+        run: |
+          PERIOD="${{ github.event.inputs.period || 'this_month' }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+
+          echo "Period: $PERIOD | Dry run: $DRY_RUN"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${APP_URL}/api/notifications/missing-hours-auto" \
+            -H "x-api-key: ${MISSING_HOURS_NOTIFY_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"period\":\"${PERIOD}\",\"dry_run\":${DRY_RUN}}")
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "Response: $HTTP_BODY"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Endpoint returned HTTP $HTTP_STATUS"
+            exit 1
+          fi

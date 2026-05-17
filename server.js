@@ -13,6 +13,12 @@ const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
 const PTO_REMINDER_API_KEY = process.env.PTO_REMINDER_API_KEY || '';
+const MISSING_HOURS_NOTIFY_API_KEY =
+  process.env.MISSING_HOURS_NOTIFY_API_KEY || '';
+const MISSING_HOURS_THRESHOLD = Math.max(
+  0,
+  Number(process.env.MISSING_HOURS_THRESHOLD || '16') || 16,
+);
 const TFS_WORKITEM_URL_TEMPLATE = process.env.TFS_WORKITEM_URL_TEMPLATE || '';
 const REPORT_TZ_OFFSET_MINUTES = Number(
   process.env.REPORT_TZ_OFFSET_MINUTES || '0',
@@ -2186,7 +2192,10 @@ function makeExternalPtoToken() {
 }
 
 function hashExternalPtoToken(token) {
-  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(String(token || ''))
+    .digest('hex');
 }
 
 function getRequestBaseUrl(req) {
@@ -2540,7 +2549,11 @@ function getExternalTokenApprovalTransition(entry) {
   return { error: 'entry is not in the special PTO workflow' };
 }
 
-async function fetchExternalPtoRowsForToken(tokenRow, client = pool, forUpdate = false) {
+async function fetchExternalPtoRowsForToken(
+  tokenRow,
+  client = pool,
+  forUpdate = false,
+) {
   const lockSql = forUpdate ? ' FOR UPDATE OF p' : '';
   if (tokenRow.batch_id) {
     const r = await client.query(
@@ -2596,7 +2609,11 @@ function buildExternalPtoSummary(tokenRow, rows) {
   };
 }
 
-async function loadExternalPtoTokenContext(token, client = pool, forUpdate = false) {
+async function loadExternalPtoTokenContext(
+  token,
+  client = pool,
+  forUpdate = false,
+) {
   const tokenHash = hashExternalPtoToken(token);
   const tokenSql = `SELECT token_hash, request_key, pto_entry_id, batch_id, recipient_email,
                           expires_at, used_at, revoked_at, action, note
@@ -2608,7 +2625,8 @@ async function loadExternalPtoTokenContext(token, client = pool, forUpdate = fal
 
   const rows = await fetchExternalPtoRowsForToken(tokenRow, client, forUpdate);
   if (!rows.length) return null;
-  const batchError = rows.length > 1 ? validatePtoBatchTransitionRows(rows) : null;
+  const batchError =
+    rows.length > 1 ? validatePtoBatchTransitionRows(rows) : null;
   if (batchError) return null;
 
   const entry = rows[0];
@@ -2621,9 +2639,13 @@ async function processExternalPtoDecision(req, res, action) {
   const token = normText(req.params.token);
   const note = normText(req.body?.note) || null;
   if (!token)
-    return res.status(404).json({ ok: false, error: 'invalid or expired link' });
+    return res
+      .status(404)
+      .json({ ok: false, error: 'invalid or expired link' });
   if (action === 'denied' && !note)
-    return res.status(400).json({ ok: false, error: 'denial reason is required' });
+    return res
+      .status(400)
+      .json({ ok: false, error: 'denial reason is required' });
 
   const client = await pool.connect();
   let notification = null;
@@ -2635,7 +2657,9 @@ async function processExternalPtoDecision(req, res, action) {
     const ctx = await loadExternalPtoTokenContext(token, client, true);
     if (!ctx) {
       await client.query('ROLLBACK');
-      return res.status(410).json({ ok: false, error: 'invalid or expired link' });
+      return res
+        .status(410)
+        .json({ ok: false, error: 'invalid or expired link' });
     }
     ({ tokenRow, rows, entry } = ctx);
 
@@ -2746,7 +2770,11 @@ async function processExternalPtoDecision(req, res, action) {
             tokenRow.recipient_email,
           );
         } else if (notification === 'final_approved') {
-          await sendPtoFinalApprovalEmail(entry, rows, tokenRow.recipient_email);
+          await sendPtoFinalApprovalEmail(
+            entry,
+            rows,
+            tokenRow.recipient_email,
+          );
         } else if (notification === 'denied') {
           await sendPtoExternalDenialEmail(
             entry,
@@ -3123,7 +3151,8 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const externalRecipients = SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
+      const externalRecipients =
+        SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
       let updatedRows;
       if (transition.approvalStage === 'lead') {
         const r = await pool.query(
@@ -3140,7 +3169,12 @@ app.patch(
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
           transition.notification === 'external_request'
-            ? [transition.nextStatus, req.userEmail, externalRecipients, batchId]
+            ? [
+                transition.nextStatus,
+                req.userEmail,
+                externalRecipients,
+                batchId,
+              ]
             : [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
@@ -3159,7 +3193,12 @@ app.patch(
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
           transition.notification === 'external_request'
-            ? [transition.nextStatus, req.userEmail, externalRecipients, batchId]
+            ? [
+                transition.nextStatus,
+                req.userEmail,
+                externalRecipients,
+                batchId,
+              ]
             : [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
@@ -3679,7 +3718,9 @@ function isSpecialPtoWorkflow(entry) {
 }
 
 function isCurrentPtoReadyForLead(entry) {
-  return ['dev', 'qa'].includes(entry?.filer_role) && entry?.status === 'pending';
+  return (
+    ['dev', 'qa'].includes(entry?.filer_role) && entry?.status === 'pending'
+  );
 }
 
 function isCurrentPtoReadyForPm(entry, actorEmail) {
@@ -3690,7 +3731,9 @@ function isCurrentPtoReadyForPm(entry, actorEmail) {
     ['dev', 'qa'].includes(filer_role) && status === 'lead_approved';
   const leadReady = filer_role === 'lead' && status === 'pending';
   const pmReady =
-    filer_role === 'pm' && status === 'pending' && filerEmailKey !== actorEmailKey;
+    filer_role === 'pm' &&
+    status === 'pending' &&
+    filerEmailKey !== actorEmailKey;
   const tsReady = filer_role === 'ts' && status === 'pending';
   return devQaReady || leadReady || pmReady || tsReady;
 }
@@ -3734,7 +3777,9 @@ function getSpecialInternalApprovalTransition(entry, actor) {
   if (filer_role === 'qa') {
     if (status === 'pending') {
       if (actorRole !== 'lead')
-        return { error: 'special-team QA PTO requires same-team lead approval' };
+        return {
+          error: 'special-team QA PTO requires same-team lead approval',
+        };
       if (!hasStrictSameTeam(entry, actor?.team))
         return { error: 'filer is not in your team' };
       return {
@@ -3745,7 +3790,9 @@ function getSpecialInternalApprovalTransition(entry, actor) {
     }
     if (status === 'lead_approved') {
       if (actorRole !== 'pm')
-        return { error: 'special-team QA PTO requires same-team PM final approval' };
+        return {
+          error: 'special-team QA PTO requires same-team PM final approval',
+        };
       if (!hasStrictSameTeam(entry, actor?.team))
         return { error: 'filer is not in your team' };
       return {
@@ -3824,7 +3871,9 @@ function getExternalReceivedTransition(entry, actor) {
 
   if (filer_role === 'qa') {
     if (actorRole !== 'lead')
-      return { error: 'special-team QA PTO requires same-team lead confirmation' };
+      return {
+        error: 'special-team QA PTO requires same-team lead confirmation',
+      };
     if (!hasStrictSameTeam(entry, actor?.team))
       return { error: 'filer is not in your team' };
     return {
@@ -3835,7 +3884,9 @@ function getExternalReceivedTransition(entry, actor) {
 
   if (filer_role === 'lead') {
     if (actorRole !== 'pm')
-      return { error: 'special-team lead PTO requires same-team PM confirmation' };
+      return {
+        error: 'special-team lead PTO requires same-team PM confirmation',
+      };
     if (!hasStrictSameTeam(entry, actor?.team))
       return { error: 'filer is not in your team' };
     return {
@@ -3846,7 +3897,9 @@ function getExternalReceivedTransition(entry, actor) {
 
   if (filer_role === 'pm') {
     if (actorRole !== 'pm')
-      return { error: 'special-team PM PTO requires same-team PM confirmation' };
+      return {
+        error: 'special-team PM PTO requires same-team PM confirmation',
+      };
     if (filerEmailKey === actorEmailKey)
       return { error: 'PMs cannot action their own PTO' };
     if (!hasStrictSameTeam(entry, actor?.team))
@@ -4098,7 +4151,8 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const externalRecipients = SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
+      const externalRecipients =
+        SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
       let updatedRow;
       if (transition.approvalStage === 'lead') {
         const r = await pool.query(
@@ -4724,6 +4778,51 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
 });
 
 // ---------- Shared helper: compute per-user hours for a period ----------
+// ---------- Missing-hours auto-notify: period resolver ----------
+function resolveMissingHoursPeriod(period, todayYmd) {
+  const p = parseYmd(todayYmd);
+  if (!p) return null;
+
+  const todayUtc = Date.UTC(p.y, p.mo - 1, p.d);
+  const dow = new Date(todayUtc).getUTCDay(); // 0=Sun
+
+  if (period === 'prev_week') {
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const thisMonday = new Date(todayUtc + mondayOffset * 86400 * 1000);
+    const lastMonday = new Date(thisMonday.getTime() - 7 * 86400 * 1000);
+    const lastSunday = new Date(thisMonday.getTime() - 1 * 86400 * 1000);
+    return {
+      fromStr: lastMonday.toISOString().slice(0, 10),
+      toStr: lastSunday.toISOString().slice(0, 10),
+    };
+  }
+
+  if (period === 'prev_month') {
+    const firstOfThisMonth = Date.UTC(p.y, p.mo - 1, 1);
+    const lastOfPrevMonth = new Date(firstOfThisMonth - 86400 * 1000);
+    const firstOfPrevMonth = new Date(
+      Date.UTC(lastOfPrevMonth.getUTCFullYear(), lastOfPrevMonth.getUTCMonth(), 1),
+    );
+    return {
+      fromStr: firstOfPrevMonth.toISOString().slice(0, 10),
+      toStr: lastOfPrevMonth.toISOString().slice(0, 10),
+    };
+  }
+
+  if (period === 'this_week') {
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const thisMonday = new Date(todayUtc + mondayOffset * 86400 * 1000);
+    return {
+      fromStr: thisMonday.toISOString().slice(0, 10),
+      toStr: todayYmd,
+    };
+  }
+
+  // this_month (default)
+  const firstOfMonth = `${String(p.y).padStart(4, '0')}-${String(p.mo).padStart(2, '0')}-01`;
+  return { fromStr: firstOfMonth, toStr: todayYmd };
+}
+
 async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
   const wdR = await pool.query(
     `SELECT (COUNT(*) * 8)::float AS weekday_hours
@@ -5074,8 +5173,260 @@ app.post(
   },
 );
 
+// ---------- Missing hours notifications (automated / cron-callable) ----------
+app.post('/api/notifications/missing-hours-auto', async (req, res) => {
+  if (
+    !requireConfiguredApiKey(
+      req,
+      res,
+      MISSING_HOURS_NOTIFY_API_KEY,
+      'MISSING_HOURS_NOTIFY_API_KEY',
+    )
+  ) {
+    return;
+  }
+  if (!BREVO_API_KEY) {
+    return res
+      .status(503)
+      .json({ ok: false, error: 'BREVO_API_KEY not configured on server.' });
+  }
+  if (!NOTIFY_FROM_EMAIL) {
+    return res.status(503).json({
+      ok: false,
+      error: 'NOTIFY_FROM_EMAIL not configured on server.',
+    });
+  }
+
+  const {
+    period: periodRaw,
+    from: fromRaw,
+    to: toRaw,
+    threshold: thresholdRaw,
+    managerEmail: managerEmailRaw,
+    dry_run: dryRunRaw,
+  } = req.body || {};
+
+  const dryRun = dryRunRaw === true || dryRunRaw === 'true';
+  const threshold =
+    normNum(thresholdRaw) ?? MISSING_HOURS_THRESHOLD;
+  const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
+
+  if (!Number.isFinite(threshold) || threshold < 0)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'threshold must be a positive number' });
+
+  // Resolve date range: explicit from/to takes priority, then period, then default
+  let fromStr = validateDateStr(fromRaw);
+  let toStr = validateDateStr(toRaw);
+  const todayYmd = currentReportYmd();
+
+  const VALID_PERIODS = ['prev_week', 'prev_month', 'this_week', 'this_month'];
+  let resolvedPeriod = normText(periodRaw) || null;
+  if (resolvedPeriod && !VALID_PERIODS.includes(resolvedPeriod)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid period. Must be one of: ${VALID_PERIODS.join(', ')}`,
+    });
+  }
+
+  if (!fromStr || !toStr) {
+    const periodToUse = resolvedPeriod || 'this_month';
+    const range = resolveMissingHoursPeriod(periodToUse, todayYmd);
+    if (!range)
+      return res
+        .status(500)
+        .json({ ok: false, error: 'Could not resolve report period.' });
+    fromStr = range.fromStr;
+    toStr = range.toStr;
+    resolvedPeriod = periodToUse;
+  }
+
+  const offsetMin = getReportOffsetMinutes();
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+  if (!rng)
+    return res
+      .status(400)
+      .json({ ok: false, error: 'invalid from/to date' });
+
+  try {
+    const {
+      weekdayHours,
+      sharedOffHours,
+      requiredHours,
+      ptoByName,
+      loggedByName,
+      users,
+    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
+
+    const offenders = [];
+    for (const user of users) {
+      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
+      const ptoHours = ptoByName.get(nameKey) ?? 0;
+      const loggedHours = loggedByName.get(nameKey) ?? 0;
+      const missing = requiredHours - ptoHours - loggedHours;
+      if (missing > threshold) {
+        offenders.push({
+          email: user.email,
+          name: user.name || user.email,
+          weekdayHours,
+          sharedOffHours,
+          requiredHours,
+          ptoHours,
+          loggedHours,
+          missing,
+        });
+      }
+    }
+
+    if (offenders.length === 0 || dryRun) {
+      return res.json({
+        ok: true,
+        period: resolvedPeriod,
+        from: fromStr,
+        to: toStr,
+        threshold,
+        offenders: offenders.length,
+        sent: 0,
+        dry_run: dryRun,
+        ...(offenders.length === 0
+          ? {
+              message: `No users have missing hours above ${threshold}h for this period.`,
+            }
+          : {}),
+        ...(dryRun && offenders.length > 0
+          ? { preview: offenders.map((u) => ({ name: u.name, email: u.email, missing: u.missing })) }
+          : {}),
+      });
+    }
+
+    const transporter = createMailTransporter();
+    const fmtPeriodDate = (s) => {
+      const [y, m, d] = s.split('-');
+      return new Date(+y, +m - 1, +d).toLocaleDateString('en-US', {
+        month: 'long',
+        day: '2-digit',
+        year: 'numeric',
+      });
+    };
+    const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
+    let sent = 0;
+    const errors = [];
+
+    for (const u of offenders) {
+      const html = `
+      <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:520px;">
+        <p>Hi <strong>${escapeEmailHtml(u.name)}</strong>,</p>
+        <p>This is a reminder that you have
+           <strong style="color:#c8742b;">${fmtH(u.missing)} missing hours</strong>
+           for the period <strong>${escapeEmailHtml(period)}</strong>.</p>
+        <table border="1" cellpadding="8" cellspacing="0"
+               style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
+          <thead>
+            <tr style="background:#f0ebe0;">
+              <th>Workday Hrs</th><th>Team Off / Holiday</th>
+              <th>Your PTO</th><th>Logged</th><th>Missing</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="text-align:center;">
+              <td>${fmtH(u.weekdayHours)}</td>
+              <td>${fmtH(u.sharedOffHours)}</td>
+              <td>${fmtH(u.ptoHours)}</td>
+              <td>${fmtH(u.loggedHours)}</td>
+              <td style="color:#c8742b;font-weight:bold;">${fmtH(u.missing)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p><strong>Please log your hours in TFS at your earliest convenience.</strong></p>
+        <p>If there are approved exceptions, weekend deployment coverage, or manual adjustments that should be considered, please coordinate the necessary correction.</p>
+        <p>Thank you for your attention to this matter.</p>
+        <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
+      </div>`;
+      try {
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: u.email,
+          ...(managerEmail ? { cc: managerEmail } : {}),
+          subject: `Missing Hours Alert \u2013 ${period}`,
+          html,
+        });
+        sent++;
+      } catch (e) {
+        errors.push({ email: u.email, error: String(e?.message || e) });
+      }
+    }
+
+    // Manager digest
+    if (managerEmail) {
+      const tableRows = offenders
+        .map(
+          (u) => `
+      <tr>
+        <td>${escapeEmailHtml(u.name)}</td>
+        <td>${escapeEmailHtml(u.email)}</td>
+        <td style="text-align:center;">${fmtH(u.requiredHours)}</td>
+        <td style="text-align:center;">${fmtH(u.ptoHours)}</td>
+        <td style="text-align:center;">${fmtH(u.loggedHours)}</td>
+        <td style="text-align:center;color:#c8742b;font-weight:bold;">${fmtH(u.missing)}</td>
+      </tr>`,
+        )
+        .join('');
+      const digestHtml = `
+      <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
+        <p>Hi @all,</p>
+        <p>The following <strong>${offenders.length} team member(s)</strong> have <strong>more than
+           ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
+        <table border="1" cellpadding="8" cellspacing="0"
+               style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
+          <thead>
+            <tr style="background:#f0ebe0;">
+              <th>Name</th><th>Email</th><th>Required</th>
+              <th>PTO</th><th>Logged</th><th>Missing</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+        <p>Please review and confirm whether the missing hours need correction or require follow-up with the team member.</p>
+        <p>Thank you.</p>
+        <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report</p>
+      </div>`;
+      try {
+        await transporter.sendMail({
+          from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+          to: managerEmail,
+          subject: `Missing Hours Digest \u2013 ${period} \u2013 ${offenders.length} user(s)`,
+          html: digestHtml,
+        });
+      } catch (_) {
+        /* digest failure is non-critical */
+      }
+    }
+
+    res.json({
+      ok: true,
+      period: resolvedPeriod,
+      from: fromStr,
+      to: toStr,
+      threshold,
+      offenders: offenders.length,
+      sent,
+      dry_run: false,
+      ...(errors.length ? { errors } : {}),
+    });
+  } catch (e) {
+    console.error('AUTO NOTIFY ERROR:', e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- PTO overdue reminder / escalation ----------
-function getPendingPtoStageLabel(filerRole, status = 'pending', filerTeam = null) {
+function getPendingPtoStageLabel(
+  filerRole,
+  status = 'pending',
+  filerTeam = null,
+) {
   if (status === 'external_pending')
     return 'Awaiting external approval confirmation';
   if (filerRole === 'dev' || filerRole === 'qa')
@@ -5444,11 +5795,15 @@ app.get('/api/external/pto/:token', async (req, res) => {
   try {
     const token = normText(req.params.token);
     if (!token)
-      return res.status(404).json({ ok: false, error: 'invalid or expired link' });
+      return res
+        .status(404)
+        .json({ ok: false, error: 'invalid or expired link' });
 
     const ctx = await loadExternalPtoTokenContext(token);
     if (!ctx)
-      return res.status(410).json({ ok: false, error: 'invalid or expired link' });
+      return res
+        .status(410)
+        .json({ ok: false, error: 'invalid or expired link' });
 
     res.json({
       ok: true,
