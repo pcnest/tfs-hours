@@ -1,0 +1,47 @@
+name: PTO Overdue Reminders
+
+on:
+  schedule:
+    # Every day at 10:00 PM UTC
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+jobs:
+  send-reminders:
+    name: Send PTO Overdue Reminders
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call PTO overdue reminder endpoint
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          PTO_REMINDER_API_KEY: ${{ secrets.PTO_REMINDER_API_KEY }}
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${APP_URL}/api/pto/overdue-reminders" \
+            -H "x-api-key: ${PTO_REMINDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --max-time 60)
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "Response: $HTTP_BODY"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Endpoint returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          OK=$(echo "$HTTP_BODY" | jq -r '.ok')
+          if [ "$OK" != "true" ]; then
+            echo "::error::Reminder endpoint returned failure"
+            echo "$HTTP_BODY" | jq .
+            exit 1
+          fi
+
+          echo "$HTTP_BODY" | jq -r '"PTO overdue reminder run complete. todayYmd=\(.todayYmd); scanned=\(.scannedRequests); remindersSent=\(.remindersSent); escalationsSent=\(.escalationsSent); skipped=\(.skipped)"'
+
+          ERRORS=$(echo "$HTTP_BODY" | jq -r '.errors // empty')
+          if [ -n "$ERRORS" ]; then
+            echo "::warning::$ERRORS"
+          fi
