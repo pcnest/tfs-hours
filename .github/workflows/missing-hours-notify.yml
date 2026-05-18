@@ -2,8 +2,8 @@ name: Missing Hours Notifications
 
 on:
   schedule:
-    # Every Wednesday at 9:00 AM UTC
-    - cron: '0 9 * * 3'
+    # Every Wednesday at 9:00 PM UTC
+    - cron: '0 21 * * 3'
   workflow_dispatch:
     inputs:
       period:
