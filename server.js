@@ -1116,13 +1116,7 @@ app.get('/api/hours/latest', requireAuth, async (req, res) => {
 
 app.get('/api/hours/meta', requireAuth, async (req, res) => {
   try {
-    const r = await pool.query(
-      `SELECT run_at
-       FROM public.tfs_hours_runs
-       ORDER BY run_at DESC, run_id DESC
-       LIMIT 1`,
-    );
-    res.json({ ok: true, lastSyncAt: r.rows[0]?.run_at ?? null });
+    res.json({ ok: true, lastSyncAt: await fetchLastSyncAt() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
@@ -1735,6 +1729,51 @@ function fmtReportYmdFromTimestamp(value) {
   }
   const shifted = new Date(d.getTime() + getReportOffsetMinutes() * 60000);
   return shifted.toISOString().slice(0, 10);
+}
+
+function fmtReportDateTimeFromTimestamp(value) {
+  const d = value instanceof Date ? value : new Date(value || '');
+  if (isNaN(d)) return '';
+  const timeZone = getReportTimeZone();
+  let formatted;
+  if (timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const map = {};
+    for (const p of parts) {
+      if (p.type !== 'literal') map[p.type] = p.value;
+    }
+    formatted = `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
+  } else {
+    const shifted = new Date(d.getTime() + getReportOffsetMinutes() * 60000);
+    formatted = shifted.toISOString().replace('T', ' ').slice(0, 16);
+  }
+  return `${formatted} ${REPORT_TZ_LABEL || 'UTC'}`;
+}
+
+async function fetchLastSyncAt() {
+  const r = await pool.query(
+    `SELECT run_at
+     FROM public.tfs_hours_runs
+     ORDER BY run_at DESC, run_id DESC
+     LIMIT 1`,
+  );
+  return r.rows[0]?.run_at ?? null;
+}
+
+function buildLastSyncEmailSuffix(lastSyncAt) {
+  const formatted = fmtReportDateTimeFromTimestamp(lastSyncAt);
+  return formatted
+    ? `, based on <strong>Last sync: ${escapeEmailHtml(formatted)}</strong>`
+    : '';
 }
 
 function sanitizeFilenamePart(value, fallback) {
@@ -5071,6 +5110,7 @@ app.post(
         });
       };
       const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
+      const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
       let sent = 0;
       const errors = [];
 
@@ -5080,7 +5120,7 @@ app.post(
           <p>Hi <strong>${escapeEmailHtml(u.name)}</strong>,</p>
           <p>This is a reminder that you have
              <strong style="color:#c8742b;">${fmtH(u.missing)} missing hours</strong>
-             for the period <strong>${escapeEmailHtml(period)}</strong>.</p>
+             for the period <strong>${escapeEmailHtml(period)}</strong>${lastSyncSuffix}.</p>
           <table border="1" cellpadding="8" cellspacing="0"
                  style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
             <thead>
@@ -5137,7 +5177,7 @@ app.post(
         <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
           <p>Hi @all,</p>
           <p>The following <strong>${offenders.length} team member(s)</strong> have <strong>more than
-             ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
+             ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>${lastSyncSuffix}:</p>
           <table border="1" cellpadding="8" cellspacing="0"
                  style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
             <thead>
@@ -5315,6 +5355,7 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
       });
     };
     const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
+    const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
     let sent = 0;
     const errors = [];
 
@@ -5324,7 +5365,7 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         <p>Hi <strong>${escapeEmailHtml(u.name)}</strong>,</p>
         <p>This is a reminder that you have
            <strong style="color:#c8742b;">${fmtH(u.missing)} missing hours</strong>
-           for the period <strong>${escapeEmailHtml(period)}</strong>.</p>
+           for the period <strong>${escapeEmailHtml(period)}</strong>${lastSyncSuffix}.</p>
         <table border="1" cellpadding="8" cellspacing="0"
                style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
           <thead>
@@ -5381,7 +5422,7 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
       <div style="font-family:sans-serif;font-size:14px;color:#1f2b2c;max-width:700px;">
         <p>Hi @all,</p>
         <p>The following <strong>${offenders.length} team member(s)</strong> have <strong>more than
-           ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>:</p>
+           ${fmtWorkingDaysFromHours(threshold)} working days of missing hours</strong> based on the logged hours for the period <strong>${escapeEmailHtml(period)}</strong>${lastSyncSuffix}:</p>
         <table border="1" cellpadding="8" cellspacing="0"
                style="border-collapse:collapse;font-size:13px;width:100%;margin:12px 0;">
           <thead>
