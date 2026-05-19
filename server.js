@@ -4681,13 +4681,7 @@ function generatePtoPdf({
     function fmtSubmitted(s) {
       const d = new Date(s);
       if (isNaN(d)) return String(s);
-      return (
-        d.toLocaleDateString('en-US', {
-          month: 'long',
-          day: 'numeric',
-          year: 'numeric',
-        }) + ` (${REPORT_TZ_LABEL})`
-      );
+      return `${fmtReportCalendarDateFromTimestamp(d)} (${REPORT_TZ_LABEL || 'UTC'})`;
     }
 
     // --- Days / hours calculation ---
