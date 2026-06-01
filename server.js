@@ -4583,7 +4583,7 @@ async function sendSpecialExternalApprovalRequestEmail(
 
   for (const tokenRecord of tokenRecords) {
     const greetingHtml = tokenRecord.name
-      ? `Hi ${escapeEmailHtml(tokenRecord.name)},`
+      ? `Hi <strong>${escapeEmailHtml(tokenRecord.name)}</strong>,`
       : 'Hi,';
     const greetingText = tokenRecord.name ? `Hi ${tokenRecord.name},` : 'Hi,';
     const replyMeta = ptoReplyEmailMeta(
@@ -4598,7 +4598,7 @@ async function sendSpecialExternalApprovalRequestEmail(
       cc: mergeCC(NOTIFY_CC_EMAIL),
       subject: replyMeta.subject,
       html: `<p>${greetingHtml}</p>
-<p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
+<p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs your approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
   <strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>
@@ -4609,11 +4609,11 @@ async function sendSpecialExternalApprovalRequestEmail(
 </p>
 <p>
   <a href="${escapeEmailHtml(tokenRecord.links.approve)}" style="display:inline-block;padding:9px 14px;background:#1f7a6b;color:#ffffff;text-decoration:none;border-radius:4px;margin-right:8px;">Approve</a>
-  <a href="${escapeEmailHtml(tokenRecord.links.deny)}" style="display:inline-block;padding:9px 14px;background:#c8742b;color:#ffffff;text-decoration:none;border-radius:4px;">Deny</a>
+  <a href="${escapeEmailHtml(tokenRecord.links.deny)}" style="display:inline-block;padding:9px 14px;background:#D0202D;color:#ffffff;text-decoration:none;border-radius:4px;">Deny</a>
 </p>
 <p>If the buttons do not open, use this link: <a href="${escapeEmailHtml(tokenRecord.links.page)}">${escapeEmailHtml(tokenRecord.links.page)}</a></p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-      text: `${greetingText}\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+      text: `${greetingText}\n\nThe PTO request for ${displayName} has completed internal review and now needs your approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
       headers: replyMeta.headers,
     });
   }
@@ -4668,12 +4668,21 @@ ${decisionDetails.html}
   });
 }
 
-async function sendPtoFinalApprovalEmail(entry, rows, actorLabel, options = {}) {
+async function sendPtoFinalApprovalEmail(
+  entry,
+  rows,
+  actorLabel,
+  options = {},
+) {
   const transporter = createMailTransporter();
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const replyMeta = ptoReplyEmailMeta(entry, dateLabel, 'PTO final approval email');
+  const replyMeta = ptoReplyEmailMeta(
+    entry,
+    dateLabel,
+    'PTO final approval email',
+  );
   const totalDays = rows.length;
   const decisionDetails = options.externalActorEmail
     ? buildExternalDecisionEmailDetails(
@@ -4760,7 +4769,11 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const replyMeta = ptoReplyEmailMeta(entry, dateLabel, 'PTO external denial email');
+  const replyMeta = ptoReplyEmailMeta(
+    entry,
+    dateLabel,
+    'PTO external denial email',
+  );
   const approverEmails = await getApproverEmails(
     entry.filer_role,
     entry.filer_team,
@@ -5024,15 +5037,10 @@ async function processExternalPtoDecision(req, res, action) {
             },
           );
         } else if (notification === 'final_approved') {
-          await sendPtoFinalApprovalEmail(
-            entry,
-            rows,
-            externalApproverLabel,
-            {
-              externalActorEmail: externalApproverLabel,
-              externalDecisionNote: note,
-            },
-          );
+          await sendPtoFinalApprovalEmail(entry, rows, externalApproverLabel, {
+            externalActorEmail: externalApproverLabel,
+            externalDecisionNote: note,
+          });
         } else if (notification === 'denied') {
           await sendPtoExternalDenialEmail(
             entry,
@@ -5283,7 +5291,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               // Use the stored root Message-ID so later approval/denial emails can reply-thread.
               // (Brevo rewrites Message-Id on delivery, but Thread-Topic/Thread-Index are preserved.)
               const generatedMsgId =
-                savedRow.email_message_id || ptoRootMessageId || makePtoMessageId();
+                savedRow.email_message_id ||
+                ptoRootMessageId ||
+                makePtoMessageId();
               const generatedUuid =
                 ptoRootThreadUuid ||
                 String(generatedMsgId).match(
