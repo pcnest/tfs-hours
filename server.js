@@ -49,8 +49,6 @@ const SPECIAL_PTO_WORKFLOW_TEAM_KEY = SPECIAL_PTO_WORKFLOW_TEAM.toLowerCase();
 const SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS = parseEmailContacts(
   process.env.SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS || '',
 );
-const SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS =
-  SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.map((contact) => contact.email);
 const EXTERNAL_PTO_TOKEN_TTL_DAYS = Math.max(
   1,
   Number(process.env.EXTERNAL_PTO_TOKEN_TTL_DAYS || '14') || 14,
@@ -309,6 +307,12 @@ function normText(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   return s ? s : null;
+}
+
+function makeHttpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 function chunkArray(arr, size) {
@@ -4541,16 +4545,25 @@ function getExternalApproverDisplayName(email) {
   return contact?.name || 'external approver';
 }
 
-async function createExternalApprovalTokens(entry, baseUrl) {
+function hasSpecialPtoExternalApprovers() {
+  return SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.length > 0;
+}
+
+function hasExternalPtoEmailDelivery() {
+  return !!(BREVO_API_KEY && NOTIFY_FROM_EMAIL);
+}
+
+async function createExternalApprovalTokens(entry, baseUrl, client = pool) {
   const contacts = SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS;
   if (!contacts.length) return [];
+  const db = client || pool;
 
   const requestKey = externalPtoRequestKey(entry);
   const expiresAt = new Date(
     Date.now() + EXTERNAL_PTO_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
   );
 
-  await pool.query(
+  await db.query(
     `UPDATE public.pto_external_approval_tokens
      SET revoked_at = NOW()
      WHERE request_key = $1
@@ -4563,7 +4576,7 @@ async function createExternalApprovalTokens(entry, baseUrl) {
   for (const contact of contacts) {
     const token = makeExternalPtoToken();
     const tokenHash = hashExternalPtoToken(token);
-    await pool.query(
+    await db.query(
       `INSERT INTO public.pto_external_approval_tokens
          (token_hash, request_key, pto_entry_id, batch_id, recipient_email, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -4590,10 +4603,15 @@ async function sendSpecialExternalApprovalRequestEmail(
   entry,
   rows,
   actorLabel,
-  baseUrl,
+  tokenRecords,
 ) {
-  const tokenRecords = await createExternalApprovalTokens(entry, baseUrl);
-  if (!tokenRecords.length) return;
+  if (!Array.isArray(tokenRecords) || !tokenRecords.length) {
+    console.warn('PTO external approval request email skipped: no tokens', {
+      ptoEntryId: entry?.id || null,
+      batchId: entry?.batch_id || null,
+    });
+    return;
+  }
 
   const transporter = createMailTransporter();
   const dateLabel = ptoRowsDateRange(rows);
@@ -5441,55 +5459,96 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const externalRecipients =
-        SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
+      const isExternalRequest =
+        transition.notification === 'external_request';
+      if (isExternalRequest && !hasSpecialPtoExternalApprovers()) {
+        return res.status(503).json({
+          ok: false,
+          error: 'special PTO external approver email is not configured',
+        });
+      }
+      if (isExternalRequest && !hasExternalPtoEmailDelivery()) {
+        return res.status(503).json({
+          ok: false,
+          error: 'PTO external approval email delivery is not configured',
+        });
+      }
+      let externalTokenRecords = [];
       let updatedRows;
-      if (transition.approvalStage === 'lead') {
-        const r = await pool.query(
-          transition.notification === 'external_request'
-            ? `UPDATE public.pto_entries
+      if (isExternalRequest) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          externalTokenRecords = await createExternalApprovalTokens(
+            entry,
+            getRequestBaseUrl(req),
+            client,
+          );
+          if (!externalTokenRecords.length)
+            throw makeHttpError(
+              503,
+              'special PTO external approver email is not configured',
+            );
+          const externalRecipients = externalTokenRecords
+            .map((tokenRecord) => tokenRecord.email)
+            .join(', ');
+          const r = await client.query(
+            transition.approvalStage === 'lead'
+              ? `UPDATE public.pto_entries
            SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW(),
                external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
-           WHERE batch_id = $4
+           WHERE batch_id = $4 AND status = $5
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`
-            : `UPDATE public.pto_entries
+              : `UPDATE public.pto_entries
+           SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
+               external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+           WHERE batch_id = $4 AND status = $5
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                     status, filer_role, filer_team, email_message_id, batch_id`,
+            [
+              transition.nextStatus,
+              req.userEmail,
+              externalRecipients,
+              batchId,
+              entry.status,
+            ],
+          );
+          if (r.rows.length !== batchRes.rows.length)
+            throw makeHttpError(
+              409,
+              'batch is no longer in an approvable state',
+            );
+          updatedRows = r.rows;
+          await client.query('COMMIT');
+        } catch (txErr) {
+          try {
+            await client.query('ROLLBACK');
+          } catch (rollbackErr) {
+            console.error('PTO batch approval rollback error:', rollbackErr);
+          }
+          throw txErr;
+        } finally {
+          client.release();
+        }
+      } else if (transition.approvalStage === 'lead') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
            SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW()
            WHERE batch_id = $3
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
-          transition.notification === 'external_request'
-            ? [
-                transition.nextStatus,
-                req.userEmail,
-                externalRecipients,
-                batchId,
-              ]
-            : [transition.nextStatus, req.userEmail, batchId],
+          [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
       } else {
         const r = await pool.query(
-          transition.notification === 'external_request'
-            ? `UPDATE public.pto_entries
-           SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
-               external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
-           WHERE batch_id = $4
-           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                     status, filer_role, filer_team, email_message_id, batch_id`
-            : `UPDATE public.pto_entries
+          `UPDATE public.pto_entries
            SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW()
            WHERE batch_id = $3
            RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                      status, filer_role, filer_team, email_message_id, batch_id`,
-          transition.notification === 'external_request'
-            ? [
-                transition.nextStatus,
-                req.userEmail,
-                externalRecipients,
-                batchId,
-              ]
-            : [transition.nextStatus, req.userEmail, batchId],
+          [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
       }
@@ -5530,7 +5589,7 @@ app.patch(
                 entry,
                 batchRes.rows,
                 req.userName || req.userEmail,
-                getRequestBaseUrl(req),
+                externalTokenRecords,
               );
             } else if (transition.notification === 'lead_approved') {
               const pmEmails = await getApproverEmails('lead', null, null);
@@ -5630,7 +5689,9 @@ ${leadApprovalDetails.html}
 
       res.json({ ok: true, rows: updatedRows });
     } catch (e) {
-      res.status(500).json({ ok: false, error: String(e?.message || e) });
+      res
+        .status(e?.status || 500)
+        .json({ ok: false, error: String(e?.message || e) });
     }
   },
 );
@@ -6221,6 +6282,8 @@ function canDenyPto(entry, actorRole, actorEmail, actorTeam) {
     return canApprovePto(entry, actorRole, actorEmail, actorTeam);
 
   if (entry?.status === 'external_pending') {
+    if (!PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE)
+      return 'entry is awaiting external approver decision';
     const transition = getExternalReceivedTransition(entry, actor);
     return transition.error || null;
   }
@@ -6444,46 +6507,97 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const externalRecipients =
-        SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS.join(', ');
+      const isExternalRequest =
+        transition.notification === 'external_request';
+      if (isExternalRequest && !hasSpecialPtoExternalApprovers()) {
+        return res.status(503).json({
+          ok: false,
+          error: 'special PTO external approver email is not configured',
+        });
+      }
+      if (isExternalRequest && !hasExternalPtoEmailDelivery()) {
+        return res.status(503).json({
+          ok: false,
+          error: 'PTO external approval email delivery is not configured',
+        });
+      }
+      let externalTokenRecords = [];
       let updatedRow;
-      if (transition.approvalStage === 'lead') {
-        const r = await pool.query(
-          transition.notification === 'external_request'
-            ? `UPDATE public.pto_entries
+      if (isExternalRequest) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          externalTokenRecords = await createExternalApprovalTokens(
+            entry,
+            getRequestBaseUrl(req),
+            client,
+          );
+          if (!externalTokenRecords.length)
+            throw makeHttpError(
+              503,
+              'special PTO external approver email is not configured',
+            );
+          const externalRecipients = externalTokenRecords
+            .map((tokenRecord) => tokenRecord.email)
+            .join(', ');
+          const r = await client.query(
+            transition.approvalStage === 'lead'
+              ? `UPDATE public.pto_entries
          SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW(),
              external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
-         WHERE id = $4
+         WHERE id = $4 AND status = $5
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, filer_team, email_message_id`
-            : `UPDATE public.pto_entries
+              : `UPDATE public.pto_entries
+         SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
+             external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
+         WHERE id = $4 AND status = $5
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id`,
+            [
+              transition.nextStatus,
+              req.userEmail,
+              externalRecipients,
+              id,
+              entry.status,
+            ],
+          );
+          if (!r.rows[0])
+            throw makeHttpError(
+              409,
+              'entry is no longer in an approvable state',
+            );
+          updatedRow = r.rows[0];
+          await client.query('COMMIT');
+        } catch (txErr) {
+          try {
+            await client.query('ROLLBACK');
+          } catch (rollbackErr) {
+            console.error('PTO approval rollback error:', rollbackErr);
+          }
+          throw txErr;
+        } finally {
+          client.release();
+        }
+      } else if (transition.approvalStage === 'lead') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
          SET status = $1, approved_by_lead = $2, lead_actioned_at = NOW()
          WHERE id = $3
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, filer_team, email_message_id`,
-          transition.notification === 'external_request'
-            ? [transition.nextStatus, req.userEmail, externalRecipients, id]
-            : [transition.nextStatus, req.userEmail, id],
+          [transition.nextStatus, req.userEmail, id],
         );
         updatedRow = r.rows[0];
       } else {
         // PM final approval
         const r = await pool.query(
-          transition.notification === 'external_request'
-            ? `UPDATE public.pto_entries
-         SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW(),
-             external_requested_at = NOW(), external_requested_by = $2, external_request_recipients = $3
-         WHERE id = $4
-         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
-                   status, filer_role, filer_team, email_message_id`
-            : `UPDATE public.pto_entries
+          `UPDATE public.pto_entries
          SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW()
          WHERE id = $3
          RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
                    status, filer_role, filer_team, email_message_id`,
-          transition.notification === 'external_request'
-            ? [transition.nextStatus, req.userEmail, externalRecipients, id]
-            : [transition.nextStatus, req.userEmail, id],
+          [transition.nextStatus, req.userEmail, id],
         );
         updatedRow = r.rows[0];
       }
@@ -6521,7 +6635,7 @@ app.patch(
                 entry,
                 [entry],
                 req.userName || req.userEmail,
-                getRequestBaseUrl(req),
+                externalTokenRecords,
               );
             } else if (transition.notification === 'lead_approved') {
               // Notify all PMs + filer
@@ -6620,7 +6734,9 @@ app.patch(
 
       res.json({ ok: true, row: updatedRow });
     } catch (e) {
-      res.status(500).json({ ok: false, error: String(e?.message || e) });
+      res
+        .status(e?.status || 500)
+        .json({ ok: false, error: String(e?.message || e) });
     }
   },
 );
