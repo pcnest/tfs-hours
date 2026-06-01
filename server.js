@@ -46,12 +46,11 @@ const SPECIAL_PTO_WORKFLOW_TEAM = (
   process.env.SPECIAL_PTO_WORKFLOW_TEAM || ''
 ).trim();
 const SPECIAL_PTO_WORKFLOW_TEAM_KEY = SPECIAL_PTO_WORKFLOW_TEAM.toLowerCase();
-const SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS = (
-  process.env.SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS || ''
-)
-  .split(',')
-  .map((e) => e.trim())
-  .filter((e) => e.includes('@'));
+const SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS = parseEmailContacts(
+  process.env.SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS || '',
+);
+const SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS =
+  SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.map((contact) => contact.email);
 const EXTERNAL_PTO_TOKEN_TTL_DAYS = Math.max(
   1,
   Number(process.env.EXTERNAL_PTO_TOKEN_TTL_DAYS || '14') || 14,
@@ -92,6 +91,23 @@ function parseEmailList(str) {
       return e ? { email: e } : null;
     })
     .filter(Boolean);
+}
+
+function parseEmailContacts(str) {
+  const seen = new Set();
+  const contacts = [];
+  for (const contact of parseEmailList(str)) {
+    const email = String(contact?.email || '').trim();
+    if (!email.includes('@')) continue;
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    contacts.push({
+      email,
+      name: String(contact?.name || '').trim(),
+    });
+  }
+  return contacts;
 }
 
 function createMailTransporter() {
@@ -4498,9 +4514,17 @@ function buildExternalDecisionEmailDetails(actorLabel, note) {
   };
 }
 
+function getExternalApproverDisplayName(email) {
+  const emailKey = normIdentity(email);
+  const contact = SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.find(
+    (item) => normIdentity(item.email) === emailKey,
+  );
+  return contact?.name || email || '';
+}
+
 async function createExternalApprovalTokens(entry, baseUrl) {
-  const toList = dedupeEmails(SPECIAL_PTO_EXTERNAL_APPROVER_EMAILS);
-  if (!toList.length) return [];
+  const contacts = SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS;
+  if (!contacts.length) return [];
 
   const requestKey = externalPtoRequestKey(entry);
   const expiresAt = new Date(
@@ -4517,7 +4541,7 @@ async function createExternalApprovalTokens(entry, baseUrl) {
   );
 
   const created = [];
-  for (const email of toList) {
+  for (const contact of contacts) {
     const token = makeExternalPtoToken();
     const tokenHash = hashExternalPtoToken(token);
     await pool.query(
@@ -4529,12 +4553,13 @@ async function createExternalApprovalTokens(entry, baseUrl) {
         requestKey,
         entry.id || null,
         entry.batch_id || null,
-        email,
+        contact.email,
         expiresAt.toISOString(),
       ],
     );
     created.push({
-      email,
+      email: contact.email,
+      name: contact.name,
       token,
       links: externalPtoActionLinks(baseUrl, token),
     });
@@ -4557,6 +4582,10 @@ async function sendSpecialExternalApprovalRequestEmail(
   const totalHours = ptoRowsTotalHours(rows);
 
   for (const tokenRecord of tokenRecords) {
+    const greetingHtml = tokenRecord.name
+      ? `Hi ${escapeEmailHtml(tokenRecord.name)},`
+      : 'Hi,';
+    const greetingText = tokenRecord.name ? `Hi ${tokenRecord.name},` : 'Hi,';
     const replyMeta = ptoReplyEmailMeta(
       entry,
       dateLabel,
@@ -4568,7 +4597,7 @@ async function sendSpecialExternalApprovalRequestEmail(
       to: tokenRecord.email,
       cc: mergeCC(NOTIFY_CC_EMAIL),
       subject: replyMeta.subject,
-      html: `<p>Hi @Team,</p>
+      html: `<p>${greetingHtml}</p>
 <p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
   <strong>Leave Date:</strong> ${escapeEmailHtml(dateLabel)}<br>
@@ -4584,7 +4613,7 @@ async function sendSpecialExternalApprovalRequestEmail(
 </p>
 <p>If the buttons do not open, use this link: <a href="${escapeEmailHtml(tokenRecord.links.page)}">${escapeEmailHtml(tokenRecord.links.page)}</a></p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-      text: `Hi @Team,\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+      text: `${greetingText}\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
       headers: replyMeta.headers,
     });
   }
@@ -4982,13 +5011,16 @@ async function processExternalPtoDecision(req, res, action) {
   if (BREVO_API_KEY && NOTIFY_FROM_EMAIL && notification) {
     (async () => {
       try {
+        const externalApproverLabel = getExternalApproverDisplayName(
+          tokenRow.recipient_email,
+        );
         if (notification === 'lead_approved') {
           await sendSpecialExternalReceivedLeadApprovedEmail(
             entry,
             rows,
-            tokenRow.recipient_email,
+            externalApproverLabel,
             {
-              externalActorEmail: tokenRow.recipient_email,
+              externalActorEmail: externalApproverLabel,
               externalDecisionNote: note,
             },
           );
@@ -4996,9 +5028,9 @@ async function processExternalPtoDecision(req, res, action) {
           await sendPtoFinalApprovalEmail(
             entry,
             rows,
-            tokenRow.recipient_email,
+            externalApproverLabel,
             {
-              externalActorEmail: tokenRow.recipient_email,
+              externalActorEmail: externalApproverLabel,
               externalDecisionNote: note,
             },
           );
@@ -5006,7 +5038,7 @@ async function processExternalPtoDecision(req, res, action) {
           await sendPtoExternalDenialEmail(
             entry,
             rows,
-            tokenRow.recipient_email,
+            externalApproverLabel,
             note,
           );
         }
