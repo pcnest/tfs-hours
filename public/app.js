@@ -1599,6 +1599,7 @@ async function ptoAction(id, batchId, action) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       alert(`Error: ${j.error || r.status}`);
+      await loadPtoEntries();
       return;
     }
     await loadPtoEntries();

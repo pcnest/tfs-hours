@@ -6081,7 +6081,9 @@ function getExternalReceivedTransition(entry, actor) {
   if (!isSpecialPtoWorkflow(entry))
     return { error: 'entry is not in the special PTO workflow' };
   if (status !== 'external_pending')
-    return { error: 'entry is not awaiting external approval confirmation' };
+    return {
+      error: `entry is not awaiting external approval confirmation (current status: ${status || 'unknown'})`,
+    };
 
   if (filer_role === 'qa') {
     if (actorRole !== 'lead')
