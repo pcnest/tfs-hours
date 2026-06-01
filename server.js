@@ -97,11 +97,25 @@ function parseEmailList(str) {
 function createMailTransporter() {
   return {
     sendMail: async (opts) => {
-      const { from, to, cc, subject, html, text, headers, attachments } = opts;
+      const {
+        from,
+        to,
+        cc,
+        subject,
+        html,
+        text,
+        headers,
+        attachments,
+        messageId,
+      } = opts;
       const senderList = parseEmailList(from);
       const sender = senderList[0] || {
         email: NOTIFY_FROM_EMAIL,
         name: NOTIFY_FROM_NAME,
+      };
+      const outgoingHeaders = {
+        ...(headers && typeof headers === 'object' ? headers : {}),
+        ...(messageId ? { 'Message-ID': messageId } : {}),
       };
       const body = {
         sender,
@@ -110,7 +124,9 @@ function createMailTransporter() {
         ...(html ? { htmlContent: html } : {}),
         ...(text ? { textContent: text } : {}),
         ...(cc ? { cc: parseEmailList(cc) } : {}),
-        ...(headers && Object.keys(headers).length ? { headers } : {}),
+        ...(Object.keys(outgoingHeaders).length
+          ? { headers: outgoingHeaders }
+          : {}),
         ...(attachments?.length
           ? {
               attachment: attachments.map((a) => ({
@@ -4437,11 +4453,49 @@ function ptoThreadTopic(entry, dateLabel) {
   return `LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateLabel}`;
 }
 
+function makePtoMessageId() {
+  return `<${crypto.randomUUID()}@tfs-hours>`;
+}
+
 function ptoReplyHeaders(entry, dateLabel) {
   return buildPtoThreadHeaders(
     entry.email_message_id,
     ptoThreadTopic(entry, dateLabel),
   );
+}
+
+function ptoReplyEmailMeta(entry, dateLabel, contextLabel = 'PTO reply email') {
+  const threadTopic = ptoThreadTopic(entry, dateLabel);
+  const rootMessageId = entry?.email_message_id || '';
+  const headers = rootMessageId
+    ? buildPtoThreadHeaders(rootMessageId, threadTopic)
+    : { 'Thread-Topic': threadTopic };
+
+  if (!rootMessageId) {
+    console.warn(
+      `${contextLabel}: missing pto_entries.email_message_id; sending unthreaded email`,
+      {
+        ptoEntryId: entry?.id || null,
+        batchId: entry?.batch_id || null,
+        userUpn: entry?.user_upn || null,
+      },
+    );
+  }
+
+  return {
+    messageId: makePtoMessageId(),
+    subject: `Re: ${threadTopic}`,
+    headers,
+  };
+}
+
+function buildExternalDecisionEmailDetails(actorLabel, note) {
+  const cleanActor = actorLabel || 'external approver';
+  const cleanNote = note || '';
+  return {
+    html: `<p><strong>External Approver:</strong> ${escapeEmailHtml(cleanActor)}${cleanNote ? `<br><strong>External Note:</strong> ${escapeEmailHtml(cleanNote)}` : ''}</p>`,
+    text: `\nExternal Approver: ${cleanActor}${cleanNote ? `\nExternal Note: ${cleanNote}` : ''}`,
+  };
 }
 
 async function createExternalApprovalTokens(entry, baseUrl) {
@@ -4501,14 +4555,19 @@ async function sendSpecialExternalApprovalRequestEmail(
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const headers = ptoReplyHeaders(entry, dateLabel);
 
   for (const tokenRecord of tokenRecords) {
+    const replyMeta = ptoReplyEmailMeta(
+      entry,
+      dateLabel,
+      'PTO external approval request email',
+    );
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      messageId: replyMeta.messageId,
       to: tokenRecord.email,
       cc: mergeCC(NOTIFY_CC_EMAIL),
-      subject: `External PTO Approval Request \u2013 ${displayName} \u2013 ${entry.leave_type} Leave on ${dateLabel}`,
+      subject: replyMeta.subject,
       html: `<p>Hi @Team,</p>
 <p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
 <p style="font-family:sans-serif;font-size:13px;line-height:1.8">
@@ -4526,7 +4585,7 @@ async function sendSpecialExternalApprovalRequestEmail(
 <p>If the buttons do not open, use this link: <a href="${escapeEmailHtml(tokenRecord.links.page)}">${escapeEmailHtml(tokenRecord.links.page)}</a></p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
       text: `Hi @Team,\n\nThe PTO request for ${displayName} has completed internal review and now needs external approval.\n\nLeave Date: ${dateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nInternal Reviewer: ${actorLabel || ''}\nReason for Leave: ${entry.notes || '-'}\n\nApprove: ${tokenRecord.links.approve}\nDeny: ${tokenRecord.links.deny}\nReview: ${tokenRecord.links.page}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
-      headers,
+      headers: replyMeta.headers,
     });
   }
 }
@@ -4535,6 +4594,7 @@ async function sendSpecialExternalReceivedLeadApprovedEmail(
   entry,
   rows,
   actorLabel,
+  options = {},
 ) {
   const pmEmails = await getApproverEmails('lead', entry.filer_team, null);
   const toList = dedupeEmails(pmEmails);
@@ -4544,30 +4604,53 @@ async function sendSpecialExternalReceivedLeadApprovedEmail(
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const headers = ptoReplyHeaders(entry, dateLabel);
+  const replyMeta = ptoReplyEmailMeta(
+    entry,
+    dateLabel,
+    'PTO external approval received email',
+  );
+  const isExternalDecision = !!options.externalActorEmail;
+  const actor = options.externalActorEmail || actorLabel || '';
+  const decisionDetails = isExternalDecision
+    ? buildExternalDecisionEmailDetails(actor, options.externalDecisionNote)
+    : { html: '', text: '' };
+  const actionText = isExternalDecision
+    ? `has been approved by external approver <strong>${escapeEmailHtml(actor)}</strong>`
+    : `has been marked received by <strong>${escapeEmailHtml(actor)}</strong>`;
+  const actionPlain = isExternalDecision
+    ? `has been approved by external approver ${actor}`
+    : `has been marked received by ${actor}`;
 
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    messageId: replyMeta.messageId,
     to: toList.join(', '),
     cc: mergeCC(NOTIFY_CC_EMAIL),
-    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    subject: replyMeta.subject,
     html: `<p>Hi @Team,</p>
-<p>External approval for <strong>${escapeEmailHtml(displayName)}</strong>'s PTO request on <strong>${escapeEmailHtml(dateLabel)}</strong> has been marked received by <strong>${escapeEmailHtml(actorLabel || '')}</strong>.</p>
+<p>External approval for <strong>${escapeEmailHtml(displayName)}</strong>'s PTO request on <strong>${escapeEmailHtml(dateLabel)}</strong> ${actionText}.</p>
+${decisionDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>This request is ready for same-team PM final approval.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-    text: `External approval for ${displayName}'s PTO request on ${dateLabel} has been marked received by ${actorLabel || ''}.\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nThis request is ready for same-team PM final approval.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
-    headers,
+    text: `External approval for ${displayName}'s PTO request on ${dateLabel} ${actionPlain}.${decisionDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}\nThis request is ready for same-team PM final approval.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    headers: replyMeta.headers,
   });
 }
 
-async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
+async function sendPtoFinalApprovalEmail(entry, rows, actorLabel, options = {}) {
   const transporter = createMailTransporter();
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const headers = ptoReplyHeaders(entry, dateLabel);
+  const replyMeta = ptoReplyEmailMeta(entry, dateLabel, 'PTO final approval email');
   const totalDays = rows.length;
+  const decisionDetails = options.externalActorEmail
+    ? buildExternalDecisionEmailDetails(
+        options.externalActorEmail,
+        options.externalDecisionNote,
+      )
+    : { html: '', text: '' };
 
   let leadEmails = [];
   const leadApprovalDetails = await buildLeadApprovalEmailDetails(
@@ -4610,16 +4693,18 @@ async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
 
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    messageId: replyMeta.messageId,
     to: toList.join(', '),
     cc: mergeCC(EXTRA_CC_EMAILS, NOTIFY_CC_EMAIL),
-    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    subject: replyMeta.subject,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>fully approved by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
 ${leadApprovalDetails.html}
+${decisionDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report.</p>`,
-    text: `PTO for ${displayName} (${dateLabel}) fully approved by ${actorLabel || ''}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
-    headers,
+    text: `PTO for ${displayName} (${dateLabel}) fully approved by ${actorLabel || ''}.${leadApprovalDetails.text}${decisionDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
+    headers: replyMeta.headers,
     attachments,
   });
 }
@@ -4629,7 +4714,7 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
   const dateLabel = ptoRowsDateRange(rows);
   const displayName = entry.user_name || entry.user_upn;
   const totalHours = ptoRowsTotalHours(rows);
-  const headers = ptoReplyHeaders(entry, dateLabel);
+  const replyMeta = ptoReplyEmailMeta(entry, dateLabel, 'PTO external denial email');
   const approverEmails = await getApproverEmails(
     entry.filer_role,
     entry.filer_team,
@@ -4639,16 +4724,18 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
 
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+    messageId: replyMeta.messageId,
     to: entry.user_upn,
     cc: mergeCC(ccEmails, NOTIFY_CC_EMAIL),
-    subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
+    subject: replyMeta.subject,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>denied by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
+<p><strong>External Approver:</strong> ${escapeEmailHtml(actorLabel || '')}</p>
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-    text: `PTO for ${displayName} (${dateLabel}) was denied by ${actorLabel || ''}.\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
-    headers,
+    text: `PTO for ${displayName} (${dateLabel}) was denied by ${actorLabel || ''}.\nExternal Approver: ${actorLabel || ''}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    headers: replyMeta.headers,
   });
 }
 
@@ -4883,12 +4970,20 @@ async function processExternalPtoDecision(req, res, action) {
             entry,
             rows,
             tokenRow.recipient_email,
+            {
+              externalActorEmail: tokenRow.recipient_email,
+              externalDecisionNote: note,
+            },
           );
         } else if (notification === 'final_approved') {
           await sendPtoFinalApprovalEmail(
             entry,
             rows,
             tokenRow.recipient_email,
+            {
+              externalActorEmail: tokenRow.recipient_email,
+              externalDecisionNote: note,
+            },
           );
         } else if (notification === 'denied') {
           await sendPtoExternalDenialEmail(
@@ -4995,6 +5090,11 @@ app.post('/api/pto', requireAuth, async (req, res) => {
   const filerRole = req.userRole;
   let filerTeam = req.userTeam || null;
   const batchId = isRange ? crypto.randomUUID() : null;
+  const ptoRootThreadUuid =
+    initialStatus === 'pending' ? crypto.randomUUID() : null;
+  const ptoRootMessageId = ptoRootThreadUuid
+    ? `<${ptoRootThreadUuid}@tfs-hours>`
+    : null;
 
   try {
     if (req.userRole === 'admin' || req.userRole === 'pm') {
@@ -5019,9 +5119,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
         for (const d of weekdays) {
           const r = await client.query(
             `INSERT INTO public.pto_entries
-               (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id)
-             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11)
-             RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id`,
+               (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id, email_message_id)
+             VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team, batch_id, email_message_id`,
             [
               user_upn,
               user_name,
@@ -5034,6 +5134,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
               filerRole,
               filerTeam,
               batchId,
+              ptoRootMessageId,
             ],
           );
           insertedRows.push(r.rows[0]);
@@ -5050,9 +5151,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
       // Single-date: existing behaviour, batch_id = NULL
       const r = await pool.query(
         `INSERT INTO public.pto_entries
-           (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team)
-         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team`,
+           (user_upn, user_name, entry_date, hours, day_part, leave_type, notes, status, filer_role, filer_team, email_message_id)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes, status, filer_role, filer_team, email_message_id`,
         [
           user_upn,
           user_name,
@@ -5064,6 +5165,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
           initialStatus,
           filerRole,
           filerTeam,
+          ptoRootMessageId,
         ],
       );
       savedRows = [r.rows[0]];
@@ -5130,10 +5232,15 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 dateFrom,
                 isRange ? dateTo : dateFrom,
               );
-              // Pre-generate Message-ID; also build Thread-Index for Outlook conversation grouping
-              // (Brevo rewrites Message-Id on delivery, but Thread-Topic/Thread-Index are preserved)
-              const generatedUuid = crypto.randomUUID();
-              const generatedMsgId = `<${generatedUuid}@tfs-hours>`;
+              // Use the stored root Message-ID so later approval/denial emails can reply-thread.
+              // (Brevo rewrites Message-Id on delivery, but Thread-Topic/Thread-Index are preserved.)
+              const generatedMsgId =
+                savedRow.email_message_id || ptoRootMessageId || makePtoMessageId();
+              const generatedUuid =
+                ptoRootThreadUuid ||
+                String(generatedMsgId).match(
+                  /^<([0-9a-f-]{36})@tfs-hours>$/i,
+                )?.[1];
               const threadTopic = `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`;
               await transporter.sendMail({
                 from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
@@ -5143,7 +5250,9 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`,
                 headers: {
                   'Thread-Topic': threadTopic,
-                  'Thread-Index': buildThreadIndex(generatedUuid),
+                  ...(generatedUuid
+                    ? { 'Thread-Index': buildThreadIndex(generatedUuid) }
+                    : {}),
                 },
                 html: `<p>Hi @Team,</p>
 <p><strong>${escapeEmailHtml(user_name || user_upn)}</strong> has filed a Leave Request and it needs your approval.</p>
@@ -5160,18 +5269,6 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 text: `Hi @Team,\n\n${user_name || user_upn} has filed a Leave Request and it needs your approval.\n\nLeave Date: ${_fmtDateLabel}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(day_part)}\nLeave Type: ${leave_type}\nReason for Leave: ${notes || '—'}\n\nPlease see the attached Leave Request form for reference.\n\nThank you for your review.\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
                 attachments: [pdfAttachment],
               });
-              // Store the pre-generated message-id on all rows for reply threading
-              if (batchId) {
-                await pool.query(
-                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE batch_id = $2`,
-                  [generatedMsgId, batchId],
-                );
-              } else {
-                await pool.query(
-                  `UPDATE public.pto_entries SET email_message_id = $1 WHERE id = $2`,
-                  [generatedMsgId, savedRow.id],
-                );
-              }
             }
           } else {
             // Auto-approved (admin or PTO_APPROVAL_ENABLED=false) → receipt to filer only
