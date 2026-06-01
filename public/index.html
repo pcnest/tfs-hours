@@ -928,6 +928,244 @@
       color: #41464b;
     }
 
+    .pto-status-pending_review,
+    .pto-status-stale {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .pto-status-returned,
+    .pto-status-failed {
+      background: #f8d7da;
+      color: #58151c;
+    }
+
+    .pto-status-passed {
+      background: #d1e7dd;
+      color: #0a3622;
+    }
+
+    .offset-summary {
+      display: grid;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .offset-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+
+    .offset-summary-item {
+      display: grid;
+      gap: 2px;
+      padding: 8px 10px;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background: white;
+    }
+
+    .offset-summary-item .k {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .offset-summary-item .v {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .offset-check-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .offset-failure-summary {
+      padding: 10px 12px;
+      border: 1px solid #f1b0b7;
+      border-left: 4px solid #b42318;
+      border-radius: 8px;
+      background: #fff8f8;
+      color: #58151c;
+      font-size: 13px;
+    }
+
+    .offset-failure-summary ul {
+      margin: 6px 0 0 18px;
+      padding: 0;
+    }
+
+    .offset-failure-summary li + li {
+      margin-top: 4px;
+    }
+
+    .offset-pass-summary {
+      padding: 10px 12px;
+      border: 1px solid #badbcc;
+      border-left: 4px solid #1f7a6b;
+      border-radius: 8px;
+      background: #fbfffd;
+      color: #0a3622;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .offset-review-note {
+      display: grid;
+      gap: 8px;
+      margin: 0 0 12px 0;
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+    }
+
+    .offset-review-note[hidden] {
+      display: none;
+    }
+
+    .offset-review-note textarea {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+
+    .offset-workflow-audit {
+      display: grid;
+      gap: 4px;
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+    }
+
+    .offset-workflow-audit[hidden] {
+      display: none;
+    }
+
+    .offset-workflow-audit .muted {
+      color: var(--muted);
+    }
+
+    .offset-evidence-context,
+    .offset-audit-timeline {
+      display: grid;
+      gap: 8px;
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 13px;
+    }
+
+    .offset-evidence-context[hidden],
+    .offset-audit-timeline[hidden] {
+      display: none;
+    }
+
+    .offset-context-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .offset-context-list span {
+      padding: 4px 8px;
+      border: 1px solid var(--stroke);
+      border-radius: 999px;
+      background: white;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .offset-audit-item {
+      display: grid;
+      gap: 2px;
+      padding: 8px 0;
+      border-top: 1px solid var(--stroke);
+    }
+
+    .offset-audit-item:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .offset-audit-meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .offset-audit-note {
+      color: var(--ink);
+    }
+
+    .offset-check {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 7px 9px;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background: white;
+      font-size: 13px;
+    }
+
+    .offset-check-passed {
+      border-color: #badbcc;
+      background: #fbfffd;
+    }
+
+    .offset-check-failed {
+      border-color: #f1b0b7;
+      background: #fff8f8;
+    }
+
+    .offset-check-stale {
+      border-color: #ffe08a;
+      background: #fffdf2;
+    }
+
+    .offset-check-main {
+      display: grid;
+      gap: 2px;
+    }
+
+    .offset-check strong {
+      font-size: 12px;
+    }
+
+    .offset-check-main span {
+      color: var(--muted);
+    }
+
+    .offset-check-status {
+      flex: 0 0 auto;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.06);
+      color: #41464b;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
     .pto-status-note {
       display: block;
       font-size: 11px;
@@ -1524,6 +1762,7 @@
 
     <nav class="tab-nav">
       <button class="tab-btn active" data-tab="report">Report</button>
+      <button class="tab-btn" data-tab="offset" id="tabBtnOffset" hidden>Offset / Make-up</button>
       <button class="tab-btn" data-tab="pto">PTO &amp; Holidays</button>
     </nav>
 
@@ -1700,6 +1939,177 @@
       </div><!-- /report-body -->
 
     </div><!-- /tabReport -->
+
+    <div id="tabOffset" class="tab-panel" hidden>
+      <section class="panel pto-section">
+        <h2 class="pto-section-title">Offset / Make-up Hours</h2>
+        <form id="formOffset" class="pto-form" autocomplete="off">
+          <input type="hidden" id="offset_id" />
+          <div class="pto-form-row">
+            <div class="field field-grow">
+              <label for="offset_user">Employee</label>
+              <input type="text" id="offset_user" list="ptoUserList" placeholder="Name or UPN" required />
+            </div>
+            <div class="field">
+              <label for="offset_date">Interruption Date</label>
+              <input type="date" id="offset_date" required />
+            </div>
+            <div class="field field-sm">
+              <label for="offset_start">Start</label>
+              <input type="time" id="offset_start" required />
+            </div>
+            <div class="field field-sm">
+              <label for="offset_end">End</label>
+              <input type="time" id="offset_end" required />
+            </div>
+            <div class="field field-sm">
+              <label for="offset_hours">Hours</label>
+              <input type="number" id="offset_hours" min="0.01" max="24" step="0.01" required />
+            </div>
+            <div class="field">
+              <label for="offset_makeup_date">Make-up Date</label>
+              <input type="date" id="offset_makeup_date" required />
+            </div>
+            <div class="field field-grow">
+              <label for="offset_reason">Reason</label>
+              <input type="text" id="offset_reason" placeholder="Reason for interruption" required />
+            </div>
+            <div class="field field-grow">
+              <label for="offset_remarks">Remarks</label>
+              <input type="text" id="offset_remarks" placeholder="Optional remarks" />
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button type="submit" id="btnOffsetSave">Save / Validate</button>
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button type="button" class="ghost" id="btnOffsetNew">New</button>
+            </div>
+          </div>
+          <div id="offsetFormStatus" class="status muted" style="margin-top:8px;"></div>
+        </form>
+
+        <div id="offsetWorkflowAudit" class="offset-workflow-audit" hidden></div>
+        <div id="offsetValidation" class="offset-summary" hidden></div>
+        <div id="offsetAuditTimeline" class="offset-audit-timeline" hidden></div>
+
+        <section class="pto-section" id="offsetEvidenceSection">
+          <div class="pto-list-bar">
+            <div class="field">
+              <button type="button" id="btnOffsetLoadEvidence" class="ghost">Load TFS Evidence</button>
+            </div>
+            <div class="field">
+              <button type="button" id="btnOffsetAutoAllocate" class="ghost">Auto Allocate</button>
+            </div>
+            <div class="field">
+              <button type="button" id="btnOffsetSaveEvidence">Save Evidence</button>
+            </div>
+            <div id="offsetEvidenceStatus" class="status muted"></div>
+          </div>
+          <div id="offsetEvidenceContext" class="offset-evidence-context" hidden></div>
+          <div class="pto-table-wrap">
+            <table class="pto-table mobile-card-table">
+              <thead>
+                <tr>
+                  <th>Use</th>
+                  <th>Changed</th>
+                  <th>Task</th>
+                  <th>Ticket</th>
+                  <th>Prev</th>
+                  <th>Actual</th>
+                  <th>Delta</th>
+                  <th>Used Elsewhere</th>
+                  <th>Available</th>
+                  <th>Allocate</th>
+                </tr>
+              </thead>
+              <tbody id="tbodyOffsetEvidence">
+                <tr>
+                  <td colspan="10" class="muted">Save a request, then load TFS evidence.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="pto-section">
+          <div class="pto-list-bar">
+            <h2 class="pto-section-title" style="margin-right:auto;">Requests</h2>
+            <button type="button" class="ghost" id="btnOffsetRefresh">Refresh</button>
+          </div>
+          <div class="filters" style="margin:0 0 12px 0;">
+            <div class="field">
+              <label for="offsetFilterStatus">Status</label>
+              <select id="offsetFilterStatus">
+                <option value="">All</option>
+                <option value="pending_review">Pending Review</option>
+                <option value="returned">Returned</option>
+                <option value="approved">Approved</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="offsetFilterValidation">Validation</label>
+              <select id="offsetFilterValidation">
+                <option value="">All</option>
+                <option value="passed">Passed</option>
+                <option value="failed">Failed</option>
+                <option value="stale">Stale Sync</option>
+                <option value="warning">Warning</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="offsetFilterFrom">Make-up From</label>
+              <input type="date" id="offsetFilterFrom" />
+            </div>
+            <div class="field">
+              <label for="offsetFilterTo">Make-up To</label>
+              <input type="date" id="offsetFilterTo" />
+            </div>
+            <div class="field field-grow">
+              <label for="offsetFilterQ">Search</label>
+              <input type="search" id="offsetFilterQ" placeholder="Name, UPN, reason, request #" />
+            </div>
+            <div class="field">
+              <label>&nbsp;</label>
+              <button type="button" class="ghost" id="btnOffsetClearFilters">Clear</button>
+            </div>
+          </div>
+          <div id="offsetRequestActionStatus" class="status muted" style="margin:0 0 8px 0;"></div>
+          <div id="offsetReviewNotePanel" class="offset-review-note" hidden>
+            <strong id="offsetReviewNoteTitle">Reviewer note</strong>
+            <input type="hidden" id="offsetReviewNoteId" />
+            <input type="hidden" id="offsetReviewNoteAction" />
+            <textarea id="offsetReviewNoteText" rows="3" placeholder="Add a reviewer note"></textarea>
+            <div class="pto-table-actions">
+              <button type="button" id="btnOffsetConfirmReviewNote">Submit</button>
+              <button type="button" class="ghost" id="btnOffsetCancelReviewNote">Cancel</button>
+            </div>
+          </div>
+          <div class="pto-table-wrap">
+            <table class="pto-table mobile-card-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Interruption</th>
+                  <th>Requested</th>
+                  <th>Make-up Date</th>
+                  <th>Validation</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tbodyOffsetRequests">
+                <tr>
+                  <td colspan="7" class="muted">Loading&#8230;</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </div><!-- /tabOffset -->
 
     <div id="tabPto" class="tab-panel" hidden>
 

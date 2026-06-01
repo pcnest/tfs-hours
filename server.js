@@ -50,6 +50,18 @@ const EXTERNAL_PTO_TOKEN_TTL_DAYS = Math.max(
   1,
   Number(process.env.EXTERNAL_PTO_TOKEN_TTL_DAYS || '14') || 14,
 );
+const OFFSET_SYNC_FRESHNESS_HOURS = Math.max(
+  1,
+  Number(process.env.OFFSET_SYNC_FRESHNESS_HOURS || '24') || 24,
+);
+const OFFSET_REGULAR_DAY_HOURS = Math.max(
+  0,
+  Number(process.env.OFFSET_REGULAR_DAY_HOURS || '8') || 8,
+);
+const OFFSET_WORKING_DAY_WINDOW = Math.max(
+  1,
+  Number(process.env.OFFSET_WORKING_DAY_WINDOW || '10') || 10,
+);
 const PUBLIC_BASE_URL = (
   process.env.PUBLIC_BASE_URL ||
   process.env.APP_BASE_URL ||
@@ -317,6 +329,34 @@ function localMidnightToUtcDateInZone(dateStr, timeZone) {
   return utc;
 }
 
+function parseTimeParts(timeStr) {
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(
+    String(timeStr || '').trim(),
+  );
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  const s = Number(m[3] || 0);
+  if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59)
+    return null;
+  return { h, mi, s };
+}
+
+function localDateTimeToUtcDate(dateStr, timeStr, offsetMinutes, timeZone) {
+  const p = parseYmd(dateStr);
+  const t = parseTimeParts(timeStr);
+  if (!p || !t) return null;
+  const localAsUtcMs = Date.UTC(p.y, p.mo - 1, p.d, t.h, t.mi, t.s, 0);
+  if (!timeZone) return new Date(localAsUtcMs - offsetMinutes * 60 * 1000);
+  let offset = getTimeZoneOffsetMinutes(new Date(localAsUtcMs), timeZone);
+  let utc = new Date(localAsUtcMs - offset * 60 * 1000);
+  const offset2 = getTimeZoneOffsetMinutes(utc, timeZone);
+  if (offset2 !== offset) {
+    utc = new Date(localAsUtcMs - offset2 * 60 * 1000);
+  }
+  return utc;
+}
+
 // From/To are *calendar days* in report timezone.
 // Returns { fromUtc, toExclusiveUtc } where toExclusive is next-day midnight in that timezone (UTC).
 function rangeFromToUtc(fromStr, toStr, offsetMinutes, timeZone) {
@@ -467,6 +507,18 @@ function requireManagerOrAbove(req, res, next) {
 
 function requireLeadOrPm(req, res, next) {
   if (req.userRole !== 'lead' && req.userRole !== 'pm')
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  next();
+}
+
+function requireOffsetPilotAccess(req, res, next) {
+  // Pilot is open to all authenticated roles while the workflow is being tested.
+  next();
+}
+
+function requireOffsetManagerAccess(req, res, next) {
+  // Keep reviewer actions admin-only during the pilot until role workflow is finalized.
+  if (req.userRole !== 'admin')
     return res.status(403).json({ ok: false, error: 'forbidden' });
   next();
 }
@@ -1759,8 +1811,8 @@ function fmtReportDateTimeFromTimestamp(value) {
   return `${formatted} ${REPORT_TZ_LABEL || 'UTC'}`;
 }
 
-async function fetchLastSyncAt() {
-  const r = await pool.query(
+async function fetchLastSyncAt(db = pool) {
+  const r = await db.query(
     `SELECT run_at
      FROM public.tfs_hours_runs
      ORDER BY run_at DESC, run_id DESC
@@ -1793,6 +1845,1957 @@ function buildPtoPdfFilename(userName, submittedAt) {
   );
   return `Leave Form - ${safeName} - ${requestedDate}.pdf`;
 }
+
+// ---------- Offset / Make-up Hours pilot ----------
+const OFFSET_ACTIVE_ALLOCATION_STATUSES = new Set([
+  'pending_review',
+  'approved',
+]);
+const OFFSET_REQUEST_STATUSES = new Set([
+  'pending_review',
+  'returned',
+  'approved',
+  'cancelled',
+]);
+const OFFSET_VALIDATION_STATUSES = new Set([
+  'passed',
+  'warning',
+  'failed',
+  'stale',
+]);
+const OFFSET_FINAL_STATUSES = new Set(['approved', 'cancelled']);
+const OFFSET_HOUR_EPSILON = 0.01;
+const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
+  'interruption_date_not_future',
+  'interruption_minimum',
+  'requested_hours_match',
+  'makeup_window',
+  'sync_freshness',
+]);
+const OFFSET_EMAIL_WORKFLOW_EVENTS = new Set([
+  'create',
+  'resubmit',
+  'approve',
+  'return',
+  'cancel',
+]);
+const OFFSET_EMAIL_EVENT_LABELS = {
+  create: 'New offset / make-up request',
+  resubmit: 'Offset / make-up request resubmitted',
+  approve: 'Offset / make-up request approved',
+  return: 'Offset / make-up request returned',
+  cancel: 'Offset / make-up request cancelled',
+};
+
+function offsetEvidenceBlockersFromSummary(summary) {
+  return (summary?.checks || []).filter(
+    (check) => OFFSET_EVIDENCE_PREREQ_KEYS.has(check.key) && !check.passed,
+  );
+}
+
+function isOffsetFinalStatus(status) {
+  return OFFSET_FINAL_STATUSES.has(String(status || ''));
+}
+
+function offsetIsOwnRequest(req, row) {
+  const actorEmail = normIdentity(req.userEmail);
+  const userUpn = normIdentity(row?.user_upn);
+  return !!actorEmail && userUpn === actorEmail;
+}
+
+function offsetIsSameTeamRequest(req, row) {
+  const actorTeam = normIdentity(req.userTeam);
+  const requestTeam = normIdentity(row?.user_team);
+  return !!actorTeam && !!requestTeam && actorTeam === requestTeam;
+}
+
+function canReadOffsetRequest(req, row) {
+  if (!row) return false;
+  if (req.userRole === 'admin' || req.userRole === 'pm') return true;
+  if (req.userRole === 'lead')
+    return offsetIsOwnRequest(req, row) || offsetIsSameTeamRequest(req, row);
+  return offsetIsOwnRequest(req, row);
+}
+
+function canEditOffsetRequest(req, row) {
+  if (!row || isOffsetFinalStatus(row.status)) return false;
+  return req.userRole === 'admin' || offsetIsOwnRequest(req, row);
+}
+
+function canManageOffsetRequest(req) {
+  return req.userRole === 'admin';
+}
+
+function canTransitionOffsetRequest(row, action) {
+  if (!row) return false;
+  if (action === 'validate')
+    return row.status === 'pending_review' || row.status === 'returned';
+  if (action === 'approve' || action === 'return' || action === 'cancel')
+    return row.status === 'pending_review';
+  return false;
+}
+
+function offsetRoundHours(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+
+function ymdValue(v) {
+  if (!v) return '';
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
+
+function validateOffsetTimeStr(v) {
+  const s = normText(v);
+  if (!s || !/^\d{2}:\d{2}$/.test(s)) return null;
+  const [hh, mm] = s.split(':').map((x) => Number(x));
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return s;
+}
+
+function offsetMinutesBetween(startTime, endTime) {
+  const [sh, sm] = startTime.split(':').map((x) => Number(x));
+  const [eh, em] = endTime.split(':').map((x) => Number(x));
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+  return end > start ? end - start : null;
+}
+
+function offsetEvidenceWindow(request) {
+  const interruptionDate = ymdValue(request?.interruption_date);
+  const plannedDate = ymdValue(request?.planned_makeup_date);
+  const endTime = String(request?.interruption_end_time || '').slice(0, 8);
+  if (!interruptionDate || plannedDate !== interruptionDate || !endTime) {
+    return {
+      sameDay: false,
+      cutoffUtc: null,
+      cutoffIso: null,
+      interruptionEndTime: endTime || null,
+    };
+  }
+  const cutoffUtc = localDateTimeToUtcDate(
+    interruptionDate,
+    endTime,
+    getReportOffsetMinutes(),
+    getReportTimeZone(),
+  );
+  return {
+    sameDay: true,
+    cutoffUtc,
+    cutoffIso:
+      cutoffUtc && !isNaN(cutoffUtc.getTime()) ? cutoffUtc.toISOString() : null,
+    interruptionEndTime: endTime,
+  };
+}
+
+function isWeekdayYmd(ymd) {
+  const p = parseYmd(ymd);
+  if (!p) return false;
+  const dow = new Date(Date.UTC(p.y, p.mo - 1, p.d)).getUTCDay();
+  return dow >= 1 && dow <= 5;
+}
+
+async function resolveOffsetDeadlineYmd(interruptionDate) {
+  const scanTo = addDaysToYmd(interruptionDate, 45);
+  const sharedOffDays = await fetchSharedOffDays(interruptionDate, scanTo);
+  let current = addDaysToYmd(interruptionDate, 1);
+  let workingDays = 0;
+  while (current && current <= scanTo) {
+    if (isWeekdayYmd(current) && !sharedOffDays.has(current)) {
+      workingDays += 1;
+      if (workingDays === OFFSET_WORKING_DAY_WINDOW) return current;
+    }
+    current = addDaysToYmd(current, 1);
+  }
+  return null;
+}
+
+function offsetEvidenceKey(taskId, changedAt) {
+  const d = changedAt instanceof Date ? changedAt : new Date(changedAt || '');
+  const iso = !isNaN(d) ? d.toISOString() : String(changedAt || '');
+  return `${Number(taskId)}|${iso}`;
+}
+
+async function fetchOffsetRequest(id, db = pool) {
+  const r = await db.query(
+    `SELECT id, user_upn, user_name, user_team, filer_role,
+            interruption_date::text, interruption_start_time::text, interruption_end_time::text,
+            interruption_duration_minutes, reason, requested_makeup_hours,
+            planned_makeup_date::text, remarks, status, validation_status,
+            validation_summary, email_message_id, created_by, created_at, updated_at,
+            approved_by, approved_at, approved_note, returned_by, returned_at, return_note,
+            cancelled_by, cancelled_at, cancel_note
+     FROM public.offset_requests
+     WHERE id = $1`,
+    [id],
+  );
+  return r.rows[0] || null;
+}
+
+async function fetchOffsetRequestEvidence(requestId, db = pool) {
+  const r = await db.query(
+    `SELECT id, request_id, task_id, changed_at, snapshot_at, task_title,
+            task_activity, task_assigned_to, task_assigned_upn, ticket_id,
+            ticket_type, ticket_title, feature_id, feature_title, cost_type,
+            prev_hours, actual_hours, delta_hours, eligible_hours,
+            allocated_hours, created_at
+     FROM public.offset_request_evidence
+     WHERE request_id = $1
+     ORDER BY changed_at ASC, task_id ASC`,
+    [requestId],
+  );
+  return r.rows;
+}
+
+function legacyOffsetActionEvents(row) {
+  if (!row) return [];
+  const events = [];
+  if (row.created_at) {
+    events.push({
+      id: 'legacy-created',
+      request_id: row.id,
+      action: 'create',
+      actor_email: row.created_by || row.user_upn || null,
+      actor_role: row.filer_role || null,
+      from_status: null,
+      to_status: 'pending_review',
+      note: null,
+      metadata: {},
+      created_at: row.created_at,
+      synthetic: true,
+    });
+  }
+  if (row.returned_at || row.return_note || row.status === 'returned') {
+    events.push({
+      id: 'legacy-returned',
+      request_id: row.id,
+      action: 'return',
+      actor_email: row.returned_by || null,
+      actor_role: null,
+      from_status: 'pending_review',
+      to_status: 'returned',
+      note: row.return_note || null,
+      metadata: {},
+      created_at: row.returned_at || row.updated_at || row.created_at,
+      synthetic: true,
+    });
+  }
+  if (row.cancelled_at || row.cancel_note || row.status === 'cancelled') {
+    events.push({
+      id: 'legacy-cancelled',
+      request_id: row.id,
+      action: 'cancel',
+      actor_email: row.cancelled_by || null,
+      actor_role: null,
+      from_status: 'pending_review',
+      to_status: 'cancelled',
+      note: row.cancel_note || null,
+      metadata: {},
+      created_at: row.cancelled_at || row.updated_at || row.created_at,
+      synthetic: true,
+    });
+  }
+  if (row.approved_at || row.approved_note || row.status === 'approved') {
+    events.push({
+      id: 'legacy-approved',
+      request_id: row.id,
+      action: 'approve',
+      actor_email: row.approved_by || null,
+      actor_role: null,
+      from_status: 'pending_review',
+      to_status: 'approved',
+      note: row.approved_note || null,
+      metadata: {},
+      created_at: row.approved_at || row.updated_at || row.created_at,
+      synthetic: true,
+    });
+  }
+  return events.filter((e) => e.created_at);
+}
+
+async function fetchOffsetActionEvents(rowOrRequestId, db = pool) {
+  const requestId =
+    typeof rowOrRequestId === 'object' ? rowOrRequestId?.id : rowOrRequestId;
+  if (!requestId) return [];
+  try {
+    const r = await db.query(
+      `SELECT id, request_id, action, actor_email, actor_role,
+              from_status, to_status, note, metadata, created_at
+       FROM public.offset_action_events
+       WHERE request_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [requestId],
+    );
+    if (r.rows.length) return r.rows;
+  } catch (e) {
+    if (e?.code !== '42P01') throw e;
+  }
+  return typeof rowOrRequestId === 'object'
+    ? legacyOffsetActionEvents(rowOrRequestId)
+    : [];
+}
+
+async function fetchOffsetValidationEvents(requestId, db = pool, limit = 10) {
+  const r = await db.query(
+    `SELECT id, request_id, validation_status, validation_summary, created_at
+     FROM public.offset_validation_events
+     WHERE request_id = $1
+     ORDER BY created_at DESC, id DESC
+     LIMIT $2`,
+    [requestId, Math.max(1, Math.min(50, Number(limit) || 10))],
+  );
+  return r.rows;
+}
+
+async function recordOffsetActionEvent(db, req, event) {
+  await db.query(
+    `INSERT INTO public.offset_action_events
+       (request_id, action, actor_email, actor_role, from_status, to_status, note, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+    [
+      event.requestId,
+      event.action,
+      event.actorEmail || req?.userEmail || null,
+      event.actorRole || req?.userRole || null,
+      event.fromStatus || null,
+      event.toStatus || null,
+      event.note || null,
+      JSON.stringify(event.metadata || {}),
+    ],
+  );
+}
+
+function offsetEmailEmployeeLabel(row) {
+  return row?.user_name || row?.user_upn || 'Employee';
+}
+
+function offsetEmailStatusLabel(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'pending_review') return 'Pending review';
+  if (s === 'returned') return 'Returned';
+  if (s === 'approved') return 'Approved';
+  if (s === 'cancelled') return 'Cancelled';
+  return status || 'Unknown';
+}
+
+function offsetEmailValidationLabel(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'passed') return 'Passed';
+  if (s === 'warning') return 'Warning';
+  if (s === 'stale') return 'Stale sync';
+  if (s === 'failed') return 'Failed';
+  return status || 'Unknown';
+}
+
+function offsetEmailTimeRange(row) {
+  const start = String(row?.interruption_start_time || '').slice(0, 5);
+  const end = String(row?.interruption_end_time || '').slice(0, 5);
+  return `${ymdValue(row?.interruption_date)} ${start || '--:--'}-${end || '--:--'}`;
+}
+
+function offsetEmailAppUrl() {
+  if (!PUBLIC_BASE_URL) return '';
+  return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/`;
+}
+
+function offsetEmailThreadTopic(row) {
+  return `OFFSET / MAKE-UP REQUEST #${row.id} - ${offsetEmailEmployeeLabel(row)} - ${ymdValue(row.planned_makeup_date)}`;
+}
+
+function offsetEmailRootHeaders(messageId, threadTopic) {
+  const m = String(messageId || '').match(/^<([0-9a-f-]{36})@tfs-hours>$/i);
+  return {
+    'Thread-Topic': threadTopic,
+    ...(m ? { 'Thread-Index': buildThreadIndex(m[1]) } : {}),
+  };
+}
+
+function offsetEmailReplyHeaders(messageId, threadTopic) {
+  const threadIndex = buildReplyThreadIndex(messageId);
+  return {
+    'In-Reply-To': messageId,
+    References: messageId,
+    'Thread-Topic': threadTopic,
+    ...(threadIndex ? { 'Thread-Index': threadIndex } : {}),
+  };
+}
+
+function normalizeOffsetValidationSummary(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function buildOffsetEmailContent({
+  row,
+  evidence,
+  summary,
+  eventName,
+  actorEmail,
+  note,
+}) {
+  const employee = offsetEmailEmployeeLabel(row);
+  const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName] || 'Offset update';
+  const requestedHours = offsetRoundHours(row.requested_makeup_hours);
+  const interruptedHours = offsetRoundHours(
+    Number(row.interruption_duration_minutes || 0) / 60,
+  );
+  const evidenceCount = Number(summary?.evidence?.linkedCount ?? evidence.length);
+  const evidenceHours = offsetRoundHours(
+    summary?.evidence?.allocatedHours ??
+      evidence.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0),
+  );
+  const failedReasons = Array.isArray(summary?.failedReasons)
+    ? summary.failedReasons
+    : [];
+  const appUrl = offsetEmailAppUrl();
+  const rows = [
+    ['Request', `#${row.id}`],
+    ['Employee', employee],
+    ['Interruption', offsetEmailTimeRange(row)],
+    ['Interrupted Duration', `${fmtH(interruptedHours)} hrs`],
+    ['Requested Make-up Hours', `${fmtH(requestedHours)} hrs`],
+    ['Planned Make-up Date', ymdValue(row.planned_makeup_date)],
+    ['Status', offsetEmailStatusLabel(row.status)],
+    ['Validation', offsetEmailValidationLabel(summary?.validationStatus || row.validation_status)],
+    ['Linked TFS Evidence', `${evidenceCount} row(s), ${fmtH(evidenceHours)} hrs allocated`],
+    ['Reason', row.reason || '-'],
+    ['Remarks', row.remarks || '-'],
+  ];
+  if (actorEmail) rows.push(['Action By', actorEmail]);
+  if (note) rows.push(['Note', note]);
+
+  const tableHtml = rows
+    .map(
+      ([label, value]) =>
+        `<tr><th align="left" style="padding:4px 12px 4px 0;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(label)}</th><td style="padding:4px 0;">${escapeEmailHtml(value)}</td></tr>`,
+    )
+    .join('');
+  const failedHtml = failedReasons.length
+    ? `<p><strong>Failed validation reason(s):</strong></p><ul>${failedReasons
+        .map(
+          (reason) =>
+            `<li><strong>${escapeEmailHtml(reason.label || reason.key || 'Validation')}:</strong> ${escapeEmailHtml(reason.message || '')}</li>`,
+        )
+        .join('')}</ul>`
+    : summary?.validationStatus === 'passed'
+      ? '<p><strong>Validation:</strong> All validation checks passed.</p>'
+      : '';
+  const appHtml = appUrl
+    ? `<p>Open the app to review the request: <a href="${escapeEmailHtml(appUrl)}">${escapeEmailHtml(appUrl)}</a></p>`
+    : '';
+
+  const html = `<p>Hi @Team,</p>
+<p>${escapeEmailHtml(eventLabel)}.</p>
+<table style="font-family:sans-serif;font-size:13px;line-height:1.5;border-collapse:collapse;">${tableHtml}</table>
+${failedHtml}
+${appHtml}
+<p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`;
+
+  const textRows = rows.map(([label, value]) => `${label}: ${value}`).join('\n');
+  const failedText = failedReasons.length
+    ? `\nFailed validation reason(s):\n${failedReasons
+        .map(
+          (reason) =>
+            `- ${reason.label || reason.key || 'Validation'}: ${reason.message || ''}`,
+        )
+        .join('\n')}`
+    : summary?.validationStatus === 'passed'
+      ? '\nValidation: All validation checks passed.'
+      : '';
+  const appText = appUrl ? `\nOpen the app: ${appUrl}` : '';
+  const text = `Hi @Team,\n\n${eventLabel}.\n\n${textRows}${failedText}${appText}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
+
+  return { html, text };
+}
+
+async function recordOffsetEmailEvent(requestId, action, note, metadata = {}) {
+  try {
+    await recordOffsetActionEvent(pool, null, {
+      requestId,
+      action,
+      actorEmail: 'system',
+      actorRole: 'system',
+      note,
+      metadata,
+    });
+  } catch (e) {
+    console.error('Offset email audit event error:', e);
+  }
+}
+
+async function sendOffsetWorkflowEmail({ requestId, eventName, actorEmail, note }) {
+  if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL) return;
+  if (!OFFSET_EMAIL_WORKFLOW_EVENTS.has(eventName)) return;
+
+  const row = await fetchOffsetRequest(requestId);
+  if (!row) return;
+  const evidence = await fetchOffsetRequestEvidence(requestId);
+  const summaryFromDb = normalizeOffsetValidationSummary(row.validation_summary);
+  const summary = summaryFromDb.validationStatus
+    ? summaryFromDb
+    : await buildOffsetValidationSummary(row);
+  const adminEmails = await getRoleEmails(['admin'], row.user_upn);
+  const filerEmail = row.user_upn || '';
+  let toList = [];
+  let ccList = [];
+  if (eventName === 'create' || eventName === 'resubmit') {
+    toList = dedupeEmails(adminEmails);
+    ccList = dedupeEmails([filerEmail]).filter(
+      (email) => !toList.some((to) => to.toLowerCase() === email.toLowerCase()),
+    );
+  } else {
+    toList = dedupeEmails([filerEmail]);
+    ccList = dedupeEmails(adminEmails).filter(
+      (email) => !toList.some((to) => to.toLowerCase() === email.toLowerCase()),
+    );
+  }
+  if (!toList.length) return;
+
+  const rootMessageId = row.email_message_id || `<${crypto.randomUUID()}@tfs-hours>`;
+  const firstOffsetEmail = !row.email_message_id;
+  const messageUuid = crypto.randomUUID();
+  const messageId = firstOffsetEmail
+    ? rootMessageId
+    : `<${messageUuid}@tfs-hours>`;
+  const threadTopic = offsetEmailThreadTopic(row);
+  const headers = firstOffsetEmail
+    ? offsetEmailRootHeaders(rootMessageId, threadTopic)
+    : offsetEmailReplyHeaders(rootMessageId, threadTopic);
+  const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName];
+  const subject = `${eventLabel} #${row.id} - ${offsetEmailEmployeeLabel(row)} - ${ymdValue(row.planned_makeup_date)}`;
+  const { html, text } = buildOffsetEmailContent({
+    row,
+    evidence,
+    summary,
+    eventName,
+    actorEmail,
+    note,
+  });
+
+  try {
+    const transporter = createMailTransporter();
+    await transporter.sendMail({
+      from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
+      messageId,
+      to: toList.join(', '),
+      ...(ccList.length ? { cc: ccList.join(', ') } : {}),
+      subject,
+      html,
+      text,
+      headers,
+    });
+    if (firstOffsetEmail) {
+      await pool.query(
+        `UPDATE public.offset_requests
+         SET email_message_id = $2
+         WHERE id = $1
+           AND email_message_id IS NULL`,
+        [requestId, rootMessageId],
+      );
+    }
+    await recordOffsetEmailEvent(requestId, 'email_sent', `Email sent: ${eventLabel}.`, {
+      workflowEvent: eventName,
+      to: toList,
+      cc: ccList,
+      messageId,
+      rootMessageId,
+    });
+  } catch (e) {
+    const error = String(e?.message || e);
+    await recordOffsetEmailEvent(
+      requestId,
+      'email_failed',
+      `Email failed: ${eventLabel}.`,
+      {
+        workflowEvent: eventName,
+        to: toList,
+        cc: ccList,
+        messageId,
+        rootMessageId,
+        error,
+      },
+    );
+    console.error('Offset workflow email error:', e);
+  }
+}
+
+function queueOffsetWorkflowEmail(args) {
+  (async () => {
+    try {
+      await sendOffsetWorkflowEmail(args);
+    } catch (e) {
+      console.error('Offset workflow email queue error:', e);
+    }
+  })();
+}
+
+async function fetchOffsetUsedEvidence(excludeRequestId, db = pool) {
+  const params = [];
+  let excludeSql = '';
+  if (excludeRequestId) {
+    params.push(excludeRequestId);
+    excludeSql = `AND r.id <> $${params.length}`;
+  }
+  const r = await db.query(
+    `SELECT e.task_id, e.changed_at, COALESCE(SUM(e.allocated_hours), 0) AS used_hours
+     FROM public.offset_request_evidence e
+     JOIN public.offset_requests r ON r.id = e.request_id
+     WHERE r.status IN ('pending_review', 'approved')
+       ${excludeSql}
+     GROUP BY e.task_id, e.changed_at`,
+    params,
+  );
+  const used = new Map();
+  for (const row of r.rows) {
+    used.set(
+      offsetEvidenceKey(row.task_id, row.changed_at),
+      Number(row.used_hours || 0),
+    );
+  }
+  return used;
+}
+
+async function fetchOffsetDayRows(
+  userUpn,
+  userName,
+  plannedDate,
+  db = pool,
+  options = {},
+) {
+  const offsetMin = getReportOffsetMinutes();
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(plannedDate, plannedDate, offsetMin, tz);
+  if (!rng) return [];
+  const params = [
+    rng.fromUtc.toISOString(),
+    rng.toExclusiveUtc.toISOString(),
+    userUpn || '',
+    userName || userUpn || '',
+  ];
+  let cutoffSql = '';
+  if (
+    options.changedAtFromUtc instanceof Date &&
+    !isNaN(options.changedAtFromUtc.getTime())
+  ) {
+    params.push(options.changedAtFromUtc.toISOString());
+    cutoffSql = `AND d.changed_at >= $${params.length}::timestamptz`;
+  }
+
+  const r = await db.query(
+    `
+    WITH snaps AS (
+      SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
+        s.run_id,
+        s.snapshot_at,
+        COALESCE(s.task_changed_date, s.snapshot_at) AS t,
+        s.task_id,
+        s.task_assigned_upn,
+        s.task_assigned_to,
+        s.task_activity,
+        COALESCE(s.task_actual_hours, 0) AS h,
+        s.ticket_id,
+        s.feature_id,
+        s.cost_type
+      FROM public.tfs_task_hours_snapshots s
+      ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
+    ),
+    prior AS (
+      SELECT DISTINCT ON (task_id)
+        task_id, snapshot_at, t, h
+      FROM snaps
+      WHERE t < $1::timestamptz
+      ORDER BY task_id, t DESC, snapshot_at DESC
+    ),
+    inrange AS (
+      SELECT *
+      FROM snaps
+      WHERE t >= $1::timestamptz AND t < $2::timestamptz
+    ),
+    s AS (
+      SELECT
+        NULL::bigint AS run_id,
+        p.snapshot_at,
+        p.t,
+        p.task_id,
+        NULL::text AS task_assigned_upn,
+        NULL::text AS task_assigned_to,
+        NULL::text AS task_activity,
+        p.h,
+        NULL::int AS ticket_id,
+        NULL::int AS feature_id,
+        NULL::text AS cost_type,
+        TRUE AS is_prior
+      FROM prior p
+      UNION ALL
+      SELECT
+        i.run_id,
+        i.snapshot_at,
+        i.t,
+        i.task_id,
+        i.task_assigned_upn,
+        i.task_assigned_to,
+        i.task_activity,
+        i.h,
+        i.ticket_id,
+        i.feature_id,
+        i.cost_type,
+        FALSE AS is_prior
+      FROM inrange i
+    ),
+    w AS (
+      SELECT *, LAG(h) OVER (PARTITION BY task_id ORDER BY t, snapshot_at) AS prev_h
+      FROM s
+    ),
+    d AS (
+      SELECT
+        run_id,
+        snapshot_at,
+        t AS changed_at,
+        task_id,
+        task_assigned_upn,
+        task_assigned_to,
+        task_activity,
+        COALESCE(prev_h, 0) AS prev_hours,
+        h AS actual_hours,
+        (h - COALESCE(prev_h, 0)) AS delta_hours,
+        ticket_id,
+        feature_id,
+        cost_type
+      FROM w
+      WHERE is_prior = FALSE
+    )
+    SELECT
+      d.changed_at,
+      d.snapshot_at,
+      d.task_id,
+      l.task_title,
+      d.task_activity,
+      d.task_assigned_to,
+      d.task_assigned_upn,
+      d.prev_hours,
+      d.actual_hours,
+      d.delta_hours,
+      d.ticket_id,
+      l.ticket_type,
+      l.ticket_title,
+      l.feature_id,
+      l.feature_title,
+      d.cost_type
+    FROM d
+    LEFT JOIN public.tfs_task_hours_latest l ON l.task_id = d.task_id
+    WHERE ABS(d.delta_hours) > 0.000001
+      ${cutoffSql}
+      AND (
+        LOWER(COALESCE(d.task_assigned_upn, '')) = LOWER($3)
+        OR LOWER(COALESCE(d.task_assigned_to, '')) = LOWER($4)
+      )
+    ORDER BY d.changed_at ASC, d.task_id ASC
+    `,
+    params,
+  );
+  return r.rows;
+}
+
+async function fetchOffsetEvidenceCandidates(request, db = pool) {
+  const evidenceWindow = offsetEvidenceWindow(request);
+  const dayRows = await fetchOffsetDayRows(
+    request.user_upn,
+    request.user_name,
+    ymdValue(request.planned_makeup_date),
+    db,
+    evidenceWindow.sameDay && evidenceWindow.cutoffUtc
+      ? { changedAtFromUtc: evidenceWindow.cutoffUtc }
+      : {},
+  );
+  const usedByOthers = await fetchOffsetUsedEvidence(request.id, db);
+  const selectedRows = await fetchOffsetRequestEvidence(request.id, db);
+  const selected = new Map();
+  for (const row of selectedRows) {
+    selected.set(
+      offsetEvidenceKey(row.task_id, row.changed_at),
+      Number(row.allocated_hours || 0),
+    );
+  }
+
+  return dayRows
+    .map((row) => {
+      const eligible = Math.max(0, offsetRoundHours(row.delta_hours));
+      const key = offsetEvidenceKey(row.task_id, row.changed_at);
+      const used = offsetRoundHours(usedByOthers.get(key) || 0);
+      const selectedAllocated = offsetRoundHours(selected.get(key) || 0);
+      const remaining = Math.max(0, offsetRoundHours(eligible - used));
+      return {
+        ...row,
+        evidence_key: key,
+        eligible_hours: eligible,
+        used_hours: used,
+        remaining_hours: remaining,
+        selected_allocated_hours: selectedAllocated,
+      };
+    })
+    .filter(
+      (row) =>
+        row.eligible_hours > 0 &&
+        (row.remaining_hours > 0 || row.selected_allocated_hours > 0),
+    );
+}
+
+function buildOffsetEvidenceFilterSummary(request, evidenceWindow) {
+  return {
+    plannedMakeupDate: ymdValue(request?.planned_makeup_date),
+    assignedTo: request?.user_name || request?.user_upn || '',
+    sameDay: !!evidenceWindow?.sameDay,
+    cutoffIso: evidenceWindow?.cutoffIso || null,
+    cutoffTime: evidenceWindow?.sameDay
+      ? String(evidenceWindow?.interruptionEndTime || '').slice(0, 5)
+      : null,
+    eligibleHoursSource: 'delta_hours',
+    positiveDeltaOnly: true,
+    excludesUsedHours: true,
+  };
+}
+
+async function fetchOffsetDayCapacity(request, db = pool) {
+  const plannedDate = ymdValue(request.planned_makeup_date);
+  const evidenceWindow = offsetEvidenceWindow(request);
+  const dayRows = await fetchOffsetDayRows(
+    request.user_upn,
+    request.user_name,
+    plannedDate,
+    db,
+    evidenceWindow.sameDay && evidenceWindow.cutoffUtc
+      ? { changedAtFromUtc: evidenceWindow.cutoffUtc }
+      : {},
+  );
+  const netRenderedHours = offsetRoundHours(
+    dayRows.reduce((sum, row) => sum + Number(row.delta_hours || 0), 0),
+  );
+  const offR = await db.query(
+    `SELECT
+       COALESCE((SELECT SUM(hours) FROM public.team_off_entries WHERE entry_date = $1::date), 0) +
+       COALESCE((SELECT SUM(hours) FROM public.public_holidays WHERE holiday_date = $1::date), 0)
+       AS shared_off_hours`,
+    [plannedDate],
+  );
+  const sharedOffHours = offsetRoundHours(offR.rows[0]?.shared_off_hours || 0);
+  const ptoR = await db.query(
+    `SELECT COALESCE(SUM(hours), 0) AS pto_hours
+     FROM public.pto_entries
+     WHERE entry_date = $1::date
+       AND status = 'approved'
+       AND (
+         LOWER(COALESCE(user_upn, '')) = LOWER($2)
+         OR LOWER(COALESCE(user_name, '')) = LOWER($3)
+       )`,
+    [
+      plannedDate,
+      request.user_upn || '',
+      request.user_name || request.user_upn || '',
+    ],
+  );
+  const ptoHours = offsetRoundHours(ptoR.rows[0]?.pto_hours || 0);
+  const baseline = isWeekdayYmd(plannedDate) ? OFFSET_REGULAR_DAY_HOURS : 0;
+  const regularRequiredHours = Math.max(
+    0,
+    offsetRoundHours(baseline - sharedOffHours - ptoHours),
+  );
+  const dailySurplusHours = Math.max(
+    0,
+    offsetRoundHours(netRenderedHours - regularRequiredHours),
+  );
+  const usedR = await db.query(
+    `SELECT COALESCE(SUM(e.allocated_hours), 0) AS allocated_hours
+     FROM public.offset_request_evidence e
+     JOIN public.offset_requests r ON r.id = e.request_id
+     WHERE r.user_upn = $1
+       AND r.planned_makeup_date = $2::date
+       AND r.status IN ('pending_review', 'approved')
+       AND r.id <> $3`,
+    [request.user_upn, plannedDate, request.id],
+  );
+  const allocatedByOtherRequests = offsetRoundHours(
+    usedR.rows[0]?.allocated_hours || 0,
+  );
+  const availableMakeupHours = Math.max(
+    0,
+    offsetRoundHours(dailySurplusHours - allocatedByOtherRequests),
+  );
+  return {
+    plannedDate,
+    regularRequiredHours,
+    sharedOffHours,
+    ptoHours,
+    netRenderedHours,
+    dailySurplusHours,
+    allocatedByOtherRequests,
+    availableMakeupHours,
+  };
+}
+
+async function buildOffsetValidationSummary(request, db = pool) {
+  const checks = [];
+  const addCheck = (key, label, passed, message, status = null) => {
+    checks.push({
+      key,
+      label,
+      status: status || (passed ? 'passed' : 'failed'),
+      passed,
+      message,
+    });
+  };
+
+  const interruptionDate = ymdValue(request.interruption_date);
+  const plannedDate = ymdValue(request.planned_makeup_date);
+  const todayYmd = currentReportYmd();
+  const durationMinutes = Number(request.interruption_duration_minutes || 0);
+  const interruptedHours = offsetRoundHours(durationMinutes / 60);
+  const requestedHours = offsetRoundHours(request.requested_makeup_hours);
+  const deadlineYmd = await resolveOffsetDeadlineYmd(interruptionDate);
+  const lastSyncAt = await fetchLastSyncAt(db);
+  const syncAgeHours = lastSyncAt
+    ? (Date.now() - new Date(lastSyncAt).getTime()) / 36e5
+    : null;
+  const syncFresh =
+    syncAgeHours !== null &&
+    Number.isFinite(syncAgeHours) &&
+    syncAgeHours <= OFFSET_SYNC_FRESHNESS_HOURS;
+  const evidenceRows = await fetchOffsetRequestEvidence(request.id, db);
+  const evidenceWindow = offsetEvidenceWindow(request);
+  const candidates = await fetchOffsetEvidenceCandidates(request, db);
+  const candidateMap = new Map(
+    candidates.map((row) => [
+      offsetEvidenceKey(row.task_id, row.changed_at),
+      row,
+    ]),
+  );
+  const capacity = await fetchOffsetDayCapacity(request, db);
+
+  addCheck(
+    'interruption_date_not_future',
+    'Interruption date is not in the future',
+    !!interruptionDate && interruptionDate <= todayYmd,
+    interruptionDate && interruptionDate <= todayYmd
+      ? `Interruption date is on or before current report date ${todayYmd}.`
+      : `Interruption date cannot be after current report date ${todayYmd}.`,
+  );
+
+  addCheck(
+    'interruption_minimum',
+    'Interruption is over 30 minutes',
+    durationMinutes > 30,
+    durationMinutes > 30
+      ? `${durationMinutes} minutes interrupted.`
+      : 'Interruption must be more than 30 minutes.',
+  );
+
+  addCheck(
+    'requested_hours_match',
+    'Requested hours match interruption duration',
+    requestedHours > 0 &&
+      Math.abs(requestedHours - interruptedHours) <= OFFSET_HOUR_EPSILON,
+    Math.abs(requestedHours - interruptedHours) <= OFFSET_HOUR_EPSILON
+      ? `${requestedHours}h requested for ${interruptedHours}h interrupted.`
+      : `Requested hours must equal ${interruptedHours}h.`,
+  );
+
+  const notBeforeInterruption = plannedDate >= interruptionDate;
+  const withinWindow =
+    !!deadlineYmd && notBeforeInterruption && plannedDate <= deadlineYmd;
+  addCheck(
+    'makeup_window',
+    'Make-up date is within 10 working days',
+    withinWindow,
+    !deadlineYmd
+      ? 'Could not resolve the 10-working-day deadline.'
+      : !notBeforeInterruption
+        ? `Make-up date cannot be before interruption date ${interruptionDate}.`
+        : plannedDate <= deadlineYmd
+          ? `Make-up date is within the allowed window through ${deadlineYmd}.`
+          : `Make-up date must be on or before ${deadlineYmd}.`,
+  );
+
+  addCheck(
+    'sync_freshness',
+    'TFS sync is current enough',
+    syncFresh,
+    lastSyncAt
+      ? `Last sync age is ${offsetRoundHours(syncAgeHours)}h. Limit is ${OFFSET_SYNC_FRESHNESS_HOURS}h.`
+      : 'No successful TFS sync has been recorded.',
+    syncFresh ? null : 'stale',
+  );
+
+  addCheck(
+    'evidence_exists',
+    'Linked TFS evidence exists',
+    evidenceRows.length > 0,
+    evidenceRows.length
+      ? `${evidenceRows.length} linked evidence row(s).`
+      : 'No TFS evidence linked.',
+  );
+
+  const evidenceTimingOk =
+    !evidenceWindow.sameDay ||
+    !evidenceWindow.cutoffUtc ||
+    evidenceRows.every((row) => {
+      const changedAt = new Date(row.changed_at);
+      return !isNaN(changedAt) && changedAt >= evidenceWindow.cutoffUtc;
+    });
+  addCheck(
+    'evidence_after_interruption',
+    'Same-day evidence is after interruption end time',
+    evidenceTimingOk,
+    !evidenceWindow.sameDay
+      ? 'Make-up date differs from interruption date, so any evidence on the planned date can be linked.'
+      : evidenceTimingOk
+        ? `Same-day evidence is on or after interruption end time ${String(evidenceWindow.interruptionEndTime || '').slice(0, 5)}.`
+        : `Same-day make-up evidence must be on or after interruption end time ${String(evidenceWindow.interruptionEndTime || '').slice(0, 5)}.`,
+  );
+
+  let evidenceAvailable = true;
+  let evidenceSupportsAllocation = true;
+  let evidenceAllocatedHours = 0;
+  for (const row of evidenceRows) {
+    const allocated = Number(row.allocated_hours || 0);
+    evidenceAllocatedHours += allocated;
+    const candidate = candidateMap.get(
+      offsetEvidenceKey(row.task_id, row.changed_at),
+    );
+    if (!candidate) {
+      evidenceAvailable = false;
+      continue;
+    }
+    if (allocated - candidate.remaining_hours > OFFSET_HOUR_EPSILON) {
+      evidenceSupportsAllocation = false;
+    }
+  }
+  evidenceAllocatedHours = offsetRoundHours(evidenceAllocatedHours);
+
+  addCheck(
+    'evidence_current',
+    'Linked task entries still exist',
+    evidenceAvailable,
+    evidenceAvailable
+      ? 'All linked evidence still exists in synced TFS data.'
+      : evidenceTimingOk
+        ? 'One or more linked task entries no longer match synced TFS data.'
+        : 'One or more linked task entries are outside the allowed same-day evidence window.',
+  );
+
+  addCheck(
+    'evidence_not_reused',
+    'Linked task hours are not reused',
+    evidenceSupportsAllocation,
+    evidenceSupportsAllocation
+      ? 'Linked allocations are within remaining evidence hours.'
+      : 'One or more linked entries exceed remaining available hours.',
+  );
+
+  addCheck(
+    'evidence_total',
+    'Linked evidence matches requested hours',
+    evidenceAllocatedHours > 0 &&
+      Math.abs(evidenceAllocatedHours - requestedHours) <= OFFSET_HOUR_EPSILON,
+    `Linked evidence allocates ${evidenceAllocatedHours}h of ${requestedHours}h requested.`,
+  );
+
+  const hasStale = checks.some((check) => check.status === 'stale');
+  const hasFailure = checks.some((check) => !check.passed);
+  const validationStatus = hasStale
+    ? 'stale'
+    : hasFailure
+      ? 'failed'
+      : 'passed';
+  const allFailedReasons = checks
+    .filter((check) => !check.passed)
+    .map((check) => ({
+      key: check.key,
+      label: check.label,
+      status: check.status,
+      message: check.message,
+    }));
+  const evidenceBlockers = offsetEvidenceBlockersFromSummary({ checks }).map(
+    (check) => ({
+      key: check.key,
+      label: check.label,
+      status: check.status,
+      message: check.message,
+    }),
+  );
+  const failedReasons = evidenceBlockers.length
+    ? evidenceBlockers
+    : allFailedReasons;
+  return {
+    validationStatus,
+    failedReasons,
+    allFailedReasons,
+    checks,
+    request: {
+      interruptionDate,
+      plannedMakeupDate: plannedDate,
+      currentReportDate: todayYmd,
+      interruptionDurationMinutes: durationMinutes,
+      interruptedHours,
+      requestedMakeupHours: requestedHours,
+      deadlineYmd,
+    },
+    sync: {
+      lastSyncAt,
+      syncAgeHours:
+        syncAgeHours === null ? null : offsetRoundHours(syncAgeHours),
+      maxAgeHours: OFFSET_SYNC_FRESHNESS_HOURS,
+    },
+    capacity,
+    evidence: {
+      linkedCount: evidenceRows.length,
+      allocatedHours: evidenceAllocatedHours,
+      window: {
+        sameDay: evidenceWindow.sameDay,
+        cutoffIso: evidenceWindow.cutoffIso,
+        interruptionEndTime: evidenceWindow.interruptionEndTime,
+      },
+    },
+  };
+}
+
+async function validateOffsetRequestAndPersist(id, db = pool) {
+  const request = await fetchOffsetRequest(id, db);
+  if (!request) return null;
+  const summary = await buildOffsetValidationSummary(request, db);
+  await db.query(
+    `UPDATE public.offset_requests
+     SET validation_status = $2,
+         validation_summary = $3::jsonb,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [id, summary.validationStatus, JSON.stringify(summary)],
+  );
+  await db.query(
+    `INSERT INTO public.offset_validation_events(request_id, validation_status, validation_summary)
+     VALUES ($1, $2, $3::jsonb)`,
+    [id, summary.validationStatus, JSON.stringify(summary)],
+  );
+  return summary;
+}
+
+async function parseOffsetRequestBody(body, actorEmail) {
+  const typedUser = normText(body?.user_name || body?.user_upn || body?.user);
+  const userUpnRaw = normText(body?.user_upn) || typedUser;
+  if (!typedUser && !userUpnRaw) return { error: 'user is required' };
+  const resolved = await resolveRegisteredPtoUser(
+    typedUser || userUpnRaw,
+    userUpnRaw,
+  );
+  if (resolved.error) return { error: resolved.error };
+
+  const interruptionDate = validateDateStr(body?.interruption_date);
+  const plannedMakeupDate = validateDateStr(body?.planned_makeup_date);
+  const startTime = validateOffsetTimeStr(body?.interruption_start_time);
+  const endTime = validateOffsetTimeStr(body?.interruption_end_time);
+  if (!interruptionDate)
+    return { error: 'interruption_date is required (YYYY-MM-DD)' };
+  if (!plannedMakeupDate)
+    return { error: 'planned_makeup_date is required (YYYY-MM-DD)' };
+  if (!startTime || !endTime)
+    return {
+      error:
+        'interruption_start_time and interruption_end_time are required (HH:mm)',
+    };
+  const durationMinutes = offsetMinutesBetween(startTime, endTime);
+  if (!durationMinutes)
+    return { error: 'interruption end time must be after start time' };
+  const requestedMakeupHours = normNum(body?.requested_makeup_hours);
+  if (!Number.isFinite(requestedMakeupHours) || requestedMakeupHours <= 0)
+    return { error: 'requested_makeup_hours must be a positive number' };
+  const reason = normText(body?.reason);
+  if (!reason) return { error: 'reason is required' };
+  const remarks = normText(body?.remarks);
+  const user = resolved.user;
+  return {
+    row: {
+      user_upn: user.email,
+      user_name: user.name,
+      user_team: user.team || null,
+      filer_role: user.role || 'dev',
+      interruption_date: interruptionDate,
+      interruption_start_time: startTime,
+      interruption_end_time: endTime,
+      interruption_duration_minutes: durationMinutes,
+      reason,
+      requested_makeup_hours: offsetRoundHours(requestedMakeupHours),
+      planned_makeup_date: plannedMakeupDate,
+      remarks,
+      created_by: actorEmail,
+    },
+  };
+}
+
+function offsetRequestIdParam(req, res) {
+  const id = normInt(req.params.id);
+  if (!id || id < 1) {
+    res.status(400).json({ ok: false, error: 'invalid id' });
+    return null;
+  }
+  return id;
+}
+
+async function sendOffsetDetail(res, id, statusCode = 200) {
+  const row = await fetchOffsetRequest(id);
+  if (!row) return res.status(404).json({ ok: false, error: 'not found' });
+  const evidence = await fetchOffsetRequestEvidence(id);
+  const actionEvents = await fetchOffsetActionEvents(row);
+  const validationEvents = await fetchOffsetValidationEvents(id);
+  res
+    .status(statusCode)
+    .json({ ok: true, row, evidence, actionEvents, validationEvents });
+}
+
+app.get(
+  '/api/offset-requests',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    try {
+      const params = [];
+      const where = [];
+      const statusFilter = String(normText(req.query.status) || '').toLowerCase();
+      const validationFilter = String(
+        normText(req.query.validation) || '',
+      ).toLowerCase();
+      const q = normText(req.query.q);
+      const fromStr = validateDateStr(req.query.from);
+      const toStr = validateDateStr(req.query.to);
+      if (OFFSET_REQUEST_STATUSES.has(statusFilter)) {
+        params.push(statusFilter);
+        where.push(`status = $${params.length}`);
+      }
+      if (OFFSET_VALIDATION_STATUSES.has(validationFilter)) {
+        params.push(validationFilter);
+        where.push(`validation_status = $${params.length}`);
+      }
+      if (fromStr) {
+        params.push(fromStr);
+        where.push(`planned_makeup_date >= $${params.length}::date`);
+      }
+      if (toStr) {
+        params.push(toStr);
+        where.push(`planned_makeup_date <= $${params.length}::date`);
+      }
+      if (q) {
+        params.push(`%${q}%`);
+        const p = `$${params.length}`;
+        where.push(`(
+          user_name ILIKE ${p}
+          OR user_upn ILIKE ${p}
+          OR reason ILIKE ${p}
+          OR remarks ILIKE ${p}
+          OR id::text ILIKE ${p}
+        )`);
+      }
+      const r = await pool.query(
+        `SELECT id, user_upn, user_name, user_team, filer_role,
+                interruption_date::text, interruption_start_time::text, interruption_end_time::text,
+                interruption_duration_minutes, reason, requested_makeup_hours,
+                planned_makeup_date::text, remarks, status, validation_status,
+                validation_summary, email_message_id, created_by, created_at, updated_at,
+                approved_by, approved_at, approved_note, returned_by, returned_at, return_note,
+                cancelled_by, cancelled_at, cancel_note
+         FROM public.offset_requests
+         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+         ORDER BY created_at DESC, id DESC`,
+        params,
+      );
+      res.json({
+        ok: true,
+        rows: r.rows.filter((row) => canReadOffsetRequest(req, row)),
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.get(
+  '/api/offset-requests/:id',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    try {
+      const row = await fetchOffsetRequest(id);
+      if (!row) return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canReadOffsetRequest(req, row))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const evidence = await fetchOffsetRequestEvidence(id);
+      const actionEvents = await fetchOffsetActionEvents(row);
+      const validationEvents = await fetchOffsetValidationEvents(id);
+      res.json({ ok: true, row, evidence, actionEvents, validationEvents });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.post(
+  '/api/offset-requests',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    try {
+      const parsed = await parseOffsetRequestBody(
+        req.body || {},
+        req.userEmail,
+      );
+      if (parsed.error)
+        return res.status(400).json({ ok: false, error: parsed.error });
+      const x = parsed.row;
+      if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const client = await pool.connect();
+      let id;
+      try {
+        await client.query('BEGIN');
+        const r = await client.query(
+          `INSERT INTO public.offset_requests
+             (user_upn, user_name, user_team, filer_role, interruption_date,
+              interruption_start_time, interruption_end_time, interruption_duration_minutes,
+              reason, requested_makeup_hours, planned_makeup_date, remarks, created_by)
+           VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8, $9, $10, $11::date, $12, $13)
+           RETURNING id`,
+          [
+            x.user_upn,
+            x.user_name,
+            x.user_team,
+            x.filer_role,
+            x.interruption_date,
+            x.interruption_start_time,
+            x.interruption_end_time,
+            x.interruption_duration_minutes,
+            x.reason,
+            x.requested_makeup_hours,
+            x.planned_makeup_date,
+            x.remarks,
+            x.created_by,
+          ],
+        );
+        id = r.rows[0].id;
+        await validateOffsetRequestAndPersist(id, client);
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'create',
+          fromStatus: null,
+          toStatus: 'pending_review',
+          metadata: {
+            interruptionDate: x.interruption_date,
+            plannedMakeupDate: x.planned_makeup_date,
+            requestedMakeupHours: x.requested_makeup_hours,
+          },
+        });
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id, 201);
+      queueOffsetWorkflowEmail({
+        requestId: id,
+        eventName: 'create',
+        actorEmail: req.userEmail,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/offset-requests/:id',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    try {
+      const existing = await fetchOffsetRequest(id);
+      if (!existing)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canReadOffsetRequest(req, existing))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (isOffsetFinalStatus(existing.status))
+        return res
+          .status(400)
+          .json({ ok: false, error: 'finalized requests cannot be edited' });
+      if (!canEditOffsetRequest(req, existing))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const parsed = await parseOffsetRequestBody(
+        req.body || {},
+        req.userEmail,
+      );
+      if (parsed.error)
+        return res.status(400).json({ ok: false, error: parsed.error });
+      const x = parsed.row;
+      if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE public.offset_requests
+           SET user_upn = $2,
+               user_name = $3,
+               user_team = $4,
+               filer_role = $5,
+               interruption_date = $6::date,
+               interruption_start_time = $7::time,
+               interruption_end_time = $8::time,
+               interruption_duration_minutes = $9,
+               reason = $10,
+               requested_makeup_hours = $11,
+               planned_makeup_date = $12::date,
+               remarks = $13,
+               status = 'pending_review',
+               returned_by = NULL,
+               returned_at = NULL,
+               return_note = NULL,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [
+            id,
+            x.user_upn,
+            x.user_name,
+            x.user_team,
+            x.filer_role,
+            x.interruption_date,
+            x.interruption_start_time,
+            x.interruption_end_time,
+            x.interruption_duration_minutes,
+            x.reason,
+            x.requested_makeup_hours,
+            x.planned_makeup_date,
+            x.remarks,
+          ],
+        );
+        await client.query(
+          'DELETE FROM public.offset_request_evidence WHERE request_id = $1',
+          [id],
+        );
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: existing.status === 'returned' ? 'resubmit' : 'edit',
+          fromStatus: existing.status,
+          toStatus: 'pending_review',
+          metadata: {
+            evidenceCleared: true,
+            interruptionDate: x.interruption_date,
+            plannedMakeupDate: x.planned_makeup_date,
+            requestedMakeupHours: x.requested_makeup_hours,
+          },
+        });
+        await validateOffsetRequestAndPersist(id, client);
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id);
+      if (existing.status === 'returned') {
+        queueOffsetWorkflowEmail({
+          requestId: id,
+          eventName: 'resubmit',
+          actorEmail: req.userEmail,
+        });
+      }
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.get(
+  '/api/offset-requests/:id/evidence-candidates',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    try {
+      const request = await fetchOffsetRequest(id);
+      if (!request)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canReadOffsetRequest(req, request))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const evidenceWindow = offsetEvidenceWindow(request);
+      const filterSummary = buildOffsetEvidenceFilterSummary(
+        request,
+        evidenceWindow,
+      );
+      const summary = await buildOffsetValidationSummary(request);
+      const blockers = offsetEvidenceBlockersFromSummary(summary);
+      if (blockers.length) {
+        return res.status(400).json({
+          ok: false,
+          error: `Evidence linking disabled: ${blockers[0].message}`,
+          validation: summary,
+          blockers,
+          filterSummary,
+        });
+      }
+      const candidates = await fetchOffsetEvidenceCandidates(request);
+      const capacity = await fetchOffsetDayCapacity(request);
+      res.json({
+        ok: true,
+        candidates,
+        capacity,
+        evidenceWindow,
+        filterSummary,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/offset-requests/:id/evidence',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    const evidence = Array.isArray(req.body?.evidence) ? req.body.evidence : [];
+    try {
+      const request = await fetchOffsetRequest(id);
+      if (!request)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canReadOffsetRequest(req, request))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (isOffsetFinalStatus(request.status))
+        return res
+          .status(400)
+          .json({ ok: false, error: 'finalized requests cannot be changed' });
+      if (!canEditOffsetRequest(req, request))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      const prereqSummary = await buildOffsetValidationSummary(request);
+      const blockers = offsetEvidenceBlockersFromSummary(prereqSummary);
+      if (blockers.length) {
+        return res.status(400).json({
+          ok: false,
+          error: `Evidence linking disabled: ${blockers[0].message}`,
+          validation: prereqSummary,
+          blockers,
+        });
+      }
+
+      const selectedInputMap = new Map();
+      for (const item of evidence) {
+        const taskId = normInt(item.taskId ?? item.task_id);
+        const changedAt = toDateOrNull(item.changedAt ?? item.changed_at);
+        const allocatedHours = offsetRoundHours(
+          item.allocatedHours ?? item.allocated_hours,
+        );
+        if (!taskId || !changedAt || allocatedHours <= 0) continue;
+        const key = offsetEvidenceKey(taskId, changedAt);
+        const prev = selectedInputMap.get(key);
+        selectedInputMap.set(key, {
+          taskId,
+          changedAt,
+          key,
+          allocatedHours: offsetRoundHours(
+            (prev?.allocatedHours || 0) + allocatedHours,
+          ),
+        });
+      }
+      const selectedInput = Array.from(selectedInputMap.values()).sort((a, b) =>
+        a.key.localeCompare(b.key),
+      );
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const item of selectedInput) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+            item.key,
+          ]);
+        }
+        const candidates = await fetchOffsetEvidenceCandidates(request, client);
+        const candidateMap = new Map(
+          candidates.map((row) => [
+            offsetEvidenceKey(row.task_id, row.changed_at),
+            row,
+          ]),
+        );
+        const selected = [];
+        for (const item of selectedInput) {
+          const candidate = candidateMap.get(item.key);
+          if (!candidate)
+            throw new Error(
+              `Selected task ${item.taskId} is not available as make-up evidence.`,
+            );
+          if (
+            item.allocatedHours - Number(candidate.remaining_hours || 0) >
+            OFFSET_HOUR_EPSILON
+          ) {
+            throw new Error(
+              `Selected task ${item.taskId} exceeds remaining available hours.`,
+            );
+          }
+          selected.push({ candidate, allocatedHours: item.allocatedHours });
+        }
+
+        await client.query(
+          'DELETE FROM public.offset_request_evidence WHERE request_id = $1',
+          [id],
+        );
+        for (const { candidate, allocatedHours } of selected) {
+          await client.query(
+            `INSERT INTO public.offset_request_evidence
+               (request_id, task_id, changed_at, snapshot_at, task_title, task_activity,
+                task_assigned_to, task_assigned_upn, ticket_id, ticket_type, ticket_title,
+                feature_id, feature_title, cost_type, prev_hours, actual_hours,
+                delta_hours, eligible_hours, allocated_hours)
+             VALUES ($1, $2, $3::timestamptz, $4::timestamptz, $5, $6, $7, $8, $9, $10, $11,
+                     $12, $13, $14, $15, $16, $17, $18, $19)`,
+            [
+              id,
+              candidate.task_id,
+              new Date(candidate.changed_at).toISOString(),
+              candidate.snapshot_at
+                ? new Date(candidate.snapshot_at).toISOString()
+                : null,
+              candidate.task_title || null,
+              candidate.task_activity || null,
+              candidate.task_assigned_to || null,
+              candidate.task_assigned_upn || null,
+              normInt(candidate.ticket_id),
+              candidate.ticket_type || null,
+              candidate.ticket_title || null,
+              normInt(candidate.feature_id),
+              candidate.feature_title || null,
+              candidate.cost_type || null,
+              offsetRoundHours(candidate.prev_hours),
+              offsetRoundHours(candidate.actual_hours),
+              offsetRoundHours(candidate.delta_hours),
+              offsetRoundHours(candidate.eligible_hours),
+              allocatedHours,
+            ],
+          );
+        }
+        await client.query(
+          `UPDATE public.offset_requests
+           SET status = 'pending_review',
+               returned_by = NULL,
+               returned_at = NULL,
+               return_note = NULL,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [id],
+        );
+        const allocatedHours = offsetRoundHours(
+          selected.reduce((sum, item) => sum + item.allocatedHours, 0),
+        );
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'evidence_save',
+          fromStatus: request.status,
+          toStatus: 'pending_review',
+          metadata: {
+            evidenceCount: selected.length,
+            allocatedHours,
+          },
+        });
+        await validateOffsetRequestAndPersist(id, client);
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id);
+    } catch (e) {
+      res.status(400).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.post(
+  '/api/offset-requests/:id/validate',
+  requireAuth,
+  requireOffsetPilotAccess,
+  requireOffsetManagerAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    try {
+      const existing = await fetchOffsetRequest(id);
+      if (!existing)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canManageOffsetRequest(req))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (!canTransitionOffsetRequest(existing, 'validate'))
+        return res.status(400).json({
+          ok: false,
+          error: 'only pending or returned requests can be rechecked',
+        });
+      const client = await pool.connect();
+      let summary;
+      try {
+        await client.query('BEGIN');
+        summary = await validateOffsetRequestAndPersist(id, client);
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'recheck',
+          fromStatus: existing.status,
+          toStatus: existing.status,
+          metadata: { validationStatus: summary?.validationStatus || null },
+        });
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      const row = await fetchOffsetRequest(id);
+      const actionEvents = await fetchOffsetActionEvents(row);
+      const validationEvents = await fetchOffsetValidationEvents(id);
+      res.json({ ok: true, row, validation: summary, actionEvents, validationEvents });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/offset-requests/:id/approve',
+  requireAuth,
+  requireOffsetPilotAccess,
+  requireOffsetManagerAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    const note = normText(req.body?.note) || null;
+    try {
+      const existing = await fetchOffsetRequest(id);
+      if (!existing)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canManageOffsetRequest(req))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (!canTransitionOffsetRequest(existing, 'approve'))
+        return res.status(400).json({
+          ok: false,
+          error: 'only pending review requests can be approved',
+        });
+      const summary = await validateOffsetRequestAndPersist(id);
+      if (summary.validationStatus !== 'passed') {
+        return res.status(400).json({
+          ok: false,
+          error: 'request validation must pass before approval',
+          validation: summary,
+        });
+      }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const r = await client.query(
+          `UPDATE public.offset_requests
+           SET status = 'approved',
+               approved_by = $2,
+               approved_at = NOW(),
+               approved_note = $3,
+               returned_by = NULL,
+               returned_at = NULL,
+               return_note = NULL,
+               updated_at = NOW()
+           WHERE id = $1
+             AND status = 'pending_review'
+           RETURNING id`,
+          [id, req.userEmail, note],
+        );
+        if (!r.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ ok: false, error: 'not found' });
+        }
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'approve',
+          fromStatus: existing.status,
+          toStatus: 'approved',
+          note,
+          metadata: { validationStatus: summary.validationStatus },
+        });
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id);
+      queueOffsetWorkflowEmail({
+        requestId: id,
+        eventName: 'approve',
+        actorEmail: req.userEmail,
+        note,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/offset-requests/:id/return',
+  requireAuth,
+  requireOffsetPilotAccess,
+  requireOffsetManagerAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    const note = normText(req.body?.note);
+    if (!note)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'return note is required' });
+    try {
+      const existing = await fetchOffsetRequest(id);
+      if (!existing)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canManageOffsetRequest(req))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (!canTransitionOffsetRequest(existing, 'return'))
+        return res.status(400).json({
+          ok: false,
+          error: 'only pending review requests can be returned',
+        });
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const r = await client.query(
+          `UPDATE public.offset_requests
+           SET status = 'returned',
+               returned_by = $2,
+               returned_at = NOW(),
+               return_note = $3,
+               approved_by = NULL,
+               approved_at = NULL,
+               approved_note = NULL,
+               updated_at = NOW()
+           WHERE id = $1
+             AND status = 'pending_review'
+           RETURNING id`,
+          [id, req.userEmail, note],
+        );
+        if (!r.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ ok: false, error: 'not found' });
+        }
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'return',
+          fromStatus: existing.status,
+          toStatus: 'returned',
+          note,
+        });
+        await validateOffsetRequestAndPersist(id, client);
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id);
+      queueOffsetWorkflowEmail({
+        requestId: id,
+        eventName: 'return',
+        actorEmail: req.userEmail,
+        note,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
+app.patch(
+  '/api/offset-requests/:id/cancel',
+  requireAuth,
+  requireOffsetPilotAccess,
+  requireOffsetManagerAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    const note = normText(req.body?.note) || null;
+    try {
+      const existing = await fetchOffsetRequest(id);
+      if (!existing)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canManageOffsetRequest(req))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (!canTransitionOffsetRequest(existing, 'cancel'))
+        return res.status(400).json({
+          ok: false,
+          error: 'only pending review requests can be cancelled',
+        });
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const r = await client.query(
+          `UPDATE public.offset_requests
+           SET status = 'cancelled',
+               cancelled_by = $2,
+               cancelled_at = NOW(),
+               cancel_note = $3,
+               updated_at = NOW()
+           WHERE id = $1
+             AND status = 'pending_review'
+           RETURNING id`,
+          [id, req.userEmail, note],
+        );
+        if (!r.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ ok: false, error: 'not found' });
+        }
+        await recordOffsetActionEvent(client, req, {
+          requestId: id,
+          action: 'cancel',
+          fromStatus: existing.status,
+          toStatus: 'cancelled',
+          note,
+        });
+        await validateOffsetRequestAndPersist(id, client);
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
+      await sendOffsetDetail(res, id);
+      queueOffsetWorkflowEmail({
+        requestId: id,
+        eventName: 'cancel',
+        actorEmail: req.userEmail,
+        note,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
 
 // ---------- Public Holidays ----------
 app.get('/api/holidays', requireAuth, async (req, res) => {
@@ -4838,7 +6841,11 @@ function resolveMissingHoursPeriod(period, todayYmd) {
     const firstOfThisMonth = Date.UTC(p.y, p.mo - 1, 1);
     const lastOfPrevMonth = new Date(firstOfThisMonth - 86400 * 1000);
     const firstOfPrevMonth = new Date(
-      Date.UTC(lastOfPrevMonth.getUTCFullYear(), lastOfPrevMonth.getUTCMonth(), 1),
+      Date.UTC(
+        lastOfPrevMonth.getUTCFullYear(),
+        lastOfPrevMonth.getUTCMonth(),
+        1,
+      ),
     );
     return {
       fromStr: firstOfPrevMonth.toISOString().slice(0, 10),
@@ -4921,7 +6928,7 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
   );
 
   const usersR = await pool.query(
-    `SELECT email, name FROM public.users WHERE email LIKE '%@%' ORDER BY name ASC`,
+    `SELECT email, name FROM public.users WHERE email LIKE '%@%' AND role <> 'admin' ORDER BY name ASC`,
   );
 
   return {
@@ -5245,8 +7252,7 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
   } = req.body || {};
 
   const dryRun = dryRunRaw === true || dryRunRaw === 'true';
-  const threshold =
-    normNum(thresholdRaw) ?? MISSING_HOURS_THRESHOLD;
+  const threshold = normNum(thresholdRaw) ?? MISSING_HOURS_THRESHOLD;
   const managerEmail = normText(managerEmailRaw) || NOTIFY_MANAGER_EMAIL;
 
   if (!Number.isFinite(threshold) || threshold < 0)
@@ -5284,9 +7290,7 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
   const tz = getReportTimeZone();
   const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
   if (!rng)
-    return res
-      .status(400)
-      .json({ ok: false, error: 'invalid from/to date' });
+    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
   try {
     const {
@@ -5334,7 +7338,13 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
             }
           : {}),
         ...(dryRun && offenders.length > 0
-          ? { preview: offenders.map((u) => ({ name: u.name, email: u.email, missing: u.missing })) }
+          ? {
+              preview: offenders.map((u) => ({
+                name: u.name,
+                email: u.email,
+                missing: u.missing,
+              })),
+            }
           : {}),
       });
     }

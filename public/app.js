@@ -13,6 +13,15 @@ let PTO_USERS_CACHE = [];
 let PTO_LIST_VIEW_MODE = 'active';
 let PTO_LIST_USER_FILTER = '';
 let PTO_LAST_ROWS = [];
+let OFFSET_CURRENT_ID = null;
+let OFFSET_CURRENT_ROW = null;
+let OFFSET_LAST_ROWS = [];
+let OFFSET_CANDIDATES = [];
+let OFFSET_CURRENT_VALIDATION = null;
+let OFFSET_CURRENT_ACTION_EVENTS = [];
+let OFFSET_CURRENT_VALIDATION_EVENTS = [];
+let OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
+const OFFSET_UI_ENABLED = false;
 const PTO_ARCHIVE_EXPANDED = new Set();
 const PTO_FINAL_STATUSES = new Set(['approved', 'denied', 'cancelled']);
 
@@ -830,11 +839,18 @@ function exportCsv() {
 
 // -------- Tab logic --------
 function switchTab(name) {
+  if (name === 'offset' && !OFFSET_UI_ENABLED) name = 'report';
   document
     .querySelectorAll('.tab-btn')
     .forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   qs('tabReport').hidden = name !== 'report';
+  const tabOffset = qs('tabOffset');
+  if (tabOffset) tabOffset.hidden = !OFFSET_UI_ENABLED || name !== 'offset';
   qs('tabPto').hidden = name !== 'pto';
+  if (name === 'offset' && OFFSET_UI_ENABLED) {
+    populatePtoUserList();
+    loadOffsetRequests();
+  }
   if (name === 'pto') {
     populatePtoUserList();
     loadHolidays();
@@ -1762,6 +1778,919 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// -------- Offset / Make-up pilot --------
+const OFFSET_STATUS_LABELS = {
+  pending_review: 'Pending Review',
+  returned: 'Returned',
+  approved: 'Approved',
+  cancelled: 'Cancelled',
+};
+
+const OFFSET_VALIDATION_LABELS = {
+  passed: 'Passed',
+  warning: 'Warning',
+  failed: 'Failed',
+  stale: 'Stale Sync',
+};
+
+const OFFSET_ACTION_LABELS = {
+  create: 'Created',
+  edit: 'Edited',
+  resubmit: 'Resubmitted',
+  evidence_save: 'Evidence saved',
+  recheck: 'Validation rechecked',
+  approve: 'Approved',
+  return: 'Returned',
+  cancel: 'Cancelled',
+  email_sent: 'Email sent',
+  email_failed: 'Email failed',
+};
+
+const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
+  'interruption_date_not_future',
+  'interruption_minimum',
+  'requested_hours_match',
+  'makeup_window',
+  'sync_freshness',
+]);
+
+function isOffsetPilotUser() {
+  return !!window.CURRENT_USER;
+}
+
+function offsetEvidenceBlockers(summary = OFFSET_CURRENT_VALIDATION) {
+  const checks = Array.isArray(summary?.checks) ? summary.checks : [];
+  return checks.filter(
+    (check) => OFFSET_EVIDENCE_PREREQ_KEYS.has(check.key) && !check.passed,
+  );
+}
+
+function offsetEvidenceBlockedMessage(blockers = offsetEvidenceBlockers()) {
+  return blockers.length
+    ? `Evidence linking disabled: ${blockers[0].message || blockers[0].label}`
+    : '';
+}
+
+function offsetPrimaryFailedReasons(summary) {
+  const blockers = offsetEvidenceBlockers(summary);
+  if (blockers.length) return blockers;
+  const checks = Array.isArray(summary?.checks) ? summary.checks : [];
+  return Array.isArray(summary?.failedReasons) && summary.failedReasons.length
+    ? summary.failedReasons
+    : checks.filter((check) => !check.passed);
+}
+
+const OFFSET_FINAL_STATUSES = new Set(['approved', 'cancelled']);
+
+function normOffsetIdentity(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+function isOffsetFinalStatus(status) {
+  return OFFSET_FINAL_STATUSES.has(String(status || ''));
+}
+
+function isOffsetOwnRequest(row) {
+  const meEmail = normOffsetIdentity(window.CURRENT_USER?.email);
+  const rowUpn = normOffsetIdentity(row?.user_upn);
+  return !!meEmail && rowUpn === meEmail;
+}
+
+function canEditOffsetRequest(row = OFFSET_CURRENT_ROW) {
+  if (!row) return true;
+  if (isOffsetFinalStatus(row.status)) return false;
+  return window.CURRENT_USER?.role === 'admin' || isOffsetOwnRequest(row);
+}
+
+function canManageOffsetRequest() {
+  return window.CURRENT_USER?.role === 'admin';
+}
+
+function offsetCurrentUserLabel() {
+  return window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
+}
+
+function isOffsetEvidenceLocked(row = OFFSET_CURRENT_ROW) {
+  return !!row && !canEditOffsetRequest(row);
+}
+
+function syncOffsetFormAccess(row = OFFSET_CURRENT_ROW) {
+  const canEdit = canEditOffsetRequest(row);
+  const isAdmin = window.CURRENT_USER?.role === 'admin';
+  const employee = qs('offset_user');
+  if (employee) {
+    employee.readOnly = !isAdmin;
+    employee.disabled = !canEdit;
+    if (!isAdmin && (!row || isOffsetOwnRequest(row))) {
+      employee.value = offsetCurrentUserLabel();
+    }
+  }
+  [
+    'offset_date',
+    'offset_start',
+    'offset_end',
+    'offset_hours',
+    'offset_makeup_date',
+    'offset_reason',
+    'offset_remarks',
+  ].forEach((id) => {
+    const el = qs(id);
+    if (el) el.disabled = !canEdit;
+  });
+  const save = qs('btnOffsetSave');
+  if (save) save.disabled = !canEdit;
+}
+
+function updateOffsetEvidenceSection(row) {
+  const section = qs('offsetEvidenceSection');
+  const locked = isOffsetEvidenceLocked(row);
+  if (section) section.hidden = locked;
+  if (locked) {
+    OFFSET_CANDIDATES = [];
+    OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
+    const status = qs('offsetEvidenceStatus');
+    if (status) status.textContent = '';
+    renderOffsetEvidenceContext(null);
+    renderOffsetEvidence([]);
+  }
+  updateOffsetEvidenceControls();
+}
+
+function updateOffsetEvidenceControls(summary = OFFSET_CURRENT_VALIDATION) {
+  const blockers = offsetEvidenceBlockers(summary);
+  const hidden = qs('offsetEvidenceSection')?.hidden === true;
+  const disabled = hidden || !OFFSET_CURRENT_ID || blockers.length > 0;
+  ['btnOffsetLoadEvidence', 'btnOffsetAutoAllocate', 'btnOffsetSaveEvidence'].forEach((id) => {
+    const btn = qs(id);
+    if (btn) btn.disabled = disabled;
+  });
+  const status = qs('offsetEvidenceStatus');
+  if (status && blockers.length) status.textContent = offsetEvidenceBlockedMessage(blockers);
+}
+
+function offsetBadge(value, labels = OFFSET_STATUS_LABELS) {
+  const raw = String(value || '');
+  const label = labels[raw] || raw || '';
+  const cls = `pto-status pto-status-${CSS.escape ? CSS.escape(raw) : raw.replace(/[^a-z_]/gi, '')}`;
+  return `<span class="${cls}">${escapeHtml(label)}</span>`;
+}
+
+function resolveOffsetUser() {
+  const typed = qs('offset_user')?.value.trim() || '';
+  const match = PTO_USERS_CACHE.find(
+    (u) =>
+      u.name === typed ||
+      u.upn === typed ||
+      u.name?.toLowerCase() === typed.toLowerCase() ||
+      u.upn?.toLowerCase() === typed.toLowerCase(),
+  );
+  return {
+    user_name: match?.name || typed,
+    user_upn: match?.upn || typed,
+  };
+}
+
+function offsetRequestBodyFromForm() {
+  const user = resolveOffsetUser();
+  return {
+    ...user,
+    interruption_date: qs('offset_date')?.value || '',
+    interruption_start_time: qs('offset_start')?.value || '',
+    interruption_end_time: qs('offset_end')?.value || '',
+    requested_makeup_hours: Number(qs('offset_hours')?.value || 0),
+    planned_makeup_date: qs('offset_makeup_date')?.value || '',
+    reason: qs('offset_reason')?.value.trim() || '',
+    remarks: qs('offset_remarks')?.value.trim() || '',
+  };
+}
+
+function syncOffsetRequestedHours() {
+  const start = qs('offset_start')?.value || '';
+  const end = qs('offset_end')?.value || '';
+  const hoursInput = qs('offset_hours');
+  if (!start || !end || !hoursInput) return;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  if (![sh, sm, eh, em].every(Number.isFinite)) return;
+  const mins = eh * 60 + em - (sh * 60 + sm);
+  if (mins > 0) hoursInput.value = (Math.round((mins / 60) * 100) / 100).toFixed(2);
+}
+
+function syncOffsetDateLimits(todayYmd = ymdTodayInReportTz()) {
+  const interruptionDate = qs('offset_date');
+  if (interruptionDate) interruptionDate.max = todayYmd;
+}
+
+function renderOffsetValidation(summary) {
+  const wrap = qs('offsetValidation');
+  if (!wrap) return;
+  if (!summary || !summary.checks) {
+    OFFSET_CURRENT_VALIDATION = null;
+    updateOffsetEvidenceControls(null);
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  OFFSET_CURRENT_VALIDATION = summary;
+  const capacity = summary.capacity || {};
+  const request = summary.request || {};
+  const evidence = summary.evidence || {};
+  const sync = summary.sync || {};
+  const failedReasons = offsetPrimaryFailedReasons(summary);
+  const item = (label, value) => `
+    <div class="offset-summary-item">
+      <span class="k">${escapeHtml(label)}</span>
+      <span class="v">${escapeHtml(value)}</span>
+    </div>`;
+  const failureSummary = failedReasons.length
+    ? `
+    <div class="offset-failure-summary">
+      <strong>${summary.validationStatus === 'stale' ? 'Needs attention' : 'Failed because'}</strong>
+      <ul>
+        ${failedReasons
+          .map(
+            (check) =>
+              `<li><strong>${escapeHtml(check.label || 'Validation check')}</strong>: ${escapeHtml(check.message || '')}</li>`,
+          )
+          .join('')}
+      </ul>
+    </div>`
+    : '';
+  const validationNote = failedReasons.length
+    ? failureSummary
+    : summary.validationStatus === 'passed'
+      ? '<div class="offset-pass-summary">All validation checks passed.</div>'
+      : '';
+  wrap.innerHTML = `
+    <div class="pto-list-bar">
+      <strong>Validation ${offsetBadge(summary.validationStatus, OFFSET_VALIDATION_LABELS)}</strong>
+    </div>
+    <div class="offset-summary-grid">
+      ${item('Interrupted', `${fmtHours(request.interruptedHours)}h`)}
+      ${item('Requested', `${fmtHours(request.requestedMakeupHours)}h`)}
+      ${item('Deadline', request.deadlineYmd || '-')}
+      ${item('Rendered', `${fmtHours(capacity.netRenderedHours)}h`)}
+      ${item('Required', `${fmtHours(capacity.regularRequiredHours)}h`)}
+      ${item('Evidence', `${fmtHours(evidence.allocatedHours)}h`)}
+      ${item('Sync Age', sync.syncAgeHours == null ? '-' : `${fmtHours(sync.syncAgeHours)}h`)}
+    </div>
+    ${validationNote}`;
+  wrap.hidden = false;
+  updateOffsetEvidenceControls(summary);
+}
+
+function renderOffsetEvidenceContext(summary = OFFSET_LAST_EVIDENCE_FILTER_SUMMARY) {
+  const wrap = qs('offsetEvidenceContext');
+  if (!wrap) return;
+  if (!summary) {
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  const chips = [
+    summary.plannedMakeupDate ? `Make-up date ${summary.plannedMakeupDate}` : '',
+    summary.assignedTo ? `Assigned to ${summary.assignedTo}` : '',
+    summary.positiveDeltaOnly ? 'Positive delta hours only' : '',
+    summary.excludesUsedHours ? 'Reused task hours excluded' : '',
+    summary.sameDay && summary.cutoffTime
+      ? `Same-day cutoff ${summary.cutoffTime}`
+      : 'Full make-up date',
+  ].filter(Boolean);
+  wrap.innerHTML = `
+    <strong>TFS evidence filter</strong>
+    <div class="offset-context-list">
+      ${chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join('')}
+    </div>`;
+  wrap.hidden = false;
+}
+
+function offsetEvidenceClientKey(taskId, changedAt) {
+  const iso = changedAt ? new Date(changedAt).toISOString() : '';
+  return `${taskId}|${iso}`;
+}
+
+function offsetValidationEventNote(event) {
+  const summary = event?.validation_summary || {};
+  const reasons = Array.isArray(summary.failedReasons)
+    ? summary.failedReasons
+    : [];
+  if (event?.validation_status === 'passed') return 'All validation checks passed.';
+  if (!reasons.length) return '';
+  return reasons
+    .slice(0, 2)
+    .map((reason) => `${reason.label || 'Validation'}: ${reason.message || ''}`)
+    .join(' ');
+}
+
+function renderOffsetAuditTimeline(row, actionEvents = [], validationEvents = []) {
+  const wrap = qs('offsetAuditTimeline');
+  if (!wrap) return;
+  const actionItems = (Array.isArray(actionEvents) ? actionEvents : []).map((event) => ({
+    kind: 'action',
+    at: event.created_at,
+    title: OFFSET_ACTION_LABELS[event.action] || event.action || 'Action',
+    actor: event.actor_email || '',
+    note: event.note || '',
+    meta:
+      event.from_status && event.to_status && event.from_status !== event.to_status
+        ? `${OFFSET_STATUS_LABELS[event.from_status] || event.from_status} -> ${OFFSET_STATUS_LABELS[event.to_status] || event.to_status}`
+        : event.to_status
+          ? OFFSET_STATUS_LABELS[event.to_status] || event.to_status
+          : '',
+  }));
+  const validationItems = (Array.isArray(validationEvents) ? validationEvents : [])
+    .slice(0, 5)
+    .map((event) => ({
+      kind: 'validation',
+      at: event.created_at,
+      title: `Validation ${OFFSET_VALIDATION_LABELS[event.validation_status] || event.validation_status || ''}`.trim(),
+      actor: '',
+      note: offsetValidationEventNote(event),
+      meta: '',
+    }));
+  const items = [...actionItems, ...validationItems]
+    .filter((item) => item.at)
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+    .slice(0, 12);
+  if (!row || !items.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.innerHTML = `
+    <strong>Request timeline</strong>
+    ${items
+      .map((item) => {
+        const meta = [fmtDateTime(item.at), item.actor, item.meta]
+          .filter(Boolean)
+          .join(' - ');
+        return `
+          <div class="offset-audit-item">
+            <strong>${escapeHtml(item.title)}</strong>
+            ${meta ? `<span class="offset-audit-meta">${escapeHtml(meta)}</span>` : ''}
+            ${item.note ? `<span class="offset-audit-note">${escapeHtml(item.note)}</span>` : ''}
+          </div>`;
+      })
+      .join('')}`;
+  wrap.hidden = false;
+}
+
+function renderOffsetWorkflowAudit(row) {
+  const wrap = qs('offsetWorkflowAudit');
+  if (!wrap) return;
+  let title = '';
+  let actor = '';
+  let when = '';
+  let note = '';
+  if (row?.status === 'returned' || row?.returned_at || row?.return_note) {
+    title = 'Returned to employee';
+    actor = row.returned_by || '';
+    when = row.returned_at || '';
+    note = row.return_note || '';
+  } else if (row?.status === 'cancelled' || row?.cancelled_at || row?.cancel_note) {
+    title = 'Cancelled';
+    actor = row.cancelled_by || '';
+    when = row.cancelled_at || '';
+    note = row.cancel_note || '';
+  } else if (row?.status === 'approved' || row?.approved_at) {
+    title = 'Approved';
+    actor = row.approved_by || '';
+    when = row.approved_at || '';
+    note = row.approved_note || '';
+  }
+  if (!title) {
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  const details = [actor ? `By ${actor}` : '', when ? fmtDateTime(when) : '']
+    .filter(Boolean)
+    .join(' - ');
+  wrap.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    ${details ? `<span class="muted">${escapeHtml(details)}</span>` : ''}
+    ${note ? `<div>${escapeHtml(note)}</div>` : ''}
+    ${row?.status === 'returned' ? '<div class="muted">Edit and save the request or evidence to resubmit it for review.</div>' : ''}`;
+  wrap.hidden = false;
+}
+
+function fillOffsetForm(row, detail = {}) {
+  OFFSET_CURRENT_ROW = row || null;
+  OFFSET_CURRENT_ID = row?.id || null;
+  OFFSET_CURRENT_ACTION_EVENTS = Array.isArray(detail.actionEvents)
+    ? detail.actionEvents
+    : OFFSET_CURRENT_ACTION_EVENTS;
+  OFFSET_CURRENT_VALIDATION_EVENTS = Array.isArray(detail.validationEvents)
+    ? detail.validationEvents
+    : OFFSET_CURRENT_VALIDATION_EVENTS;
+  qs('offset_id').value = OFFSET_CURRENT_ID || '';
+  qs('offset_user').value = row?.user_name || row?.user_upn || '';
+  qs('offset_date').value = row?.interruption_date || '';
+  qs('offset_start').value = String(row?.interruption_start_time || '').slice(0, 5);
+  qs('offset_end').value = String(row?.interruption_end_time || '').slice(0, 5);
+  qs('offset_hours').value =
+    row?.requested_makeup_hours == null
+      ? ''
+      : (Math.round(Number(row.requested_makeup_hours) * 100) / 100).toFixed(2);
+  qs('offset_makeup_date').value = row?.planned_makeup_date || '';
+  qs('offset_reason').value = row?.reason || '';
+  qs('offset_remarks').value = row?.remarks || '';
+  renderOffsetWorkflowAudit(row);
+  renderOffsetAuditTimeline(
+    row,
+    OFFSET_CURRENT_ACTION_EVENTS,
+    OFFSET_CURRENT_VALIDATION_EVENTS,
+  );
+  renderOffsetValidation(row?.validation_summary);
+  syncOffsetFormAccess(row);
+  updateOffsetEvidenceSection(row);
+}
+
+function clearOffsetForm() {
+  OFFSET_CURRENT_ID = null;
+  OFFSET_CURRENT_ROW = null;
+  OFFSET_CURRENT_ACTION_EVENTS = [];
+  OFFSET_CURRENT_VALIDATION_EVENTS = [];
+  OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
+  OFFSET_CANDIDATES = [];
+  qs('formOffset')?.reset();
+  qs('offset_id').value = '';
+  qs('offsetFormStatus').textContent = '';
+  renderOffsetWorkflowAudit(null);
+  renderOffsetAuditTimeline(null);
+  renderOffsetValidation(null);
+  renderOffsetEvidenceContext(null);
+  syncOffsetFormAccess(null);
+  updateOffsetEvidenceSection(null);
+  renderOffsetEvidence([]);
+}
+
+function offsetRequestFilterQuery() {
+  const p = new URLSearchParams();
+  const status = qs('offsetFilterStatus')?.value || '';
+  const validation = qs('offsetFilterValidation')?.value || '';
+  const from = qs('offsetFilterFrom')?.value || '';
+  const to = qs('offsetFilterTo')?.value || '';
+  const q = qs('offsetFilterQ')?.value.trim() || '';
+  if (status) p.set('status', status);
+  if (validation) p.set('validation', validation);
+  if (from) p.set('from', from);
+  if (to) p.set('to', to);
+  if (q) p.set('q', q);
+  const s = p.toString();
+  return s ? `?${s}` : '';
+}
+
+function clearOffsetFilters() {
+  ['offsetFilterStatus', 'offsetFilterValidation', 'offsetFilterFrom', 'offsetFilterTo', 'offsetFilterQ'].forEach((id) => {
+    const el = qs(id);
+    if (el) el.value = '';
+  });
+  loadOffsetRequests();
+}
+
+async function loadOffsetRequests() {
+  const tbody = qs('tbodyOffsetRequests');
+  if (!tbody || !isOffsetPilotUser()) return;
+  try {
+    const r = await apiFetch(`/api/offset-requests${offsetRequestFilterQuery()}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load offset requests.</td></tr>`;
+      return;
+    }
+    OFFSET_LAST_ROWS = Array.isArray(j.rows) ? j.rows : [];
+    renderOffsetRequests(OFFSET_LAST_ROWS);
+  } catch {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">Error loading offset requests.</td></tr>`;
+  }
+}
+
+function renderOffsetRequests(rows) {
+  const tbody = qs('tbodyOffsetRequests');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">No offset requests yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((row) => {
+      const time = `${String(row.interruption_start_time || '').slice(0, 5)}-${String(row.interruption_end_time || '').slice(0, 5)}`;
+      const canManage = canManageOffsetRequest();
+      const isPending = row.status === 'pending_review';
+      const isReturned = row.status === 'returned';
+      const canRecheck = canManage && (isPending || isReturned);
+      const canApprove =
+        canManage &&
+        isPending &&
+        row.validation_status === 'passed';
+      const statusNote =
+        row.status === 'returned' && row.return_note
+          ? `Returned: ${row.return_note}`
+          : row.status === 'approved' && row.approved_note
+            ? `Approved: ${row.approved_note}`
+            : row.status === 'cancelled' && row.cancel_note
+              ? `Cancelled: ${row.cancel_note}`
+              : '';
+      return `
+      <tr>
+        <td data-label="User">${escapeHtml(row.user_name || row.user_upn || '')}</td>
+        <td data-label="Interruption">${escapeHtml(row.interruption_date || '')} ${escapeHtml(time)}</td>
+        <td data-label="Requested">${fmtHours(row.requested_makeup_hours)}</td>
+        <td data-label="Make-up Date">${escapeHtml(row.planned_makeup_date || '')}</td>
+        <td data-label="Validation">${offsetBadge(row.validation_status, OFFSET_VALIDATION_LABELS)}</td>
+        <td data-label="Status">${offsetBadge(row.status)}${statusNote ? `<span class="pto-status-note">${escapeHtml(statusNote)}</span>` : ''}</td>
+        <td class="cell-actions" data-label="Actions">
+          <div class="pto-table-actions">
+            <button type="button" class="ghost" data-offset-action="open" data-id="${row.id}">Open</button>
+            ${canRecheck ? `<button type="button" class="ghost" data-offset-action="validate" data-id="${row.id}">Recheck</button>` : ''}
+            ${canApprove ? `<button type="button" class="btn-approve" data-offset-action="approve" data-id="${row.id}">Approve</button>` : ''}
+            ${canManage && isPending ? `<button type="button" class="btn-deny" data-offset-action="return" data-id="${row.id}">Return</button>` : ''}
+            ${canManage && isPending ? `<button type="button" class="btn-cancel" data-offset-action="cancel" data-id="${row.id}">Cancel</button>` : ''}
+          </div>
+        </td>
+      </tr>`;
+    })
+    .join('');
+}
+
+async function openOffsetRequest(id) {
+  const status = qs('offsetFormStatus');
+  if (status) status.textContent = 'Loading request.';
+  try {
+    const r = await apiFetch(`/api/offset-requests/${id}`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent = `Error: ${j.error || r.status}`;
+      return;
+    }
+    fillOffsetForm(j.row, j);
+    if (!isOffsetEvidenceLocked(j.row)) {
+      renderOffsetEvidenceFromSaved(j.evidence || []);
+      await loadOffsetEvidenceCandidates();
+    }
+    if (status) status.textContent = `Loaded request #${id}.`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+async function saveOffsetRequest() {
+  const status = qs('offsetFormStatus');
+  if (!canEditOffsetRequest(OFFSET_CURRENT_ROW)) {
+    if (status) status.textContent = 'This request is read-only.';
+    return;
+  }
+  if (status) status.textContent = 'Saving request.';
+  try {
+    await populatePtoUserList();
+    const body = offsetRequestBodyFromForm();
+    const id = OFFSET_CURRENT_ID;
+    const r = await apiFetch(id ? `/api/offset-requests/${id}` : '/api/offset-requests', {
+      method: id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent = `Error: ${j.error || r.status}`;
+      return;
+    }
+    OFFSET_CURRENT_ID = j.row.id;
+    fillOffsetForm(j.row, j);
+    renderOffsetEvidenceFromSaved(j.evidence || []);
+    await loadOffsetRequests();
+    await loadOffsetEvidenceCandidates();
+    if (status) status.textContent = `Saved request #${j.row.id}.`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+function renderOffsetEvidenceFromSaved(rows) {
+  if (!rows.length) {
+    renderOffsetEvidence([]);
+    return;
+  }
+  OFFSET_CANDIDATES = rows.map((row) => ({
+    ...row,
+    evidence_key: row.evidence_key || offsetEvidenceClientKey(row.task_id, row.changed_at),
+    selected_allocated_hours: Number(row.allocated_hours || 0),
+    remaining_hours: Number(row.eligible_hours || 0),
+  }));
+  renderOffsetEvidence(OFFSET_CANDIDATES);
+}
+
+async function loadOffsetEvidenceCandidates() {
+  const status = qs('offsetEvidenceStatus');
+  if (!OFFSET_CURRENT_ID) {
+    if (status) status.textContent = 'Save a request first.';
+    return;
+  }
+  if (isOffsetEvidenceLocked()) {
+    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    return;
+  }
+  const blockers = offsetEvidenceBlockers();
+  if (blockers.length) {
+    if (status) status.textContent = offsetEvidenceBlockedMessage(blockers);
+    return;
+  }
+  if (status) status.textContent = 'Loading TFS evidence.';
+  try {
+    const r = await apiFetch(`/api/offset-requests/${OFFSET_CURRENT_ID}/evidence-candidates`);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (j.validation) renderOffsetValidation(j.validation);
+      OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = j.filterSummary || null;
+      renderOffsetEvidenceContext(OFFSET_LAST_EVIDENCE_FILTER_SUMMARY);
+      if (status) status.textContent = `Error: ${j.error || r.status}`;
+      return;
+    }
+    OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = j.filterSummary || null;
+    renderOffsetEvidenceContext(OFFSET_LAST_EVIDENCE_FILTER_SUMMARY);
+    OFFSET_CANDIDATES = Array.isArray(j.candidates) ? j.candidates : [];
+    renderOffsetEvidence(OFFSET_CANDIDATES);
+    if (status) {
+      const cutoffTime = String(j.evidenceWindow?.interruptionEndTime || '').slice(0, 5);
+      status.textContent = OFFSET_CANDIDATES.length
+        ? `${OFFSET_CANDIDATES.length} candidate row(s) loaded.`
+        : j.evidenceWindow?.sameDay && cutoffTime
+          ? `No positive TFS delta rows found on or after interruption end time ${cutoffTime}.`
+          : 'No positive TFS delta rows found for this make-up date.';
+    }
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+function renderOffsetEvidence(rows) {
+  const tbody = qs('tbodyOffsetEvidence');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="muted">No evidence rows loaded.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map((row) => {
+      const selected = Number(row.selected_allocated_hours || row.allocated_hours || 0);
+      const max = Math.max(
+        selected,
+        Number(row.remaining_hours ?? row.eligible_hours ?? 0),
+      );
+      const disabled = max <= 0 || offsetEvidenceBlockers().length > 0;
+      return `
+      <tr>
+        <td data-label="Use"><input type="checkbox" class="offset-use" data-key="${escapeHtml(row.evidence_key || '')}" ${selected > 0 ? 'checked' : ''} ${disabled ? 'disabled' : ''} /></td>
+        <td data-label="Changed">${escapeHtml(fmtDateTime(row.changed_at))}</td>
+        <td data-label="Task">${renderIdTag(row.task_id)} ${escapeHtml(row.task_title || '')}</td>
+        <td data-label="Ticket">${renderIdTag(row.ticket_id)} ${escapeHtml(row.ticket_title || '')}</td>
+        <td data-label="Prev">${fmtHours(row.prev_hours)}</td>
+        <td data-label="Actual">${fmtHours(row.actual_hours)}</td>
+        <td data-label="Delta">${fmtHours(row.delta_hours)}</td>
+        <td data-label="Used Elsewhere">${fmtHours(row.used_hours)}</td>
+        <td data-label="Available">${fmtHours(max)}</td>
+        <td data-label="Allocate"><input type="number" class="offset-allocated" data-key="${escapeHtml(row.evidence_key || '')}" min="0" step="0.01" max="${escapeHtml(max)}" value="${selected > 0 ? selected : ''}" ${disabled ? 'disabled' : ''} /></td>
+      </tr>`;
+    })
+    .join('');
+}
+
+function autoAllocateOffsetEvidence() {
+  if (isOffsetEvidenceLocked()) {
+    const status = qs('offsetEvidenceStatus');
+    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    return;
+  }
+  const blockers = offsetEvidenceBlockers();
+  if (blockers.length) {
+    const status = qs('offsetEvidenceStatus');
+    if (status) status.textContent = offsetEvidenceBlockedMessage(blockers);
+    return;
+  }
+  const requested = Number(qs('offset_hours')?.value || 0);
+  if (!Number.isFinite(requested) || requested <= 0) return;
+  let remaining = requested;
+  document.querySelectorAll('.offset-use').forEach((box) => {
+    const key = box.dataset.key;
+    const input = document.querySelector(`.offset-allocated[data-key="${CSS.escape(key)}"]`);
+    const row = OFFSET_CANDIDATES.find((x) => x.evidence_key === key);
+    const max = Number(row?.remaining_hours ?? row?.eligible_hours ?? input?.max ?? 0);
+    const allocation = Math.min(max, remaining);
+    box.checked = allocation > 0;
+    if (input) input.value = allocation > 0 ? (Math.round(allocation * 100) / 100).toFixed(2) : '';
+    remaining = Math.max(0, remaining - allocation);
+  });
+}
+
+async function saveOffsetEvidence() {
+  const status = qs('offsetEvidenceStatus');
+  if (!OFFSET_CURRENT_ID) {
+    if (status) status.textContent = 'Save a request first.';
+    return;
+  }
+  if (isOffsetEvidenceLocked()) {
+    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    return;
+  }
+  const blockers = offsetEvidenceBlockers();
+  if (blockers.length) {
+    if (status) status.textContent = offsetEvidenceBlockedMessage(blockers);
+    return;
+  }
+  const evidence = [];
+  document.querySelectorAll('.offset-use:checked').forEach((box) => {
+    const key = box.dataset.key;
+    const row = OFFSET_CANDIDATES.find((x) => x.evidence_key === key);
+    const input = document.querySelector(`.offset-allocated[data-key="${CSS.escape(key)}"]`);
+    const allocatedHours = Number(input?.value || 0);
+    if (!row || !Number.isFinite(allocatedHours) || allocatedHours <= 0) return;
+    evidence.push({
+      taskId: row.task_id,
+      changedAt: row.changed_at,
+      allocatedHours,
+    });
+  });
+  if (status) status.textContent = 'Saving evidence.';
+  try {
+    const r = await apiFetch(`/api/offset-requests/${OFFSET_CURRENT_ID}/evidence`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ evidence }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (j.validation) renderOffsetValidation(j.validation);
+      if (status) status.textContent = `Error: ${j.error || r.status}`;
+      return;
+    }
+    fillOffsetForm(j.row, j);
+    renderOffsetEvidenceFromSaved(j.evidence || []);
+    await loadOffsetRequests();
+    await loadOffsetEvidenceCandidates();
+    if (status) status.textContent = 'Evidence saved and validation refreshed.';
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
+function showOffsetReviewNotePanel(id, action) {
+  const status = qs('offsetRequestActionStatus');
+  const panel = qs('offsetReviewNotePanel');
+  const title = qs('offsetReviewNoteTitle');
+  const idInput = qs('offsetReviewNoteId');
+  const actionInput = qs('offsetReviewNoteAction');
+  const text = qs('offsetReviewNoteText');
+  if (!panel || !idInput || !actionInput || !text) return;
+  idInput.value = id;
+  actionInput.value = action;
+  text.value = '';
+  panel.hidden = false;
+  const copy =
+    action === 'return'
+      ? {
+          title: 'Return',
+          placeholder: 'Required: explain what the employee must correct',
+          confirm: 'Return Request',
+          status: `Add a return note for request #${id}.`,
+        }
+      : action === 'approve'
+        ? {
+            title: 'Approve',
+            placeholder: 'Optional: add approval note',
+            confirm: 'Approve Request',
+            status: `Add an optional approval note for request #${id}.`,
+          }
+        : {
+            title: 'Cancel',
+            placeholder: 'Optional: explain why this request is being cancelled',
+            confirm: 'Cancel Request',
+            status: `Add an optional cancel note for request #${id}.`,
+          };
+  if (title) title.textContent = `${copy.title} request #${id}`;
+  text.placeholder = copy.placeholder;
+  const confirm = qs('btnOffsetConfirmReviewNote');
+  if (confirm) confirm.textContent = copy.confirm;
+  if (status) status.textContent = copy.status;
+  text.focus();
+}
+
+function hideOffsetReviewNotePanel() {
+  const panel = qs('offsetReviewNotePanel');
+  if (panel) panel.hidden = true;
+  qs('offsetReviewNoteId').value = '';
+  qs('offsetReviewNoteAction').value = '';
+  qs('offsetReviewNoteText').value = '';
+}
+
+async function submitOffsetReviewNote() {
+  const id = qs('offsetReviewNoteId')?.value;
+  const action = qs('offsetReviewNoteAction')?.value;
+  const note = qs('offsetReviewNoteText')?.value.trim() || '';
+  const status = qs('offsetRequestActionStatus');
+  if (!id || !action) return;
+  if (action === 'return' && !note) {
+    if (status) status.textContent = `Return request #${id}: note is required.`;
+    qs('offsetReviewNoteText')?.focus();
+    return;
+  }
+  await performOffsetAction(id, action, note);
+  hideOffsetReviewNotePanel();
+}
+
+async function offsetAction(id, action, note = null) {
+  if (action === 'approve' || action === 'return' || action === 'cancel') {
+    showOffsetReviewNotePanel(id, action);
+    return;
+  }
+  await performOffsetAction(id, action, note);
+}
+
+async function performOffsetAction(id, action, note = null) {
+  const status = qs('offsetRequestActionStatus');
+  const actionLabel =
+    action === 'validate'
+      ? 'Rechecking'
+      : action === 'approve'
+        ? 'Approving'
+        : action === 'return'
+          ? 'Returning'
+          : 'Cancelling';
+  if (status) status.textContent = `${actionLabel} request #${id}.`;
+  try {
+    const r = await apiFetch(`/api/offset-requests/${id}/${action}`, {
+      method: action === 'validate' ? 'POST' : 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent = `Error on request #${id}: ${j.error || r.status}`;
+      alert(`Error: ${j.error || r.status}`);
+      return;
+    }
+    await loadOffsetRequests();
+    if (OFFSET_CURRENT_ID === Number(id)) await openOffsetRequest(id);
+    const resultStatus =
+      j.row?.validation_status || j.validation?.validationStatus || j.row?.status || '';
+    const doneLabel =
+      action === 'validate'
+        ? `Rechecked request #${id}${resultStatus ? `: ${resultStatus}` : ''}.`
+        : action === 'approve'
+          ? `Approved request #${id}.`
+          : action === 'return'
+            ? `Returned request #${id}.`
+            : `Cancelled request #${id}.`;
+    if (status) status.textContent = doneLabel;
+  } catch (err) {
+    if (status) status.textContent = `Error on request #${id}: ${err.message}`;
+    alert(`Error: ${err.message}`);
+  }
+}
+
+qs('formOffset')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await saveOffsetRequest();
+});
+qs('btnOffsetNew')?.addEventListener('click', clearOffsetForm);
+qs('btnOffsetRefresh')?.addEventListener('click', loadOffsetRequests);
+qs('btnOffsetClearFilters')?.addEventListener('click', clearOffsetFilters);
+qs('btnOffsetLoadEvidence')?.addEventListener('click', loadOffsetEvidenceCandidates);
+qs('btnOffsetAutoAllocate')?.addEventListener('click', autoAllocateOffsetEvidence);
+qs('btnOffsetSaveEvidence')?.addEventListener('click', saveOffsetEvidence);
+qs('btnOffsetConfirmReviewNote')?.addEventListener('click', submitOffsetReviewNote);
+qs('btnOffsetCancelReviewNote')?.addEventListener('click', () => {
+  const id = qs('offsetReviewNoteId')?.value;
+  const action = qs('offsetReviewNoteAction')?.value;
+  hideOffsetReviewNotePanel();
+  const status = qs('offsetRequestActionStatus');
+  const label =
+    action === 'return' ? 'Return' : action === 'approve' ? 'Approve' : 'Cancel';
+  if (status && id && action) status.textContent = `${label} cancelled for request #${id}.`;
+});
+qs('offset_start')?.addEventListener('input', syncOffsetRequestedHours);
+qs('offset_end')?.addEventListener('input', syncOffsetRequestedHours);
+[
+  'offsetFilterStatus',
+  'offsetFilterValidation',
+  'offsetFilterFrom',
+  'offsetFilterTo',
+].forEach((id) => qs(id)?.addEventListener('change', loadOffsetRequests));
+qs('offsetFilterQ')?.addEventListener('change', loadOffsetRequests);
+qs('offsetFilterQ')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') loadOffsetRequests();
+});
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-offset-action]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const action = btn.dataset.offsetAction;
+  if (!id || !action) return;
+  if (action === 'open') await openOffsetRequest(id);
+  else await offsetAction(id, action);
+});
+
 // -------- Metrics --------
 function resetMetricCards() {
   qs('m_required').textContent = '-';
@@ -1889,6 +2818,9 @@ document.querySelectorAll('.preset-btn').forEach((btn) => {
 function setRoleUI(role) {
   const isPrivileged = role === 'admin' || role === 'pm';
 
+  const offsetTabButton = qs('tabBtnOffset');
+  if (offsetTabButton) offsetTabButton.hidden = !OFFSET_UI_ENABLED;
+
   // Non-privileged: hide Send Missing Hours Notifications panel
   const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
   if (notifyPanel) notifyPanel.hidden = !isPrivileged;
@@ -1982,6 +2914,8 @@ function setRoleUI(role) {
 
   const toStr = ymdTodayInReportTz();
   const fromStr = ymdAddDays(toStr, -6);
+  syncOffsetDateLimits(toStr);
+  syncOffsetFormAccess(null);
 
   qs('from').value = fromStr;
   qs('to').value = toStr;
