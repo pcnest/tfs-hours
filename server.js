@@ -36,6 +36,12 @@ const EXTRA_CC_EMAILS = (process.env.EXTRA_CC_EMAILS || '')
   .split(',')
   .map((e) => e.trim())
   .filter((e) => e.includes('@'));
+// Global CC list added to every PTO-related email (submission, approval, denial, cancellation, reminders)
+// Comma-separated list of email addresses, e.g. "hr@company.com,ceo@company.com"
+const NOTIFY_CC_EMAIL = (process.env.NOTIFY_CC_EMAIL || '')
+  .split(',')
+  .map((e) => e.trim())
+  .filter((e) => e.includes('@'));
 const SPECIAL_PTO_WORKFLOW_TEAM = (
   process.env.SPECIAL_PTO_WORKFLOW_TEAM || ''
 ).trim();
@@ -133,6 +139,32 @@ function createMailTransporter() {
   };
 }
 
+/**
+ * Merges one or more CC sources (strings or arrays) into a single comma-separated
+ * string suitable for use as a `cc` field in sendMail. Returns undefined when the
+ * merged result is empty so callers can spread it safely: `cc: mergeCC(...)`.
+ */
+function mergeCC(...parts) {
+  const seen = new Set();
+  const result = [];
+  for (const part of parts) {
+    const emails = Array.isArray(part)
+      ? part
+      : String(part || '')
+          .split(',')
+          .map((e) => e.trim())
+          .filter(Boolean);
+    for (const email of emails) {
+      const key = email.toLowerCase();
+      if (email && !seen.has(key)) {
+        seen.add(key);
+        result.push(email);
+      }
+    }
+  }
+  return result.length ? result.join(', ') : undefined;
+}
+
 function requireConfiguredApiKey(req, res, configuredKey, configName) {
   if (!configuredKey) {
     res.status(503).json({
@@ -198,6 +230,7 @@ app.get('/api/config', (req, res) => {
     reportTzLabel: REPORT_TZ_LABEL,
     reportTzIana: REPORT_TZ_IANA || null,
     notifyManagerEmail: NOTIFY_MANAGER_EMAIL || null,
+    notifyCcEmail: NOTIFY_CC_EMAIL.length ? NOTIFY_CC_EMAIL : null,
     smtpConfigured: !!(BREVO_API_KEY && NOTIFY_FROM_EMAIL),
     specialPtoWorkflowTeam: SPECIAL_PTO_WORKFLOW_TEAM || null,
   });
@@ -337,8 +370,7 @@ function parseTimeParts(timeStr) {
   const h = Number(m[1]);
   const mi = Number(m[2]);
   const s = Number(m[3] || 0);
-  if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59)
-    return null;
+  if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59) return null;
   return { h, mi, s };
 }
 
@@ -2247,10 +2279,15 @@ function buildOffsetEmailContent({
   const interruptedHours = offsetRoundHours(
     Number(row.interruption_duration_minutes || 0) / 60,
   );
-  const evidenceCount = Number(summary?.evidence?.linkedCount ?? evidence.length);
+  const evidenceCount = Number(
+    summary?.evidence?.linkedCount ?? evidence.length,
+  );
   const evidenceHours = offsetRoundHours(
     summary?.evidence?.allocatedHours ??
-      evidence.reduce((sum, item) => sum + Number(item.allocated_hours || 0), 0),
+      evidence.reduce(
+        (sum, item) => sum + Number(item.allocated_hours || 0),
+        0,
+      ),
   );
   const failedReasons = Array.isArray(summary?.failedReasons)
     ? summary.failedReasons
@@ -2264,8 +2301,16 @@ function buildOffsetEmailContent({
     ['Requested Make-up Hours', `${fmtH(requestedHours)} hrs`],
     ['Planned Make-up Date', ymdValue(row.planned_makeup_date)],
     ['Status', offsetEmailStatusLabel(row.status)],
-    ['Validation', offsetEmailValidationLabel(summary?.validationStatus || row.validation_status)],
-    ['Linked TFS Evidence', `${evidenceCount} row(s), ${fmtH(evidenceHours)} hrs allocated`],
+    [
+      'Validation',
+      offsetEmailValidationLabel(
+        summary?.validationStatus || row.validation_status,
+      ),
+    ],
+    [
+      'Linked TFS Evidence',
+      `${evidenceCount} row(s), ${fmtH(evidenceHours)} hrs allocated`,
+    ],
     ['Reason', row.reason || '-'],
     ['Remarks', row.remarks || '-'],
   ];
@@ -2299,7 +2344,9 @@ ${failedHtml}
 ${appHtml}
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`;
 
-  const textRows = rows.map(([label, value]) => `${label}: ${value}`).join('\n');
+  const textRows = rows
+    .map(([label, value]) => `${label}: ${value}`)
+    .join('\n');
   const failedText = failedReasons.length
     ? `\nFailed validation reason(s):\n${failedReasons
         .map(
@@ -2331,14 +2378,21 @@ async function recordOffsetEmailEvent(requestId, action, note, metadata = {}) {
   }
 }
 
-async function sendOffsetWorkflowEmail({ requestId, eventName, actorEmail, note }) {
+async function sendOffsetWorkflowEmail({
+  requestId,
+  eventName,
+  actorEmail,
+  note,
+}) {
   if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL) return;
   if (!OFFSET_EMAIL_WORKFLOW_EVENTS.has(eventName)) return;
 
   const row = await fetchOffsetRequest(requestId);
   if (!row) return;
   const evidence = await fetchOffsetRequestEvidence(requestId);
-  const summaryFromDb = normalizeOffsetValidationSummary(row.validation_summary);
+  const summaryFromDb = normalizeOffsetValidationSummary(
+    row.validation_summary,
+  );
   const summary = summaryFromDb.validationStatus
     ? summaryFromDb
     : await buildOffsetValidationSummary(row);
@@ -2359,7 +2413,8 @@ async function sendOffsetWorkflowEmail({ requestId, eventName, actorEmail, note 
   }
   if (!toList.length) return;
 
-  const rootMessageId = row.email_message_id || `<${crypto.randomUUID()}@tfs-hours>`;
+  const rootMessageId =
+    row.email_message_id || `<${crypto.randomUUID()}@tfs-hours>`;
   const firstOffsetEmail = !row.email_message_id;
   const messageUuid = crypto.randomUUID();
   const messageId = firstOffsetEmail
@@ -2401,13 +2456,18 @@ async function sendOffsetWorkflowEmail({ requestId, eventName, actorEmail, note 
         [requestId, rootMessageId],
       );
     }
-    await recordOffsetEmailEvent(requestId, 'email_sent', `Email sent: ${eventLabel}.`, {
-      workflowEvent: eventName,
-      to: toList,
-      cc: ccList,
-      messageId,
-      rootMessageId,
-    });
+    await recordOffsetEmailEvent(
+      requestId,
+      'email_sent',
+      `Email sent: ${eventLabel}.`,
+      {
+        workflowEvent: eventName,
+        to: toList,
+        cc: ccList,
+        messageId,
+        rootMessageId,
+      },
+    );
   } catch (e) {
     const error = String(e?.message || e);
     await recordOffsetEmailEvent(
@@ -3065,7 +3125,9 @@ app.get(
     try {
       const params = [];
       const where = [];
-      const statusFilter = String(normText(req.query.status) || '').toLowerCase();
+      const statusFilter = String(
+        normText(req.query.status) || '',
+      ).toLowerCase();
       const validationFilter = String(
         normText(req.query.validation) || '',
       ).toLowerCase();
@@ -3571,7 +3633,13 @@ app.post(
       const row = await fetchOffsetRequest(id);
       const actionEvents = await fetchOffsetActionEvents(row);
       const validationEvents = await fetchOffsetValidationEvents(id);
-      res.json({ ok: true, row, validation: summary, actionEvents, validationEvents });
+      res.json({
+        ok: true,
+        row,
+        validation: summary,
+        actionEvents,
+        validationEvents,
+      });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -4439,6 +4507,7 @@ async function sendSpecialExternalApprovalRequestEmail(
     await transporter.sendMail({
       from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
       to: tokenRecord.email,
+      cc: mergeCC(NOTIFY_CC_EMAIL),
       subject: `External PTO Approval Request \u2013 ${displayName} \u2013 ${entry.leave_type} Leave on ${dateLabel}`,
       html: `<p>Hi @Team,</p>
 <p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> has completed internal review and now needs external approval.</p>
@@ -4480,6 +4549,7 @@ async function sendSpecialExternalReceivedLeadApprovedEmail(
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
     to: toList.join(', '),
+    cc: mergeCC(NOTIFY_CC_EMAIL),
     subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
     html: `<p>Hi @Team,</p>
 <p>External approval for <strong>${escapeEmailHtml(displayName)}</strong>'s PTO request on <strong>${escapeEmailHtml(dateLabel)}</strong> has been marked received by <strong>${escapeEmailHtml(actorLabel || '')}</strong>.</p>
@@ -4538,11 +4608,10 @@ async function sendPtoFinalApprovalEmail(entry, rows, actorLabel) {
     console.error('PTO final approval PDF error:', pdfErr);
   }
 
-  const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
     to: toList.join(', '),
-    ...(ccList.length ? { cc: ccList.join(', ') } : {}),
+    cc: mergeCC(EXTRA_CC_EMAILS, NOTIFY_CC_EMAIL),
     subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>fully approved by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
 ${leadApprovalDetails.html}
@@ -4571,7 +4640,7 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
   await transporter.sendMail({
     from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
     to: entry.user_upn,
-    ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
+    cc: mergeCC(ccEmails, NOTIFY_CC_EMAIL),
     subject: `Re: ${ptoThreadTopic(entry, dateLabel)}`,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>denied by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -5070,7 +5139,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
                 from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                 messageId: generatedMsgId,
                 to: approverEmails.join(', '),
-                cc: req.userEmail,
+                cc: mergeCC(req.userEmail, NOTIFY_CC_EMAIL),
                 subject: `LEAVE REQUEST \u2013 ${user_name || user_upn} \u2013 ${leave_type} Leave on ${dateLabel}`,
                 headers: {
                   'Thread-Topic': threadTopic,
@@ -5113,6 +5182,7 @@ app.post('/api/pto', requireAuth, async (req, res) => {
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: req.userEmail,
+              cc: mergeCC(NOTIFY_CC_EMAIL),
               subject: `PTO Approved \u2013 ${user_name || user_upn} \u2013 ${dateLabel}`,
               html: `<p>Hi ${escapeEmailHtml(user_name || user_upn)},</p>
 <p>Your Leave Request for <strong>${escapeEmailHtml(_fmtDateLabel)}</strong> has been <strong>automatically approved</strong>.</p>
@@ -5297,6 +5367,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
+                  cc: mergeCC(NOTIFY_CC_EMAIL),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -5361,11 +5432,10 @@ app.patch(
                 } catch (pdfErr) {
                   console.error('PM batch approval PDF error:', pdfErr);
                 }
-                const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  ...(ccList.length ? { cc: ccList.join(', ') } : {}),
+                  cc: mergeCC(EXTRA_CC_EMAILS, NOTIFY_CC_EMAIL),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 ${leadApprovalDetails.html}
@@ -5482,7 +5552,7 @@ app.patch(
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
-              ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
+              cc: mergeCC(ccEmails, NOTIFY_CC_EMAIL),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${entry.user_name || entry.user_upn}</strong> on <strong>${escapeEmailHtml(dateRange)}</strong> has been <strong>denied by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -5675,6 +5745,7 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: toList.join(', '),
+              cc: mergeCC(NOTIFY_CC_EMAIL),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${batchDateRange}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(batchDateRange)}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -6286,6 +6357,7 @@ app.patch(
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
+                  cc: mergeCC(NOTIFY_CC_EMAIL),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong> (lead).</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -6348,11 +6420,10 @@ app.patch(
                 } catch (pdfErr) {
                   console.error('PM approval PDF error:', pdfErr);
                 }
-                const ccList = EXTRA_CC_EMAILS.length ? EXTRA_CC_EMAILS : [];
                 await transporter.sendMail({
                   from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
                   to: toList.join(', '),
-                  ...(ccList.length ? { cc: ccList.join(', ') } : {}),
+                  cc: mergeCC(EXTRA_CC_EMAILS, NOTIFY_CC_EMAIL),
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   ${leadApprovalDetails.html}
@@ -6459,7 +6530,7 @@ app.patch(
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: entry.user_upn,
-              ...(ccEmails.length ? { cc: ccEmails.join(', ') } : {}),
+              cc: mergeCC(ccEmails, NOTIFY_CC_EMAIL),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>Your PTO request for <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>denied</strong> by ${escapeEmailHtml(req.userName || req.userEmail)}.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -6562,6 +6633,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
             await transporter.sendMail({
               from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
               to: toList.join(', '),
+              cc: mergeCC(NOTIFY_CC_EMAIL),
               subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
               html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(entry.user_name || entry.user_upn)}</strong> on <strong>${escapeEmailHtml(fmtSubjectDate(entry.entry_date))}</strong> has been <strong>cancelled by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
@@ -7804,7 +7876,7 @@ app.post('/api/pto/overdue-reminders', async (req, res) => {
         await transporter.sendMail({
           from: `"${NOTIFY_FROM_NAME}" <${NOTIFY_FROM_EMAIL}>`,
           to: recipients.to.join(', '),
-          ...(recipients.cc.length ? { cc: recipients.cc.join(', ') } : {}),
+          cc: mergeCC(recipients.cc, NOTIFY_CC_EMAIL),
           subject: email.subject,
           html: email.html,
           text: email.text,
