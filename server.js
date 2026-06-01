@@ -4597,7 +4597,8 @@ async function sendSpecialExternalReceivedLeadApprovedEmail(
   options = {},
 ) {
   const pmEmails = await getApproverEmails('lead', entry.filer_team, null);
-  const toList = dedupeEmails(pmEmails);
+  const leadEmails = await getApproverEmails('qa', entry.filer_team, null);
+  const toList = dedupeEmails([entry.user_upn, ...leadEmails, ...pmEmails]);
   if (!toList.length) return;
 
   const transporter = createMailTransporter();
@@ -4652,16 +4653,32 @@ async function sendPtoFinalApprovalEmail(entry, rows, actorLabel, options = {}) 
       )
     : { html: '', text: '' };
 
-  let leadEmails = [];
+  let workflowRecipientEmails = [];
   const leadApprovalDetails = await buildLeadApprovalEmailDetails(
     entry.approved_by_lead,
     entry.lead_actioned_at,
   );
-  if (['dev', 'qa'].includes(entry.filer_role) || entry.filer_role === 'lead') {
-    leadEmails = await getApproverEmails('dev', entry.filer_team, null);
+  if (
+    isSpecialPtoWorkflow(entry) &&
+    (entry.filer_role === 'lead' || entry.filer_role === 'pm')
+  ) {
+    workflowRecipientEmails = await getApproverEmails(
+      entry.filer_role,
+      entry.filer_team,
+      entry.user_upn,
+    );
+  } else if (
+    ['dev', 'qa'].includes(entry.filer_role) ||
+    entry.filer_role === 'lead'
+  ) {
+    workflowRecipientEmails = await getApproverEmails(
+      'dev',
+      entry.filer_team,
+      null,
+    );
   }
 
-  const toList = dedupeEmails([entry.user_upn, ...leadEmails]);
+  const toList = dedupeEmails([entry.user_upn, ...workflowRecipientEmails]);
   if (!toList.length) return;
 
   let attachments = [];
