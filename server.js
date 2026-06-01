@@ -4506,11 +4506,11 @@ function ptoReplyEmailMeta(entry, dateLabel, contextLabel = 'PTO reply email') {
 }
 
 function buildExternalDecisionEmailDetails(actorLabel, note) {
-  const cleanActor = actorLabel || 'external approver';
   const cleanNote = note || '';
+  if (!cleanNote) return { html: '', text: '' };
   return {
-    html: `<p><strong>External Approver:</strong> ${escapeEmailHtml(cleanActor)}${cleanNote ? `<br><strong>External Note:</strong> ${escapeEmailHtml(cleanNote)}` : ''}</p>`,
-    text: `\nExternal Approver: ${cleanActor}${cleanNote ? `\nExternal Note: ${cleanNote}` : ''}`,
+    html: `<p><strong>Approver's Note:</strong> ${escapeEmailHtml(cleanNote)}</p>`,
+    text: `\nApprover's Note: ${cleanNote}`,
   };
 }
 
@@ -4519,7 +4519,7 @@ function getExternalApproverDisplayName(email) {
   const contact = SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.find(
     (item) => normIdentity(item.email) === emailKey,
   );
-  return contact?.name || email || '';
+  return contact?.name || 'external approver';
 }
 
 async function createExternalApprovalTokens(entry, baseUrl) {
@@ -4645,10 +4645,10 @@ async function sendSpecialExternalReceivedLeadApprovedEmail(
     ? buildExternalDecisionEmailDetails(actor, options.externalDecisionNote)
     : { html: '', text: '' };
   const actionText = isExternalDecision
-    ? `has been approved by external approver <strong>${escapeEmailHtml(actor)}</strong>`
+    ? `has been approved by <strong>${escapeEmailHtml(actor)}</strong>`
     : `has been marked received by <strong>${escapeEmailHtml(actor)}</strong>`;
   const actionPlain = isExternalDecision
-    ? `has been approved by external approver ${actor}`
+    ? `has been approved by ${actor}`
     : `has been marked received by ${actor}`;
 
   await transporter.sendMail({
@@ -4775,12 +4775,11 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
     cc: mergeCC(ccEmails, NOTIFY_CC_EMAIL),
     subject: replyMeta.subject,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>denied by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
-<p><strong>External Approver:</strong> ${escapeEmailHtml(actorLabel || '')}</p>
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 ${denialNote ? `<p><strong>Reason:</strong> ${escapeEmailHtml(denialNote)}</p>` : ''}
 <p>You may resubmit a new PTO request if needed.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`,
-    text: `PTO for ${displayName} (${dateLabel}) was denied by ${actorLabel || ''}.\nExternal Approver: ${actorLabel || ''}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
+    text: `PTO for ${displayName} (${dateLabel}) was denied by ${actorLabel || ''}.\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.${denialNote ? ' Reason: ' + denialNote : ''}\n\n---\nAutomated message — TFS Hours Report. Please do not reply to this email.`,
     headers: replyMeta.headers,
   });
 }
