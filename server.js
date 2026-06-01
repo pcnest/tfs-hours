@@ -78,6 +78,9 @@ const PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE = parseBooleanEnv(
   process.env.PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE,
   false,
 );
+const EXTERNAL_PTO_RATE_LIMIT_MAX = 30;
+const EXTERNAL_PTO_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const externalPtoRateLimitBuckets = new Map();
 
 function parseEmailList(str) {
   if (!str) return [];
@@ -590,6 +593,45 @@ function requireLeadOrPm(req, res, next) {
   if (req.userRole !== 'lead' && req.userRole !== 'pm')
     return res.status(403).json({ ok: false, error: 'forbidden' });
   next();
+}
+
+function getRateLimitClientIp(req) {
+  const forwardedFor = String(req.get('x-forwarded-for') || '')
+    .split(',')[0]
+    .trim();
+  return forwardedFor || req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function externalPtoRateLimit(action) {
+  return (req, res, next) => {
+    const now = Date.now();
+    for (const [key, bucket] of externalPtoRateLimitBuckets.entries()) {
+      if (!bucket || bucket.resetAt <= now)
+        externalPtoRateLimitBuckets.delete(key);
+    }
+
+    const ip = getRateLimitClientIp(req);
+    const key = `${action}:${ip}`;
+    let bucket = externalPtoRateLimitBuckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      bucket = { count: 0, resetAt: now + EXTERNAL_PTO_RATE_LIMIT_WINDOW_MS };
+      externalPtoRateLimitBuckets.set(key, bucket);
+    }
+
+    bucket.count += 1;
+    if (bucket.count > EXTERNAL_PTO_RATE_LIMIT_MAX) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((bucket.resetAt - now) / 1000),
+      );
+      res.set('Retry-After', String(retryAfterSeconds));
+      return res
+        .status(429)
+        .json({ ok: false, error: 'too many requests, please try again later' });
+    }
+
+    next();
+  };
 }
 
 function requireOffsetPilotAccess(req, res, next) {
@@ -5819,6 +5861,11 @@ app.patch(
       return res
         .status(503)
         .json({ ok: false, error: 'approval workflow is disabled' });
+    if (!PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE)
+      return res.status(403).json({
+        ok: false,
+        error: 'manual external approval fallback is disabled',
+      });
     const { batchId } = req.params;
     if (!batchId)
       return res.status(400).json({ ok: false, error: 'invalid batchId' });
@@ -6395,6 +6442,11 @@ app.patch(
       return res
         .status(503)
         .json({ ok: false, error: 'approval workflow is disabled' });
+    if (!PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE)
+      return res.status(403).json({
+        ok: false,
+        error: 'manual external approval fallback is disabled',
+      });
     const id = normInt(req.params.id);
     if (!id || id < 1)
       return res.status(400).json({ ok: false, error: 'invalid id' });
@@ -8204,37 +8256,49 @@ app.get('/external/pto/:token', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'external-pto.html'));
 });
 
-app.get('/api/external/pto/:token', async (req, res) => {
-  try {
-    const token = normText(req.params.token);
-    if (!token)
-      return res
-        .status(404)
-        .json({ ok: false, error: 'invalid or expired link' });
+app.get(
+  '/api/external/pto/:token',
+  externalPtoRateLimit('summary'),
+  async (req, res) => {
+    try {
+      const token = normText(req.params.token);
+      if (!token)
+        return res
+          .status(404)
+          .json({ ok: false, error: 'invalid or expired link' });
 
-    const ctx = await loadExternalPtoTokenContext(token);
-    if (!ctx)
-      return res
-        .status(410)
-        .json({ ok: false, error: 'invalid or expired link' });
+      const ctx = await loadExternalPtoTokenContext(token);
+      if (!ctx)
+        return res
+          .status(410)
+          .json({ ok: false, error: 'invalid or expired link' });
 
-    res.json({
-      ok: true,
-      request: buildExternalPtoSummary(ctx.tokenRow, ctx.rows),
-    });
-  } catch (e) {
-    console.error('External PTO summary error:', e);
-    res.status(500).json({ ok: false, error: 'Unable to load request.' });
-  }
-});
+      res.json({
+        ok: true,
+        request: buildExternalPtoSummary(ctx.tokenRow, ctx.rows),
+      });
+    } catch (e) {
+      console.error('External PTO summary error:', e);
+      res.status(500).json({ ok: false, error: 'Unable to load request.' });
+    }
+  },
+);
 
-app.post('/api/external/pto/:token/approve', async (req, res) => {
-  await processExternalPtoDecision(req, res, 'approved');
-});
+app.post(
+  '/api/external/pto/:token/approve',
+  externalPtoRateLimit('approve'),
+  async (req, res) => {
+    await processExternalPtoDecision(req, res, 'approved');
+  },
+);
 
-app.post('/api/external/pto/:token/deny', async (req, res) => {
-  await processExternalPtoDecision(req, res, 'denied');
-});
+app.post(
+  '/api/external/pto/:token/deny',
+  externalPtoRateLimit('deny'),
+  async (req, res) => {
+    await processExternalPtoDecision(req, res, 'denied');
+  },
+);
 
 // ---------- Static UI ----------
 app.use('/', express.static(path.join(__dirname, 'public')));
