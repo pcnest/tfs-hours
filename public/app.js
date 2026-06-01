@@ -1071,6 +1071,10 @@ function specialPtoWorkflowTeamKey() {
   return ptoKey(APP_CFG?.specialPtoWorkflowTeam);
 }
 
+function isExternalManualFallbackVisible() {
+  return APP_CFG?.ptoExternalManualFallbackVisible === true;
+}
+
 function isSpecialPtoItem(item) {
   const specialTeam = specialPtoWorkflowTeamKey();
   return (
@@ -1240,6 +1244,7 @@ function normalizePtoItems(rows) {
 function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, todayYmd }) {
   const filerUpn = String(item.userUpn || '').toLowerCase();
   const sameTeam = hasSamePtoTeam(item, myTeam);
+  const externalManualFallbackVisible = isExternalManualFallbackVisible();
   let canApprove = false;
   let canDeny = false;
   let canExternalApprove = false;
@@ -1253,7 +1258,8 @@ function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, 
         item.status === 'external_pending' &&
         isLead &&
         sameTeam &&
-        filerUpn !== myEmail
+        filerUpn !== myEmail &&
+        externalManualFallbackVisible
       ) {
         canExternalApprove = true;
         canDeny = true;
@@ -1265,7 +1271,12 @@ function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, 
       if (role === 'pm' && sameTeam && item.status === 'pending') {
         canApprove = true;
         canDeny = true;
-      } else if (role === 'pm' && sameTeam && item.status === 'external_pending') {
+      } else if (
+        role === 'pm' &&
+        sameTeam &&
+        item.status === 'external_pending' &&
+        externalManualFallbackVisible
+      ) {
         canExternalApprove = true;
         canDeny = true;
       }
@@ -1274,7 +1285,11 @@ function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, 
       if (otherPm && item.status === 'pending') {
         canApprove = true;
         canDeny = true;
-      } else if (otherPm && item.status === 'external_pending') {
+      } else if (
+        otherPm &&
+        item.status === 'external_pending' &&
+        externalManualFallbackVisible
+      ) {
         canExternalApprove = true;
         canDeny = true;
       }

@@ -76,6 +76,10 @@ const PUBLIC_BASE_URL = (
 // Set PTO_APPROVAL_ENABLED=false in .env to bypass the approval workflow (all PTOs auto-approved)
 const PTO_APPROVAL_ENABLED =
   String(process.env.PTO_APPROVAL_ENABLED).trim().toLowerCase() !== 'false';
+const PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE = parseBooleanEnv(
+  process.env.PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE,
+  false,
+);
 
 function parseEmailList(str) {
   if (!str) return [];
@@ -91,6 +95,14 @@ function parseEmailList(str) {
       return e ? { email: e } : null;
     })
     .filter(Boolean);
+}
+
+function parseBooleanEnv(value, fallback = false) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  return fallback;
 }
 
 function parseEmailContacts(str) {
@@ -265,6 +277,7 @@ app.get('/api/config', (req, res) => {
     notifyCcEmail: NOTIFY_CC_EMAIL.length ? NOTIFY_CC_EMAIL : null,
     smtpConfigured: !!(BREVO_API_KEY && NOTIFY_FROM_EMAIL),
     specialPtoWorkflowTeam: SPECIAL_PTO_WORKFLOW_TEAM || null,
+    ptoExternalManualFallbackVisible: PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE,
   });
 });
 
@@ -4183,11 +4196,15 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         const pendingTeamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
         const approvedTeamClause = `filer_role IN ('dev','qa') AND status = 'approved' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
         if (isSpecialPtoTeamName(req.userTeam)) {
-          actionableTeamClause = `((${pendingTeamClause}) OR (filer_role = 'qa' AND status IN ('pending','external_pending') AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})))`;
+          const externalPendingTeamClause = `filer_role = 'qa' AND status = 'external_pending' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})`;
+          actionableTeamClause = PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE
+            ? `((${pendingTeamClause}) OR (${externalPendingTeamClause}))`
+            : pendingTeamClause;
+          visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}) OR (${externalPendingTeamClause}))`;
         } else {
           actionableTeamClause = pendingTeamClause;
+          visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}))`;
         }
-        visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}))`;
       } else {
         if (SPECIAL_PTO_WORKFLOW_TEAM_KEY) {
           params.push(SPECIAL_PTO_WORKFLOW_TEAM);
@@ -4254,7 +4271,9 @@ app.get('/api/pto', requireAuth, async (req, res) => {
           req.userEmail,
           req.userTeam,
         );
-        const externalTransition = getExternalReceivedTransition(row, actor);
+        const externalTransition = PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE
+          ? getExternalReceivedTransition(row, actor)
+          : { error: 'manual external approval fallback is hidden' };
         return !internalError || !externalTransition.error;
       });
     }
