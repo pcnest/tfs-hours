@@ -29,6 +29,9 @@ const REPORT_TZ_IANA = (process.env.REPORT_TZ_IANA || '').trim();
 const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
 const NOTIFY_FROM_EMAIL = process.env.NOTIFY_FROM_EMAIL || '';
 const NOTIFY_FROM_NAME = process.env.NOTIFY_FROM_NAME || 'TFS Hours Report';
+const NOTIFY_REPLY_TO_EMAIL =
+  process.env.NOTIFY_REPLY_TO_EMAIL || 'baquino@lemontechsolutions.com';
+const NOTIFY_REPLY_TO_NAME = process.env.NOTIFY_REPLY_TO_NAME || 'Support Team';
 const NOTIFY_MANAGER_EMAIL = process.env.NOTIFY_MANAGER_EMAIL || '';
 // Optional fixed CC list for PM final approval emails (HR, managers, etc.)
 // Comma-separated list of email addresses, e.g. "hr@company.com,ceo@company.com"
@@ -99,7 +102,9 @@ function parseEmailList(str) {
 }
 
 function parseBooleanEnv(value, fallback = false) {
-  const raw = String(value ?? '').trim().toLowerCase();
+  const raw = String(value ?? '')
+    .trim()
+    .toLowerCase();
   if (!raw) return fallback;
   if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
   if (['0', 'false', 'no', 'off'].includes(raw)) return false;
@@ -150,6 +155,7 @@ function createMailTransporter() {
         sender,
         to: parseEmailList(to),
         subject,
+        replyTo: { email: NOTIFY_REPLY_TO_EMAIL, name: NOTIFY_REPLY_TO_NAME },
         ...(html ? { htmlContent: html } : {}),
         ...(text ? { textContent: text } : {}),
         ...(cc ? { cc: parseEmailList(cc) } : {}),
@@ -625,9 +631,10 @@ function externalPtoRateLimit(action) {
         Math.ceil((bucket.resetAt - now) / 1000),
       );
       res.set('Retry-After', String(retryAfterSeconds));
-      return res
-        .status(429)
-        .json({ ok: false, error: 'too many requests, please try again later' });
+      return res.status(429).json({
+        ok: false,
+        error: 'too many requests, please try again later',
+      });
     }
 
     next();
@@ -5501,8 +5508,7 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const isExternalRequest =
-        transition.notification === 'external_request';
+      const isExternalRequest = transition.notification === 'external_request';
       if (isExternalRequest && !hasSpecialPtoExternalApprovers()) {
         return res.status(503).json({
           ok: false,
@@ -6559,8 +6565,7 @@ app.patch(
         email: req.userEmail,
         team: req.userTeam,
       });
-      const isExternalRequest =
-        transition.notification === 'external_request';
+      const isExternalRequest = transition.notification === 'external_request';
       if (isExternalRequest && !hasSpecialPtoExternalApprovers()) {
         return res.status(503).json({
           ok: false,
