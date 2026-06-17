@@ -694,6 +694,10 @@
       min-width: 400px;
     }
 
+    .pto-individual-table {
+      table-layout: fixed;
+    }
+
     .pto-table th,
     .pto-table td {
       border-bottom: 1px solid #e6e6e6;
@@ -701,6 +705,14 @@
       font-size: 13px;
       text-align: left;
       white-space: nowrap;
+    }
+
+    .pto-individual-table th:nth-child(6),
+    .pto-individual-table .pto-notes-cell {
+      width: 24%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .pto-table thead th {
@@ -2276,7 +2288,7 @@
           </div>
         </div>
         <div class="pto-table-wrap">
-          <table class="pto-table mobile-card-table">
+          <table class="pto-table pto-individual-table mobile-card-table">
             <thead>
               <tr>
                 <th>User</th>
