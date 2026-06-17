@@ -1412,7 +1412,7 @@ function renderPtoItemRow(item, context, extraAttrs = '') {
         <td data-label="Day Part">${escapeHtml(formatPtoDayPart(item.dayPart))}</td>
         <td data-label="Leave Type">${escapeHtml(item.leaveType)}</td>
         <td class="pto-notes-cell" data-label="Notes">${escapeHtml(item.notes)}</td>
-        <td data-label="Status">${ptoBadge(item.status)}${statusNoteHtml}</td>
+        <td class="pto-status-cell" data-label="Status">${ptoBadge(item.status)}${statusNoteHtml}</td>
         <td class="cell-actions" data-label="Actions"${actionHtml ? '' : ' data-empty="true"'}>${actionHtml}</td>
       </tr>`;
 }
