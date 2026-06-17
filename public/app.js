@@ -1407,7 +1407,7 @@ function renderPtoItemRow(item, context, extraAttrs = '') {
   return `
       <tr${extraAttrs}>
         <td data-label="User">${escapeHtml(item.userName)}</td>
-        <td data-label="Date">${dateHtml}</td>
+        <td class="pto-date-cell" data-label="Date">${dateHtml}</td>
         <td data-label="Hours">${fmtHours(item.hours)}</td>
         <td data-label="Day Part">${escapeHtml(formatPtoDayPart(item.dayPart))}</td>
         <td data-label="Leave Type">${escapeHtml(item.leaveType)}</td>

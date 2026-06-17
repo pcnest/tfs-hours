@@ -707,9 +707,29 @@
       white-space: nowrap;
     }
 
+    .pto-individual-table th:nth-child(1) {
+      width: 10%;
+    }
+
+    .pto-individual-table th:nth-child(2),
+    .pto-individual-table .pto-date-cell {
+      width: 18%;
+      white-space: normal;
+      overflow-wrap: normal;
+    }
+
+    .pto-individual-table th:nth-child(3) {
+      width: 6%;
+    }
+
+    .pto-individual-table th:nth-child(4),
+    .pto-individual-table th:nth-child(5) {
+      width: 10%;
+    }
+
     .pto-individual-table th:nth-child(6),
     .pto-individual-table .pto-notes-cell {
-      width: 24%;
+      width: 22%;
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
@@ -717,10 +737,14 @@
 
     .pto-individual-table th:nth-child(7),
     .pto-individual-table .pto-status-cell {
-      width: 20%;
+      width: 18%;
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+
+    .pto-individual-table th:nth-child(8) {
+      width: 6%;
     }
 
     .pto-individual-table .pto-status-cell .pto-status-note {
