@@ -3047,7 +3047,7 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
   const interruptedHours = offsetRoundHours(durationMinutes / 60);
   const requestedHours = offsetRoundHours(request.requested_makeup_hours);
   const deadlineYmd = await resolveOffsetDeadlineYmd(
-    requestDateYmd,
+    interruptionDate,
     OFFSET_WORKING_DAY_WINDOW,
   );
   const lastSyncAt = await fetchLastSyncAt(db);
@@ -3101,20 +3101,20 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
       : `Requested hours must equal ${interruptedHours}h.`,
   );
 
-  const notBeforeRequestDate = plannedDate >= requestDateYmd;
+  const notBeforeInterruptionDate = plannedDate >= interruptionDate;
   const withinWindow =
-    !!deadlineYmd && notBeforeRequestDate && plannedDate <= deadlineYmd;
+    !!deadlineYmd && notBeforeInterruptionDate && plannedDate <= deadlineYmd;
   addCheck(
     'makeup_window',
-    'Make-up date is within 1 working day from request date',
+    'Recovery date is within the allowed interruption recovery window',
     withinWindow,
     !deadlineYmd
-      ? 'Could not resolve the 1-working-day deadline from request date.'
-      : !notBeforeRequestDate
-        ? `Make-up date cannot be before request date ${requestDateYmd}.`
+      ? 'Could not resolve the recovery deadline from interruption date.'
+      : !notBeforeInterruptionDate
+        ? `Requested recovery date cannot be before interruption date ${interruptionDate}.`
         : plannedDate <= deadlineYmd
-          ? `Make-up date is within the allowed request-date window through ${deadlineYmd}.`
-          : `Make-up date must be on or before ${deadlineYmd}.`,
+          ? `Requested recovery date is within the allowed interruption recovery window through ${deadlineYmd}.`
+          : `Requested recovery date must be on or before ${deadlineYmd}.`,
   );
 
   addCheck(
@@ -3236,6 +3236,7 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
       interruptionDate,
       plannedMakeupDate: plannedDate,
       requestDateYmd,
+      recoveryWindowStartYmd: interruptionDate,
       currentReportDate: todayYmd,
       interruptionDurationMinutes: durationMinutes,
       interruptedHours,
