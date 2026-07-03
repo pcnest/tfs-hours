@@ -21,7 +21,7 @@ let OFFSET_CURRENT_VALIDATION = null;
 let OFFSET_CURRENT_ACTION_EVENTS = [];
 let OFFSET_CURRENT_VALIDATION_EVENTS = [];
 let OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
-const OFFSET_UI_ENABLED = false;
+const OFFSET_UI_ENABLED = true; // set to false to hide the "Offset Requests" tab and related UI
 const PTO_ARCHIVE_EXPANDED = new Set();
 const PTO_FINAL_STATUSES = new Set(['approved', 'denied', 'cancelled']);
 
@@ -80,8 +80,11 @@ async function loadUsers() {
     if (!dl) return;
     const datalistUsers =
       isPrivileged && REPORT_REGISTERED_USERS_LOADED
-      ? intersectReportUsers(REPORT_USERS_CACHE, REPORT_REGISTERED_USERS_CACHE)
-      : REPORT_USERS_CACHE;
+        ? intersectReportUsers(
+            REPORT_USERS_CACHE,
+            REPORT_REGISTERED_USERS_CACHE,
+          )
+        : REPORT_USERS_CACHE;
     dl.innerHTML = datalistUsers
       .map(
         (u) =>
@@ -117,13 +120,19 @@ async function loadPtoUsers() {
 function intersectReportUsers(reportUsers, registeredUsers) {
   const registeredUpns = new Set(
     registeredUsers
-      .map((u) => String(u?.upn || '').trim().toLowerCase())
+      .map((u) =>
+        String(u?.upn || '')
+          .trim()
+          .toLowerCase(),
+      )
       .filter(Boolean),
   );
   const uniqueRegisteredNames = new Set();
   const duplicateRegisteredNames = new Set();
   registeredUsers.forEach((u) => {
-    const key = String(u?.name || '').trim().toLowerCase();
+    const key = String(u?.name || '')
+      .trim()
+      .toLowerCase();
     if (!key) return;
     if (uniqueRegisteredNames.has(key)) duplicateRegisteredNames.add(key);
     else uniqueRegisteredNames.add(key);
@@ -131,8 +140,12 @@ function intersectReportUsers(reportUsers, registeredUsers) {
 
   const seenNames = new Set();
   return reportUsers.filter((u) => {
-    const upnKey = String(u?.upn || '').trim().toLowerCase();
-    const nameKey = String(u?.name || '').trim().toLowerCase();
+    const upnKey = String(u?.upn || '')
+      .trim()
+      .toLowerCase();
+    const nameKey = String(u?.name || '')
+      .trim()
+      .toLowerCase();
     const include =
       (upnKey && registeredUpns.has(upnKey)) ||
       (nameKey &&
@@ -848,6 +861,7 @@ function switchTab(name) {
   if (tabOffset) tabOffset.hidden = !OFFSET_UI_ENABLED || name !== 'offset';
   qs('tabPto').hidden = name !== 'pto';
   if (name === 'offset' && OFFSET_UI_ENABLED) {
+    updateOffsetEvidenceSection(OFFSET_CURRENT_ROW);
     populatePtoUserList();
     loadOffsetRequests();
   }
@@ -881,12 +895,10 @@ async function populatePtoUserList() {
   try {
     await loadPtoUsers();
     if (!PTO_USERS_CACHE.length) return;
-    dl.innerHTML = PTO_USERS_CACHE
-      .map(
-        (u) =>
-          `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
-      )
-      .join('');
+    dl.innerHTML = PTO_USERS_CACHE.map(
+      (u) =>
+        `<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}</option>`,
+    ).join('');
     dl.dataset.loaded = '1';
   } catch {}
 }
@@ -1106,7 +1118,9 @@ function syncPtoDayPartVisibility(report = false) {
   }
 
   input.required = true;
-  const msg = input.value ? '' : 'Select first half or second half for 4-hour PTO.';
+  const msg = input.value
+    ? ''
+    : 'Select first half or second half for 4-hour PTO.';
   input.setCustomValidity(msg);
   if (report && msg) input.reportValidity();
   return !msg;
@@ -1241,7 +1255,10 @@ function normalizePtoItems(rows) {
   });
 }
 
-function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, todayYmd }) {
+function getPtoItemActions(
+  item,
+  { role, myEmail, myTeam, isPrivileged, isLead, todayYmd },
+) {
   const filerUpn = String(item.userUpn || '').toLowerCase();
   const sameTeam = hasSamePtoTeam(item, myTeam);
   const externalManualFallbackVisible = isExternalManualFallbackVisible();
@@ -1251,7 +1268,12 @@ function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, 
 
   if (isSpecialPtoItem(item)) {
     if (item.filerRole === 'qa') {
-      if (item.status === 'pending' && isLead && sameTeam && filerUpn !== myEmail) {
+      if (
+        item.status === 'pending' &&
+        isLead &&
+        sameTeam &&
+        filerUpn !== myEmail
+      ) {
         canApprove = true;
         canDeny = true;
       } else if (
@@ -1304,8 +1326,7 @@ function getPtoItemActions(item, { role, myEmail, myTeam, isPrivileged, isLead, 
     canDeny = true;
   } else if (role === 'pm') {
     const devQaReady =
-      ['dev', 'qa'].includes(item.filerRole) &&
-      item.status === 'lead_approved';
+      ['dev', 'qa'].includes(item.filerRole) && item.status === 'lead_approved';
     const leadReady = item.filerRole === 'lead' && item.status === 'pending';
     const pmReady =
       item.filerRole === 'pm' &&
@@ -1545,15 +1566,13 @@ function renderPtoEntries(rows) {
 
   const actionRank = (item) =>
     getPtoItemActions(item, context).isActionRequired ? 0 : 1;
-  const activeItemsForAll = activeItems
-    .slice()
-    .sort((a, b) => {
-      const rankDiff = actionRank(a) - actionRank(b);
-      if (rankDiff !== 0) return rankDiff;
-      const dateDiff = a.sortDate.localeCompare(b.sortDate);
-      if (dateDiff !== 0) return dateDiff;
-      return a.key.localeCompare(b.key);
-    });
+  const activeItemsForAll = activeItems.slice().sort((a, b) => {
+    const rankDiff = actionRank(a) - actionRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    const dateDiff = a.sortDate.localeCompare(b.sortDate);
+    if (dateDiff !== 0) return dateDiff;
+    return a.key.localeCompare(b.key);
+  });
 
   const html = [];
 
@@ -1562,7 +1581,9 @@ function renderPtoEntries(rows) {
   } else if (PTO_LIST_VIEW_MODE === 'all') {
     if (activeItemsForAll.length) {
       html.push(
-        activeItemsForAll.map((item) => renderPtoItemRow(item, context)).join(''),
+        activeItemsForAll
+          .map((item) => renderPtoItemRow(item, context))
+          .join(''),
       );
     } else {
       html.push(renderPtoInfoRow('No current or upcoming PTO entries.'));
@@ -1571,7 +1592,9 @@ function renderPtoEntries(rows) {
     html.push(renderArchiveGroups(archiveItems, context));
   } else {
     if (activeItems.length) {
-      html.push(activeItems.map((item) => renderPtoItemRow(item, context)).join(''));
+      html.push(
+        activeItems.map((item) => renderPtoItemRow(item, context)).join(''),
+      );
     } else {
       html.push(renderPtoInfoRow('No current or upcoming PTO entries.'));
     }
@@ -1820,6 +1843,7 @@ const OFFSET_ACTION_LABELS = {
   cancel: 'Cancelled',
   email_sent: 'Email sent',
   email_failed: 'Email failed',
+  email_skipped: 'Email skipped',
 };
 
 const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
@@ -1832,6 +1856,64 @@ const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
 
 function isOffsetPilotUser() {
   return !!window.CURRENT_USER;
+}
+
+const OFFSET_REASON_OTHER_VALUE = 'Others';
+
+function canUseOffsetRequestFilters() {
+  return ['admin', 'pm', 'lead'].includes(window.CURRENT_USER?.role);
+}
+
+function canViewOffsetEmployeeField() {
+  return ['admin', 'pm'].includes(window.CURRENT_USER?.role);
+}
+
+function syncOffsetRoleUi() {
+  const filterBar = qs('offsetRequestFilterBar');
+  if (filterBar) filterBar.hidden = !canUseOffsetRequestFilters();
+
+  const employeeField = qs('offsetEmployeeField');
+  if (employeeField) employeeField.hidden = !canViewOffsetEmployeeField();
+
+  const loadEvidenceField = qs('offsetLoadEvidenceField');
+  if (loadEvidenceField) loadEvidenceField.hidden = !canManageOffsetRequest();
+}
+
+function clearOffsetCustomReasonOptions() {
+  qs('offset_reason')
+    ?.querySelectorAll('option[data-custom-reason="1"]')
+    .forEach((option) => option.remove());
+}
+
+function ensureOffsetReasonOption(value) {
+  const select = qs('offset_reason');
+  const reason = String(value || '').trim();
+  if (!select || !reason) return;
+  if (Array.from(select.options).some((option) => option.value === reason))
+    return;
+
+  const option = document.createElement('option');
+  option.value = reason;
+  option.textContent = reason;
+  option.dataset.customReason = '1';
+  const other = Array.from(select.options).find(
+    (item) => item.value === OFFSET_REASON_OTHER_VALUE,
+  );
+  select.insertBefore(option, other || null);
+}
+
+function syncOffsetReasonRequirement() {
+  const reason = qs('offset_reason');
+  const remarks = qs('offset_remarks');
+  if (!reason || !remarks) return;
+
+  const requiresRemarks =
+    reason.value === OFFSET_REASON_OTHER_VALUE && !remarks.disabled;
+  remarks.required = requiresRemarks;
+  remarks.placeholder = requiresRemarks
+    ? 'Required when Others is selected'
+    : 'Optional remarks';
+  if (!requiresRemarks) remarks.setCustomValidity('');
 }
 
 function offsetEvidenceBlockers(summary = OFFSET_CURRENT_VALIDATION) {
@@ -1859,7 +1941,9 @@ function offsetPrimaryFailedReasons(summary) {
 const OFFSET_FINAL_STATUSES = new Set(['approved', 'cancelled']);
 
 function normOffsetIdentity(v) {
-  return String(v || '').trim().toLowerCase();
+  return String(v || '')
+    .trim()
+    .toLowerCase();
 }
 
 function isOffsetFinalStatus(status) {
@@ -1891,6 +1975,7 @@ function isOffsetEvidenceLocked(row = OFFSET_CURRENT_ROW) {
 }
 
 function syncOffsetFormAccess(row = OFFSET_CURRENT_ROW) {
+  syncOffsetRoleUi();
   const canEdit = canEditOffsetRequest(row);
   const isAdmin = window.CURRENT_USER?.role === 'admin';
   const employee = qs('offset_user');
@@ -1905,7 +1990,6 @@ function syncOffsetFormAccess(row = OFFSET_CURRENT_ROW) {
     'offset_date',
     'offset_start',
     'offset_end',
-    'offset_hours',
     'offset_makeup_date',
     'offset_reason',
     'offset_remarks',
@@ -1915,13 +1999,15 @@ function syncOffsetFormAccess(row = OFFSET_CURRENT_ROW) {
   });
   const save = qs('btnOffsetSave');
   if (save) save.disabled = !canEdit;
+  syncOffsetReasonRequirement();
 }
 
 function updateOffsetEvidenceSection(row) {
   const section = qs('offsetEvidenceSection');
   const locked = isOffsetEvidenceLocked(row);
-  if (section) section.hidden = locked;
-  if (locked) {
+  const hidden = !row?.id || locked;
+  if (section) section.hidden = hidden;
+  if (hidden) {
     OFFSET_CANDIDATES = [];
     OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
     const status = qs('offsetEvidenceStatus');
@@ -1933,15 +2019,23 @@ function updateOffsetEvidenceSection(row) {
 }
 
 function updateOffsetEvidenceControls(summary = OFFSET_CURRENT_VALIDATION) {
+  syncOffsetRoleUi();
   const blockers = offsetEvidenceBlockers(summary);
   const hidden = qs('offsetEvidenceSection')?.hidden === true;
   const disabled = hidden || !OFFSET_CURRENT_ID || blockers.length > 0;
-  ['btnOffsetLoadEvidence', 'btnOffsetAutoAllocate', 'btnOffsetSaveEvidence'].forEach((id) => {
+  const loadBtn = qs('btnOffsetLoadEvidence');
+  if (loadBtn) loadBtn.disabled = disabled || !canManageOffsetRequest();
+  [
+    'btnOffsetAutoAllocate',
+    'btnOffsetValidateEvidence',
+    'btnOffsetSaveEvidence',
+  ].forEach((id) => {
     const btn = qs(id);
     if (btn) btn.disabled = disabled;
   });
   const status = qs('offsetEvidenceStatus');
-  if (status && blockers.length) status.textContent = offsetEvidenceBlockedMessage(blockers);
+  if (status && blockers.length)
+    status.textContent = offsetEvidenceBlockedMessage(blockers);
 }
 
 function offsetBadge(value, labels = OFFSET_STATUS_LABELS) {
@@ -1966,30 +2060,49 @@ function resolveOffsetUser() {
   };
 }
 
+function calculateOffsetRequestedHours() {
+  const start = qs('offset_start')?.value || '';
+  const end = qs('offset_end')?.value || '';
+  if (!start || !end) return null;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  if (![sh, sm, eh, em].every(Number.isFinite)) return null;
+  const mins = eh * 60 + em - (sh * 60 + sm);
+  return mins > 0 ? Math.round((mins / 60) * 100) / 100 : null;
+}
+
+function setOffsetComputedHours(value) {
+  const hoursInput = qs('offset_hours');
+  const hoursDisplay = qs('offset_hours_display');
+  const hours = Number(value);
+  if (Number.isFinite(hours) && hours > 0) {
+    const normalized = (Math.round(hours * 100) / 100).toFixed(2);
+    if (hoursInput) hoursInput.value = normalized;
+    if (hoursDisplay) hoursDisplay.textContent = `${fmtHours(normalized)}h`;
+  } else {
+    if (hoursInput) hoursInput.value = '';
+    if (hoursDisplay) hoursDisplay.textContent = '-';
+  }
+}
+
+function syncOffsetRequestedHours() {
+  setOffsetComputedHours(calculateOffsetRequestedHours());
+}
+
 function offsetRequestBodyFromForm() {
   const user = resolveOffsetUser();
+  const requestedHours = calculateOffsetRequestedHours();
+  setOffsetComputedHours(requestedHours);
   return {
     ...user,
     interruption_date: qs('offset_date')?.value || '',
     interruption_start_time: qs('offset_start')?.value || '',
     interruption_end_time: qs('offset_end')?.value || '',
-    requested_makeup_hours: Number(qs('offset_hours')?.value || 0),
+    requested_makeup_hours: requestedHours ?? 0,
     planned_makeup_date: qs('offset_makeup_date')?.value || '',
     reason: qs('offset_reason')?.value.trim() || '',
     remarks: qs('offset_remarks')?.value.trim() || '',
   };
-}
-
-function syncOffsetRequestedHours() {
-  const start = qs('offset_start')?.value || '';
-  const end = qs('offset_end')?.value || '';
-  const hoursInput = qs('offset_hours');
-  if (!start || !end || !hoursInput) return;
-  const [sh, sm] = start.split(':').map(Number);
-  const [eh, em] = end.split(':').map(Number);
-  if (![sh, sm, eh, em].every(Number.isFinite)) return;
-  const mins = eh * 60 + em - (sh * 60 + sm);
-  if (mins > 0) hoursInput.value = (Math.round((mins / 60) * 100) / 100).toFixed(2);
 }
 
 function syncOffsetDateLimits(todayYmd = ymdTodayInReportTz()) {
@@ -2037,16 +2150,17 @@ function renderOffsetValidation(summary) {
     : summary.validationStatus === 'passed'
       ? '<div class="offset-pass-summary">All validation checks passed.</div>'
       : '';
+  const renderedCard = canManageOffsetRequest()
+    ? item('Rendered', `${fmtHours(capacity.netRenderedHours)}h`)
+    : '';
   wrap.innerHTML = `
     <div class="pto-list-bar">
       <strong>Validation ${offsetBadge(summary.validationStatus, OFFSET_VALIDATION_LABELS)}</strong>
     </div>
     <div class="offset-summary-grid">
-      ${item('Interrupted', `${fmtHours(request.interruptedHours)}h`)}
       ${item('Requested', `${fmtHours(request.requestedMakeupHours)}h`)}
       ${item('Deadline', request.deadlineYmd || '-')}
-      ${item('Rendered', `${fmtHours(capacity.netRenderedHours)}h`)}
-      ${item('Required', `${fmtHours(capacity.regularRequiredHours)}h`)}
+      ${renderedCard}
       ${item('Evidence', `${fmtHours(evidence.allocatedHours)}h`)}
       ${item('Sync Age', sync.syncAgeHours == null ? '-' : `${fmtHours(sync.syncAgeHours)}h`)}
     </div>
@@ -2055,16 +2169,20 @@ function renderOffsetValidation(summary) {
   updateOffsetEvidenceControls(summary);
 }
 
-function renderOffsetEvidenceContext(summary = OFFSET_LAST_EVIDENCE_FILTER_SUMMARY) {
+function renderOffsetEvidenceContext(
+  summary = OFFSET_LAST_EVIDENCE_FILTER_SUMMARY,
+) {
   const wrap = qs('offsetEvidenceContext');
   if (!wrap) return;
-  if (!summary) {
+  if (!canManageOffsetRequest() || !summary) {
     wrap.hidden = true;
     wrap.innerHTML = '';
     return;
   }
   const chips = [
-    summary.plannedMakeupDate ? `Make-up date ${summary.plannedMakeupDate}` : '',
+    summary.plannedMakeupDate
+      ? `Make-up date ${summary.plannedMakeupDate}`
+      : '',
     summary.assignedTo ? `Assigned to ${summary.assignedTo}` : '',
     summary.positiveDeltaOnly ? 'Positive delta hours only' : '',
     summary.excludesUsedHours ? 'Reused task hours excluded' : '',
@@ -2090,7 +2208,8 @@ function offsetValidationEventNote(event) {
   const reasons = Array.isArray(summary.failedReasons)
     ? summary.failedReasons
     : [];
-  if (event?.validation_status === 'passed') return 'All validation checks passed.';
+  if (event?.validation_status === 'passed')
+    return 'All validation checks passed.';
   if (!reasons.length) return '';
   return reasons
     .slice(0, 2)
@@ -2098,28 +2217,44 @@ function offsetValidationEventNote(event) {
     .join(' ');
 }
 
-function renderOffsetAuditTimeline(row, actionEvents = [], validationEvents = []) {
+function renderOffsetAuditTimeline(
+  row,
+  actionEvents = [],
+  validationEvents = [],
+) {
   const wrap = qs('offsetAuditTimeline');
   if (!wrap) return;
-  const actionItems = (Array.isArray(actionEvents) ? actionEvents : []).map((event) => ({
-    kind: 'action',
-    at: event.created_at,
-    title: OFFSET_ACTION_LABELS[event.action] || event.action || 'Action',
-    actor: event.actor_email || '',
-    note: event.note || '',
-    meta:
-      event.from_status && event.to_status && event.from_status !== event.to_status
-        ? `${OFFSET_STATUS_LABELS[event.from_status] || event.from_status} -> ${OFFSET_STATUS_LABELS[event.to_status] || event.to_status}`
-        : event.to_status
-          ? OFFSET_STATUS_LABELS[event.to_status] || event.to_status
-          : '',
-  }));
-  const validationItems = (Array.isArray(validationEvents) ? validationEvents : [])
+  if (!canManageOffsetRequest()) {
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    return;
+  }
+  const actionItems = (Array.isArray(actionEvents) ? actionEvents : []).map(
+    (event) => ({
+      kind: 'action',
+      at: event.created_at,
+      title: OFFSET_ACTION_LABELS[event.action] || event.action || 'Action',
+      actor: event.actor_email || '',
+      note: event.note || '',
+      meta:
+        event.from_status &&
+        event.to_status &&
+        event.from_status !== event.to_status
+          ? `${OFFSET_STATUS_LABELS[event.from_status] || event.from_status} -> ${OFFSET_STATUS_LABELS[event.to_status] || event.to_status}`
+          : event.to_status
+            ? OFFSET_STATUS_LABELS[event.to_status] || event.to_status
+            : '',
+    }),
+  );
+  const validationItems = (
+    Array.isArray(validationEvents) ? validationEvents : []
+  )
     .slice(0, 5)
     .map((event) => ({
       kind: 'validation',
       at: event.created_at,
-      title: `Validation ${OFFSET_VALIDATION_LABELS[event.validation_status] || event.validation_status || ''}`.trim(),
+      title:
+        `Validation ${OFFSET_VALIDATION_LABELS[event.validation_status] || event.validation_status || ''}`.trim(),
       actor: '',
       note: offsetValidationEventNote(event),
       meta: '',
@@ -2163,7 +2298,11 @@ function renderOffsetWorkflowAudit(row) {
     actor = row.returned_by || '';
     when = row.returned_at || '';
     note = row.return_note || '';
-  } else if (row?.status === 'cancelled' || row?.cancelled_at || row?.cancel_note) {
+  } else if (
+    row?.status === 'cancelled' ||
+    row?.cancelled_at ||
+    row?.cancel_note
+  ) {
     title = 'Cancelled';
     actor = row.cancelled_by || '';
     when = row.cancelled_at || '';
@@ -2202,15 +2341,18 @@ function fillOffsetForm(row, detail = {}) {
   qs('offset_id').value = OFFSET_CURRENT_ID || '';
   qs('offset_user').value = row?.user_name || row?.user_upn || '';
   qs('offset_date').value = row?.interruption_date || '';
-  qs('offset_start').value = String(row?.interruption_start_time || '').slice(0, 5);
+  qs('offset_start').value = String(row?.interruption_start_time || '').slice(
+    0,
+    5,
+  );
   qs('offset_end').value = String(row?.interruption_end_time || '').slice(0, 5);
-  qs('offset_hours').value =
-    row?.requested_makeup_hours == null
-      ? ''
-      : (Math.round(Number(row.requested_makeup_hours) * 100) / 100).toFixed(2);
+  setOffsetComputedHours(row?.requested_makeup_hours);
   qs('offset_makeup_date').value = row?.planned_makeup_date || '';
+  clearOffsetCustomReasonOptions();
+  ensureOffsetReasonOption(row?.reason || '');
   qs('offset_reason').value = row?.reason || '';
   qs('offset_remarks').value = row?.remarks || '';
+  syncOffsetReasonRequirement();
   renderOffsetWorkflowAudit(row);
   renderOffsetAuditTimeline(
     row,
@@ -2230,8 +2372,10 @@ function clearOffsetForm() {
   OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
   OFFSET_CANDIDATES = [];
   qs('formOffset')?.reset();
+  clearOffsetCustomReasonOptions();
   qs('offset_id').value = '';
   qs('offsetFormStatus').textContent = '';
+  setOffsetComputedHours(null);
   renderOffsetWorkflowAudit(null);
   renderOffsetAuditTimeline(null);
   renderOffsetValidation(null);
@@ -2242,6 +2386,7 @@ function clearOffsetForm() {
 }
 
 function offsetRequestFilterQuery() {
+  if (!canUseOffsetRequestFilters()) return '';
   const p = new URLSearchParams();
   const status = qs('offsetFilterStatus')?.value || '';
   const validation = qs('offsetFilterValidation')?.value || '';
@@ -2258,7 +2403,13 @@ function offsetRequestFilterQuery() {
 }
 
 function clearOffsetFilters() {
-  ['offsetFilterStatus', 'offsetFilterValidation', 'offsetFilterFrom', 'offsetFilterTo', 'offsetFilterQ'].forEach((id) => {
+  [
+    'offsetFilterStatus',
+    'offsetFilterValidation',
+    'offsetFilterFrom',
+    'offsetFilterTo',
+    'offsetFilterQ',
+  ].forEach((id) => {
     const el = qs(id);
     if (el) el.value = '';
   });
@@ -2268,8 +2419,11 @@ function clearOffsetFilters() {
 async function loadOffsetRequests() {
   const tbody = qs('tbodyOffsetRequests');
   if (!tbody || !isOffsetPilotUser()) return;
+  syncOffsetRoleUi();
   try {
-    const r = await apiFetch(`/api/offset-requests${offsetRequestFilterQuery()}`);
+    const r = await apiFetch(
+      `/api/offset-requests${offsetRequestFilterQuery()}`,
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       tbody.innerHTML = `<tr><td colspan="7" class="muted">Failed to load offset requests.</td></tr>`;
@@ -2297,9 +2451,7 @@ function renderOffsetRequests(rows) {
       const isReturned = row.status === 'returned';
       const canRecheck = canManage && (isPending || isReturned);
       const canApprove =
-        canManage &&
-        isPending &&
-        row.validation_status === 'passed';
+        canManage && isPending && row.validation_status === 'passed';
       const statusNote =
         row.status === 'returned' && row.return_note
           ? `Returned: ${row.return_note}`
@@ -2357,16 +2509,23 @@ async function saveOffsetRequest() {
     if (status) status.textContent = 'This request is read-only.';
     return;
   }
+  syncOffsetRequestedHours();
+  syncOffsetReasonRequirement();
+  const form = qs('formOffset');
+  if (form && !form.reportValidity()) return;
   if (status) status.textContent = 'Saving request.';
   try {
     await populatePtoUserList();
     const body = offsetRequestBodyFromForm();
     const id = OFFSET_CURRENT_ID;
-    const r = await apiFetch(id ? `/api/offset-requests/${id}` : '/api/offset-requests', {
-      method: id ? 'PATCH' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const r = await apiFetch(
+      id ? `/api/offset-requests/${id}` : '/api/offset-requests',
+      {
+        method: id ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       if (status) status.textContent = `Error: ${j.error || r.status}`;
@@ -2390,7 +2549,8 @@ function renderOffsetEvidenceFromSaved(rows) {
   }
   OFFSET_CANDIDATES = rows.map((row) => ({
     ...row,
-    evidence_key: row.evidence_key || offsetEvidenceClientKey(row.task_id, row.changed_at),
+    evidence_key:
+      row.evidence_key || offsetEvidenceClientKey(row.task_id, row.changed_at),
     selected_allocated_hours: Number(row.allocated_hours || 0),
     remaining_hours: Number(row.eligible_hours || 0),
   }));
@@ -2404,7 +2564,8 @@ async function loadOffsetEvidenceCandidates() {
     return;
   }
   if (isOffsetEvidenceLocked()) {
-    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    if (status)
+      status.textContent = 'Evidence editing is locked for this request.';
     return;
   }
   const blockers = offsetEvidenceBlockers();
@@ -2414,7 +2575,9 @@ async function loadOffsetEvidenceCandidates() {
   }
   if (status) status.textContent = 'Loading TFS evidence.';
   try {
-    const r = await apiFetch(`/api/offset-requests/${OFFSET_CURRENT_ID}/evidence-candidates`);
+    const r = await apiFetch(
+      `/api/offset-requests/${OFFSET_CURRENT_ID}/evidence-candidates`,
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       if (j.validation) renderOffsetValidation(j.validation);
@@ -2428,7 +2591,9 @@ async function loadOffsetEvidenceCandidates() {
     OFFSET_CANDIDATES = Array.isArray(j.candidates) ? j.candidates : [];
     renderOffsetEvidence(OFFSET_CANDIDATES);
     if (status) {
-      const cutoffTime = String(j.evidenceWindow?.interruptionEndTime || '').slice(0, 5);
+      const cutoffTime = String(
+        j.evidenceWindow?.interruptionEndTime || '',
+      ).slice(0, 5);
       status.textContent = OFFSET_CANDIDATES.length
         ? `${OFFSET_CANDIDATES.length} candidate row(s) loaded.`
         : j.evidenceWindow?.sameDay && cutoffTime
@@ -2444,12 +2609,14 @@ function renderOffsetEvidence(rows) {
   const tbody = qs('tbodyOffsetEvidence');
   if (!tbody) return;
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="muted">No evidence rows loaded.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">No evidence rows loaded.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
     .map((row) => {
-      const selected = Number(row.selected_allocated_hours || row.allocated_hours || 0);
+      const selected = Number(
+        row.selected_allocated_hours || row.allocated_hours || 0,
+      );
       const max = Math.max(
         selected,
         Number(row.remaining_hours ?? row.eligible_hours ?? 0),
@@ -2461,11 +2628,7 @@ function renderOffsetEvidence(rows) {
         <td data-label="Changed">${escapeHtml(fmtDateTime(row.changed_at))}</td>
         <td data-label="Task">${renderIdTag(row.task_id)} ${escapeHtml(row.task_title || '')}</td>
         <td data-label="Ticket">${renderIdTag(row.ticket_id)} ${escapeHtml(row.ticket_title || '')}</td>
-        <td data-label="Prev">${fmtHours(row.prev_hours)}</td>
-        <td data-label="Actual">${fmtHours(row.actual_hours)}</td>
-        <td data-label="Delta">${fmtHours(row.delta_hours)}</td>
-        <td data-label="Used Elsewhere">${fmtHours(row.used_hours)}</td>
-        <td data-label="Available">${fmtHours(max)}</td>
+        <td data-label="Available Hours">${fmtHours(max)}</td>
         <td data-label="Allocate"><input type="number" class="offset-allocated" data-key="${escapeHtml(row.evidence_key || '')}" min="0" step="0.01" max="${escapeHtml(max)}" value="${selected > 0 ? selected : ''}" ${disabled ? 'disabled' : ''} /></td>
       </tr>`;
     })
@@ -2475,7 +2638,8 @@ function renderOffsetEvidence(rows) {
 function autoAllocateOffsetEvidence() {
   if (isOffsetEvidenceLocked()) {
     const status = qs('offsetEvidenceStatus');
-    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    if (status)
+      status.textContent = 'Evidence editing is locked for this request.';
     return;
   }
   const blockers = offsetEvidenceBlockers();
@@ -2489,14 +2653,81 @@ function autoAllocateOffsetEvidence() {
   let remaining = requested;
   document.querySelectorAll('.offset-use').forEach((box) => {
     const key = box.dataset.key;
-    const input = document.querySelector(`.offset-allocated[data-key="${CSS.escape(key)}"]`);
+    const input = document.querySelector(
+      `.offset-allocated[data-key="${CSS.escape(key)}"]`,
+    );
     const row = OFFSET_CANDIDATES.find((x) => x.evidence_key === key);
-    const max = Number(row?.remaining_hours ?? row?.eligible_hours ?? input?.max ?? 0);
+    const max = Number(
+      row?.remaining_hours ?? row?.eligible_hours ?? input?.max ?? 0,
+    );
     const allocation = Math.min(max, remaining);
     box.checked = allocation > 0;
-    if (input) input.value = allocation > 0 ? (Math.round(allocation * 100) / 100).toFixed(2) : '';
+    if (input)
+      input.value =
+        allocation > 0 ? (Math.round(allocation * 100) / 100).toFixed(2) : '';
     remaining = Math.max(0, remaining - allocation);
   });
+}
+
+function collectOffsetEvidenceInput() {
+  const evidence = [];
+  document.querySelectorAll('.offset-use:checked').forEach((box) => {
+    const key = box.dataset.key;
+    const row = OFFSET_CANDIDATES.find((x) => x.evidence_key === key);
+    const input = document.querySelector(
+      `.offset-allocated[data-key="${CSS.escape(key)}"]`,
+    );
+    const allocatedHours = Number(input?.value || 0);
+    if (!row || !Number.isFinite(allocatedHours) || allocatedHours <= 0) return;
+    evidence.push({
+      taskId: row.task_id,
+      changedAt: row.changed_at,
+      allocatedHours,
+    });
+  });
+  return evidence;
+}
+
+async function validateOffsetEvidence() {
+  const status = qs('offsetEvidenceStatus');
+  if (!OFFSET_CURRENT_ID) {
+    if (status) status.textContent = 'Save a request first.';
+    return;
+  }
+  if (isOffsetEvidenceLocked()) {
+    if (status)
+      status.textContent = 'Evidence editing is locked for this request.';
+    return;
+  }
+  const blockers = offsetEvidenceBlockers();
+  if (blockers.length) {
+    if (status) status.textContent = offsetEvidenceBlockedMessage(blockers);
+    return;
+  }
+  const evidence = collectOffsetEvidenceInput();
+  if (status) status.textContent = 'Validating current allocation.';
+  try {
+    const r = await apiFetch(
+      `/api/offset-requests/${OFFSET_CURRENT_ID}/validate-evidence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ evidence }),
+      },
+    );
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      if (j.validation) renderOffsetValidation(j.validation);
+      if (status) status.textContent = `Error: ${j.error || r.status}`;
+      return;
+    }
+    renderOffsetValidation(j.validation);
+    const result = j.validation?.validationStatus || 'checked';
+    if (status)
+      status.textContent = `Current allocation validation: ${result}. Save evidence to persist it.`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
 }
 
 async function saveOffsetEvidence() {
@@ -2506,7 +2737,8 @@ async function saveOffsetEvidence() {
     return;
   }
   if (isOffsetEvidenceLocked()) {
-    if (status) status.textContent = 'Evidence editing is locked for this request.';
+    if (status)
+      status.textContent = 'Evidence editing is locked for this request.';
     return;
   }
   const blockers = offsetEvidenceBlockers();
@@ -2514,26 +2746,17 @@ async function saveOffsetEvidence() {
     if (status) status.textContent = offsetEvidenceBlockedMessage(blockers);
     return;
   }
-  const evidence = [];
-  document.querySelectorAll('.offset-use:checked').forEach((box) => {
-    const key = box.dataset.key;
-    const row = OFFSET_CANDIDATES.find((x) => x.evidence_key === key);
-    const input = document.querySelector(`.offset-allocated[data-key="${CSS.escape(key)}"]`);
-    const allocatedHours = Number(input?.value || 0);
-    if (!row || !Number.isFinite(allocatedHours) || allocatedHours <= 0) return;
-    evidence.push({
-      taskId: row.task_id,
-      changedAt: row.changed_at,
-      allocatedHours,
-    });
-  });
+  const evidence = collectOffsetEvidenceInput();
   if (status) status.textContent = 'Saving evidence.';
   try {
-    const r = await apiFetch(`/api/offset-requests/${OFFSET_CURRENT_ID}/evidence`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ evidence }),
-    });
+    const r = await apiFetch(
+      `/api/offset-requests/${OFFSET_CURRENT_ID}/evidence`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ evidence }),
+      },
+    );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       if (j.validation) renderOffsetValidation(j.validation);
@@ -2579,7 +2802,8 @@ function showOffsetReviewNotePanel(id, action) {
           }
         : {
             title: 'Cancel',
-            placeholder: 'Optional: explain why this request is being cancelled',
+            placeholder:
+              'Optional: explain why this request is being cancelled',
             confirm: 'Cancel Request',
             status: `Add an optional cancel note for request #${id}.`,
           };
@@ -2641,14 +2865,18 @@ async function performOffsetAction(id, action, note = null) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      if (status) status.textContent = `Error on request #${id}: ${j.error || r.status}`;
+      if (status)
+        status.textContent = `Error on request #${id}: ${j.error || r.status}`;
       alert(`Error: ${j.error || r.status}`);
       return;
     }
     await loadOffsetRequests();
     if (OFFSET_CURRENT_ID === Number(id)) await openOffsetRequest(id);
     const resultStatus =
-      j.row?.validation_status || j.validation?.validationStatus || j.row?.status || '';
+      j.row?.validation_status ||
+      j.validation?.validationStatus ||
+      j.row?.status ||
+      '';
     const doneLabel =
       action === 'validate'
         ? `Rechecked request #${id}${resultStatus ? `: ${resultStatus}` : ''}.`
@@ -2671,21 +2899,46 @@ qs('formOffset')?.addEventListener('submit', async (e) => {
 qs('btnOffsetNew')?.addEventListener('click', clearOffsetForm);
 qs('btnOffsetRefresh')?.addEventListener('click', loadOffsetRequests);
 qs('btnOffsetClearFilters')?.addEventListener('click', clearOffsetFilters);
-qs('btnOffsetLoadEvidence')?.addEventListener('click', loadOffsetEvidenceCandidates);
-qs('btnOffsetAutoAllocate')?.addEventListener('click', autoAllocateOffsetEvidence);
+qs('btnOffsetLoadEvidence')?.addEventListener(
+  'click',
+  loadOffsetEvidenceCandidates,
+);
+qs('btnOffsetAutoAllocate')?.addEventListener(
+  'click',
+  autoAllocateOffsetEvidence,
+);
+qs('btnOffsetValidateEvidence')?.addEventListener('click', validateOffsetEvidence);
 qs('btnOffsetSaveEvidence')?.addEventListener('click', saveOffsetEvidence);
-qs('btnOffsetConfirmReviewNote')?.addEventListener('click', submitOffsetReviewNote);
+qs('tbodyOffsetEvidence')?.addEventListener('input', (e) => {
+  const input = e.target?.closest?.('.offset-allocated');
+  if (!input) return;
+  const key = input.dataset.key;
+  const box = document.querySelector(
+    `.offset-use[data-key="${CSS.escape(key)}"]`,
+  );
+  if (box && !box.disabled) box.checked = Number(input.value || 0) > 0;
+});
+qs('btnOffsetConfirmReviewNote')?.addEventListener(
+  'click',
+  submitOffsetReviewNote,
+);
 qs('btnOffsetCancelReviewNote')?.addEventListener('click', () => {
   const id = qs('offsetReviewNoteId')?.value;
   const action = qs('offsetReviewNoteAction')?.value;
   hideOffsetReviewNotePanel();
   const status = qs('offsetRequestActionStatus');
   const label =
-    action === 'return' ? 'Return' : action === 'approve' ? 'Approve' : 'Cancel';
-  if (status && id && action) status.textContent = `${label} cancelled for request #${id}.`;
+    action === 'return'
+      ? 'Return'
+      : action === 'approve'
+        ? 'Approve'
+        : 'Cancel';
+  if (status && id && action)
+    status.textContent = `${label} cancelled for request #${id}.`;
 });
 qs('offset_start')?.addEventListener('input', syncOffsetRequestedHours);
 qs('offset_end')?.addEventListener('input', syncOffsetRequestedHours);
+qs('offset_reason')?.addEventListener('change', syncOffsetReasonRequirement);
 [
   'offsetFilterStatus',
   'offsetFilterValidation',
@@ -2836,6 +3089,7 @@ function setRoleUI(role) {
 
   const offsetTabButton = qs('tabBtnOffset');
   if (offsetTabButton) offsetTabButton.hidden = !OFFSET_UI_ENABLED;
+  syncOffsetRoleUi();
 
   // Non-privileged: hide Send Missing Hours Notifications panel
   const notifyPanel = qs('notifyDetails')?.closest('.notify-panel');
@@ -2932,6 +3186,7 @@ function setRoleUI(role) {
   const fromStr = ymdAddDays(toStr, -6);
   syncOffsetDateLimits(toStr);
   syncOffsetFormAccess(null);
+  updateOffsetEvidenceSection(null);
 
   qs('from').value = fromStr;
   qs('to').value = toStr;

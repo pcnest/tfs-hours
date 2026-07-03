@@ -776,6 +776,65 @@
       flex-wrap: wrap;
     }
 
+    .offset-evidence-table {
+      min-width: 0;
+      table-layout: fixed;
+    }
+
+    .offset-evidence-table th,
+    .offset-evidence-table td {
+      white-space: normal;
+      vertical-align: middle;
+      overflow-wrap: anywhere;
+    }
+
+    .offset-evidence-table thead th {
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
+
+    .offset-evidence-table th:nth-child(1),
+    .offset-evidence-table td:nth-child(1) {
+      width: 54px;
+      text-align: center;
+    }
+
+    .offset-evidence-table th:nth-child(2),
+    .offset-evidence-table td:nth-child(2) {
+      width: 158px;
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
+
+    .offset-evidence-table th:nth-child(5),
+    .offset-evidence-table td:nth-child(5) {
+      width: 96px;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .offset-evidence-table th:nth-child(6),
+    .offset-evidence-table td:nth-child(6) {
+      width: 78px;
+      text-align: right;
+    }
+
+    .offset-evidence-table .offset-use {
+      width: 14px;
+      min-width: 0;
+      height: 14px;
+      margin: 0;
+    }
+
+    .offset-evidence-table .offset-allocated {
+      width: 58px;
+      max-width: 58px;
+      min-width: 0;
+      padding: 7px 8px;
+      text-align: right;
+    }
+
     .pto-section-row td {
       background: #f5f0e6;
       color: var(--muted);
@@ -993,6 +1052,19 @@
     .pto-status-passed {
       background: #d1e7dd;
       color: #0a3622;
+    }
+
+    .offset-computed-hours {
+      display: flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 10px 12px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      background: #f8fbfa;
+      color: var(--ink);
+      font-weight: 700;
+      white-space: nowrap;
     }
 
     .offset-summary {
@@ -1996,7 +2068,7 @@
         <form id="formOffset" class="pto-form" autocomplete="off">
           <input type="hidden" id="offset_id" />
           <div class="pto-form-row">
-            <div class="field field-grow">
+            <div class="field field-grow" id="offsetEmployeeField">
               <label for="offset_user">Employee</label>
               <input type="text" id="offset_user" list="ptoUserList" placeholder="Name or UPN" required />
             </div>
@@ -2013,8 +2085,9 @@
               <input type="time" id="offset_end" required />
             </div>
             <div class="field field-sm">
-              <label for="offset_hours">Hours</label>
-              <input type="number" id="offset_hours" min="0.01" max="24" step="0.01" required />
+              <label for="offset_hours_display">Hours</label>
+              <div id="offset_hours_display" class="offset-computed-hours">-</div>
+              <input type="hidden" id="offset_hours" />
             </div>
             <div class="field">
               <label for="offset_makeup_date">Make-up Date</label>
@@ -2022,7 +2095,15 @@
             </div>
             <div class="field field-grow">
               <label for="offset_reason">Reason</label>
-              <input type="text" id="offset_reason" placeholder="Reason for interruption" required />
+              <select id="offset_reason" required>
+                <option value="">Select reason</option>
+                <option value="Power interruption">Power interruption</option>
+                <option value="Internet outage">Internet outage</option>
+                <option value="Device issue">Device issue</option>
+                <option value="System or tool access issue">System or tool access issue</option>
+                <option value="Office or site interruption">Office or site interruption</option>
+                <option value="Others">Others</option>
+              </select>
             </div>
             <div class="field field-grow">
               <label for="offset_remarks">Remarks</label>
@@ -2044,13 +2125,16 @@
         <div id="offsetValidation" class="offset-summary" hidden></div>
         <div id="offsetAuditTimeline" class="offset-audit-timeline" hidden></div>
 
-        <section class="pto-section" id="offsetEvidenceSection">
+        <section class="pto-section" id="offsetEvidenceSection" hidden>
           <div class="pto-list-bar">
-            <div class="field">
-              <button type="button" id="btnOffsetLoadEvidence" class="ghost">Load TFS Evidence</button>
+            <div class="field" id="offsetLoadEvidenceField" hidden>
+              <button type="button" id="btnOffsetLoadEvidence" class="ghost">Refresh TFS Evidence</button>
             </div>
             <div class="field">
               <button type="button" id="btnOffsetAutoAllocate" class="ghost">Auto Allocate</button>
+            </div>
+            <div class="field">
+              <button type="button" id="btnOffsetValidateEvidence" class="ghost">Validate</button>
             </div>
             <div class="field">
               <button type="button" id="btnOffsetSaveEvidence">Save Evidence</button>
@@ -2059,24 +2143,20 @@
           </div>
           <div id="offsetEvidenceContext" class="offset-evidence-context" hidden></div>
           <div class="pto-table-wrap">
-            <table class="pto-table mobile-card-table">
+            <table class="pto-table offset-evidence-table mobile-card-table">
               <thead>
                 <tr>
                   <th>Use</th>
                   <th>Changed</th>
                   <th>Task</th>
                   <th>Ticket</th>
-                  <th>Prev</th>
-                  <th>Actual</th>
-                  <th>Delta</th>
-                  <th>Used Elsewhere</th>
-                  <th>Available</th>
+                  <th title="Remaining task hours that can still be allocated to this request">Available</th>
                   <th>Allocate</th>
                 </tr>
               </thead>
               <tbody id="tbodyOffsetEvidence">
                 <tr>
-                  <td colspan="10" class="muted">Save a request, then load TFS evidence.</td>
+                  <td colspan="6" class="muted">Save a request to load eligible TFS evidence.</td>
                 </tr>
               </tbody>
             </table>
@@ -2088,7 +2168,7 @@
             <h2 class="pto-section-title" style="margin-right:auto;">Requests</h2>
             <button type="button" class="ghost" id="btnOffsetRefresh">Refresh</button>
           </div>
-          <div class="filters" style="margin:0 0 12px 0;">
+          <div class="filters" id="offsetRequestFilterBar" style="margin:0 0 12px 0;">
             <div class="field">
               <label for="offsetFilterStatus">Status</label>
               <select id="offsetFilterStatus">

@@ -1,3 +1,5 @@
+require('dotenv').config(); //load environment
+
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -66,7 +68,7 @@ const OFFSET_REGULAR_DAY_HOURS = Math.max(
 );
 const OFFSET_WORKING_DAY_WINDOW = Math.max(
   1,
-  Number(process.env.OFFSET_WORKING_DAY_WINDOW || '10') || 10,
+  Number(process.env.OFFSET_WORKING_DAY_WINDOW || '1') || 1,
 );
 const PUBLIC_BASE_URL = (
   process.env.PUBLIC_BASE_URL ||
@@ -2003,14 +2005,16 @@ const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
   'sync_freshness',
 ]);
 const OFFSET_EMAIL_WORKFLOW_EVENTS = new Set([
-  'create',
+  'create_confirmation',
+  'ready_for_review',
   'resubmit',
   'approve',
   'return',
   'cancel',
 ]);
 const OFFSET_EMAIL_EVENT_LABELS = {
-  create: 'New offset / make-up request',
+  create_confirmation: 'Offset / make-up request received',
+  ready_for_review: 'Offset / make-up request ready for review',
   resubmit: 'Offset / make-up request resubmitted',
   approve: 'Offset / make-up request approved',
   return: 'Offset / make-up request returned',
@@ -2126,15 +2130,23 @@ function isWeekdayYmd(ymd) {
   return dow >= 1 && dow <= 5;
 }
 
-async function resolveOffsetDeadlineYmd(interruptionDate) {
-  const scanTo = addDaysToYmd(interruptionDate, 45);
-  const sharedOffDays = await fetchSharedOffDays(interruptionDate, scanTo);
-  let current = addDaysToYmd(interruptionDate, 1);
+function offsetRequestDateYmd(request) {
+  return (
+    validateDateStr(fmtReportYmdFromTimestamp(request?.created_at)) ||
+    currentReportYmd()
+  );
+}
+
+async function resolveOffsetDeadlineYmd(anchorDate, workingDayWindow) {
+  const windowDays = Math.max(1, Number(workingDayWindow) || 1);
+  const scanTo = addDaysToYmd(anchorDate, 45);
+  const sharedOffDays = await fetchSharedOffDays(anchorDate, scanTo);
+  let current = addDaysToYmd(anchorDate, 1);
   let workingDays = 0;
   while (current && current <= scanTo) {
     if (isWeekdayYmd(current) && !sharedOffDays.has(current)) {
       workingDays += 1;
-      if (workingDays === OFFSET_WORKING_DAY_WINDOW) return current;
+      if (workingDays === windowDays) return current;
     }
     current = addDaysToYmd(current, 1);
   }
@@ -2373,6 +2385,30 @@ function buildOffsetEmailContent({
 }) {
   const employee = offsetEmailEmployeeLabel(row);
   const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName] || 'Offset update';
+  const employeeDirectedEvents = new Set([
+    'create_confirmation',
+    'approve',
+    'return',
+    'cancel',
+  ]);
+  const employeeDirected = employeeDirectedEvents.has(eventName);
+  const greetingHtml = employeeDirected
+    ? `Hi <strong>${escapeEmailHtml(employee)}</strong>,`
+    : 'Hi @Team,';
+  const greetingText = employeeDirected ? `Hi ${employee},` : 'Hi @Team,';
+  const introByEvent = {
+    create_confirmation:
+      'Your offset / make-up request has been saved. Add and save TFS evidence when the make-up work is complete so it can be reviewed.',
+    ready_for_review:
+      'This offset / make-up request has passed validation and is ready for admin review.',
+    resubmit:
+      'This offset / make-up request has been resubmitted and is ready for admin review.',
+    approve: 'Your offset / make-up request has been approved.',
+    return:
+      'Your offset / make-up request has been returned. Review the note below, update the request or evidence, and save it again for review.',
+    cancel: 'Your offset / make-up request has been cancelled.',
+  };
+  const intro = introByEvent[eventName] || eventLabel;
   const requestedHours = offsetRoundHours(row.requested_makeup_hours);
   const interruptedHours = offsetRoundHours(
     Number(row.interruption_duration_minutes || 0) / 60,
@@ -2421,22 +2457,25 @@ function buildOffsetEmailContent({
         `<tr><th align="left" style="padding:4px 12px 4px 0;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(label)}</th><td style="padding:4px 0;">${escapeEmailHtml(value)}</td></tr>`,
     )
     .join('');
-  const failedHtml = failedReasons.length
-    ? `<p><strong>Failed validation reason(s):</strong></p><ul>${failedReasons
-        .map(
-          (reason) =>
-            `<li><strong>${escapeEmailHtml(reason.label || reason.key || 'Validation')}:</strong> ${escapeEmailHtml(reason.message || '')}</li>`,
-        )
-        .join('')}</ul>`
-    : summary?.validationStatus === 'passed'
-      ? '<p><strong>Validation:</strong> All validation checks passed.</p>'
-      : '';
+  const includeFailureDetails = eventName !== 'create_confirmation';
+  const failedHtml =
+    includeFailureDetails && failedReasons.length
+      ? `<p><strong>Failed validation reason(s):</strong></p><ul>${failedReasons
+          .map(
+            (reason) =>
+              `<li><strong>${escapeEmailHtml(reason.label || reason.key || 'Validation')}:</strong> ${escapeEmailHtml(reason.message || '')}</li>`,
+          )
+          .join('')}</ul>`
+      : summary?.validationStatus === 'passed'
+        ? '<p><strong>Validation:</strong> All validation checks passed.</p>'
+        : '';
+  const appAction = employeeDirected ? 'view' : 'review';
   const appHtml = appUrl
-    ? `<p>Open the app to review the request: <a href="${escapeEmailHtml(appUrl)}">${escapeEmailHtml(appUrl)}</a></p>`
+    ? `<p>Open the app to ${appAction} the request: <a href="${escapeEmailHtml(appUrl)}">${escapeEmailHtml(appUrl)}</a></p>`
     : '';
 
-  const html = `<p>Hi @Team,</p>
-<p>${escapeEmailHtml(eventLabel)}.</p>
+  const html = `<p>${greetingHtml}</p>
+<p>${escapeEmailHtml(intro)}</p>
 <table style="font-family:sans-serif;font-size:13px;line-height:1.5;border-collapse:collapse;">${tableHtml}</table>
 ${failedHtml}
 ${appHtml}
@@ -2445,18 +2484,19 @@ ${appHtml}
   const textRows = rows
     .map(([label, value]) => `${label}: ${value}`)
     .join('\n');
-  const failedText = failedReasons.length
-    ? `\nFailed validation reason(s):\n${failedReasons
-        .map(
-          (reason) =>
-            `- ${reason.label || reason.key || 'Validation'}: ${reason.message || ''}`,
-        )
-        .join('\n')}`
-    : summary?.validationStatus === 'passed'
-      ? '\nValidation: All validation checks passed.'
-      : '';
-  const appText = appUrl ? `\nOpen the app: ${appUrl}` : '';
-  const text = `Hi @Team,\n\n${eventLabel}.\n\n${textRows}${failedText}${appText}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
+  const failedText =
+    includeFailureDetails && failedReasons.length
+      ? `\nFailed validation reason(s):\n${failedReasons
+          .map(
+            (reason) =>
+              `- ${reason.label || reason.key || 'Validation'}: ${reason.message || ''}`,
+          )
+          .join('\n')}`
+      : summary?.validationStatus === 'passed'
+        ? '\nValidation: All validation checks passed.'
+        : '';
+  const appText = appUrl ? `\nOpen the app to ${appAction}: ${appUrl}` : '';
+  const text = `${greetingText}\n\n${intro}\n\n${textRows}${failedText}${appText}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
 
   return { html, text };
 }
@@ -2476,29 +2516,70 @@ async function recordOffsetEmailEvent(requestId, action, note, metadata = {}) {
   }
 }
 
-async function sendOffsetWorkflowEmail({
-  requestId,
-  eventName,
-  actorEmail,
-  note,
-}) {
-  if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL) return;
-  if (!OFFSET_EMAIL_WORKFLOW_EVENTS.has(eventName)) return;
-
-  const row = await fetchOffsetRequest(requestId);
-  if (!row) return;
-  const evidence = await fetchOffsetRequestEvidence(requestId);
-  const summaryFromDb = normalizeOffsetValidationSummary(
-    row.validation_summary,
+async function fetchLatestOffsetActionAt(requestId, action) {
+  const r = await pool.query(
+    `SELECT MAX(created_at) AS latest_at
+     FROM public.offset_action_events
+     WHERE request_id = $1
+       AND action = $2`,
+    [requestId, action],
   );
-  const summary = summaryFromDb.validationStatus
-    ? summaryFromDb
-    : await buildOffsetValidationSummary(row);
+  return r.rows[0]?.latest_at || null;
+}
+
+async function hasOffsetWorkflowEmailSentSince(
+  requestId,
+  workflowEvent,
+  sinceAt = null,
+) {
+  const params = [requestId, workflowEvent];
+  let sinceSql = '';
+  if (sinceAt) {
+    params.push(sinceAt);
+    sinceSql = `AND created_at > $${params.length}::timestamptz`;
+  }
+  const r = await pool.query(
+    `SELECT id
+     FROM public.offset_action_events
+     WHERE request_id = $1
+       AND action = 'email_sent'
+       AND metadata->>'workflowEvent' = $2
+       ${sinceSql}
+     LIMIT 1`,
+    params,
+  );
+  return r.rows.length > 0;
+}
+
+async function resolveOffsetReadyEmailEvent(requestId, summary) {
+  if (summary?.validationStatus !== 'passed') return null;
+
+  const latestReturnAt = await fetchLatestOffsetActionAt(requestId, 'return');
+  if (latestReturnAt) {
+    const resubmitted = await hasOffsetWorkflowEmailSentSince(
+      requestId,
+      'resubmit',
+      latestReturnAt,
+    );
+    return resubmitted ? null : 'resubmit';
+  }
+
+  const readySent = await hasOffsetWorkflowEmailSentSince(
+    requestId,
+    'ready_for_review',
+  );
+  return readySent ? null : 'ready_for_review';
+}
+
+async function resolveOffsetEmailRecipients(row, eventName) {
   const adminEmails = await getRoleEmails(['admin'], row.user_upn);
   const filerEmail = row.user_upn || '';
   let toList = [];
   let ccList = [];
-  if (eventName === 'create' || eventName === 'resubmit') {
+
+  if (eventName === 'create_confirmation') {
+    toList = dedupeEmails([filerEmail]);
+  } else if (eventName === 'ready_for_review' || eventName === 'resubmit') {
     toList = dedupeEmails(adminEmails);
     ccList = dedupeEmails([filerEmail]).filter(
       (email) => !toList.some((to) => to.toLowerCase() === email.toLowerCase()),
@@ -2509,7 +2590,62 @@ async function sendOffsetWorkflowEmail({
       (email) => !toList.some((to) => to.toLowerCase() === email.toLowerCase()),
     );
   }
-  if (!toList.length) return;
+
+  return { toList, ccList };
+}
+
+async function sendOffsetWorkflowEmail({
+  requestId,
+  eventName,
+  actorEmail,
+  note,
+}) {
+  if (!OFFSET_EMAIL_WORKFLOW_EVENTS.has(eventName)) return;
+
+  const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName];
+  const row = await fetchOffsetRequest(requestId);
+  if (!row) return;
+
+  if (!BREVO_API_KEY || !NOTIFY_FROM_EMAIL) {
+    await recordOffsetEmailEvent(
+      requestId,
+      'email_skipped',
+      `Email skipped: ${eventLabel}.`,
+      {
+        workflowEvent: eventName,
+        reason: 'email_not_configured',
+        brevoConfigured: !!BREVO_API_KEY,
+        fromConfigured: !!NOTIFY_FROM_EMAIL,
+      },
+    );
+    return;
+  }
+
+  const evidence = await fetchOffsetRequestEvidence(requestId);
+  const summaryFromDb = normalizeOffsetValidationSummary(
+    row.validation_summary,
+  );
+  const summary = summaryFromDb.validationStatus
+    ? summaryFromDb
+    : await buildOffsetValidationSummary(row);
+  const { toList, ccList } = await resolveOffsetEmailRecipients(
+    row,
+    eventName,
+  );
+  if (!toList.length) {
+    await recordOffsetEmailEvent(
+      requestId,
+      'email_skipped',
+      `Email skipped: ${eventLabel}.`,
+      {
+        workflowEvent: eventName,
+        reason: 'no_recipients',
+        to: toList,
+        cc: ccList,
+      },
+    );
+    return;
+  }
 
   const rootMessageId =
     row.email_message_id || `<${crypto.randomUUID()}@tfs-hours>`;
@@ -2522,7 +2658,6 @@ async function sendOffsetWorkflowEmail({
   const headers = firstOffsetEmail
     ? offsetEmailRootHeaders(rootMessageId, threadTopic)
     : offsetEmailReplyHeaders(rootMessageId, threadTopic);
-  const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName];
   const subject = `${eventLabel} #${row.id} - ${offsetEmailEmployeeLabel(row)} - ${ymdValue(row.planned_makeup_date)}`;
   const { html, text } = buildOffsetEmailContent({
     row,
@@ -2898,7 +3033,7 @@ async function fetchOffsetDayCapacity(request, db = pool) {
   };
 }
 
-async function buildOffsetValidationSummary(request, db = pool) {
+async function buildOffsetValidationSummary(request, db = pool, options = {}) {
   const checks = [];
   const addCheck = (key, label, passed, message, status = null) => {
     checks.push({
@@ -2912,11 +3047,15 @@ async function buildOffsetValidationSummary(request, db = pool) {
 
   const interruptionDate = ymdValue(request.interruption_date);
   const plannedDate = ymdValue(request.planned_makeup_date);
+  const requestDateYmd = offsetRequestDateYmd(request);
   const todayYmd = currentReportYmd();
   const durationMinutes = Number(request.interruption_duration_minutes || 0);
   const interruptedHours = offsetRoundHours(durationMinutes / 60);
   const requestedHours = offsetRoundHours(request.requested_makeup_hours);
-  const deadlineYmd = await resolveOffsetDeadlineYmd(interruptionDate);
+  const deadlineYmd = await resolveOffsetDeadlineYmd(
+    requestDateYmd,
+    OFFSET_WORKING_DAY_WINDOW,
+  );
   const lastSyncAt = await fetchLastSyncAt(db);
   const syncAgeHours = lastSyncAt
     ? (Date.now() - new Date(lastSyncAt).getTime()) / 36e5
@@ -2925,9 +3064,13 @@ async function buildOffsetValidationSummary(request, db = pool) {
     syncAgeHours !== null &&
     Number.isFinite(syncAgeHours) &&
     syncAgeHours <= OFFSET_SYNC_FRESHNESS_HOURS;
-  const evidenceRows = await fetchOffsetRequestEvidence(request.id, db);
+  const evidenceRows = Array.isArray(options.evidenceRows)
+    ? options.evidenceRows
+    : await fetchOffsetRequestEvidence(request.id, db);
   const evidenceWindow = offsetEvidenceWindow(request);
-  const candidates = await fetchOffsetEvidenceCandidates(request, db);
+  const candidates = Array.isArray(options.candidates)
+    ? options.candidates
+    : await fetchOffsetEvidenceCandidates(request, db);
   const candidateMap = new Map(
     candidates.map((row) => [
       offsetEvidenceKey(row.task_id, row.changed_at),
@@ -2964,19 +3107,19 @@ async function buildOffsetValidationSummary(request, db = pool) {
       : `Requested hours must equal ${interruptedHours}h.`,
   );
 
-  const notBeforeInterruption = plannedDate >= interruptionDate;
+  const notBeforeRequestDate = plannedDate >= requestDateYmd;
   const withinWindow =
-    !!deadlineYmd && notBeforeInterruption && plannedDate <= deadlineYmd;
+    !!deadlineYmd && notBeforeRequestDate && plannedDate <= deadlineYmd;
   addCheck(
     'makeup_window',
-    'Make-up date is within 10 working days',
+    'Make-up date is within 1 working day from request date',
     withinWindow,
     !deadlineYmd
-      ? 'Could not resolve the 10-working-day deadline.'
-      : !notBeforeInterruption
-        ? `Make-up date cannot be before interruption date ${interruptionDate}.`
+      ? 'Could not resolve the 1-working-day deadline from request date.'
+      : !notBeforeRequestDate
+        ? `Make-up date cannot be before request date ${requestDateYmd}.`
         : plannedDate <= deadlineYmd
-          ? `Make-up date is within the allowed window through ${deadlineYmd}.`
+          ? `Make-up date is within the allowed request-date window through ${deadlineYmd}.`
           : `Make-up date must be on or before ${deadlineYmd}.`,
   );
 
@@ -3098,11 +3241,13 @@ async function buildOffsetValidationSummary(request, db = pool) {
     request: {
       interruptionDate,
       plannedMakeupDate: plannedDate,
+      requestDateYmd,
       currentReportDate: todayYmd,
       interruptionDurationMinutes: durationMinutes,
       interruptedHours,
       requestedMakeupHours: requestedHours,
       deadlineYmd,
+      windowWorkingDays: OFFSET_WORKING_DAY_WINDOW,
     },
     sync: {
       lastSyncAt,
@@ -3175,6 +3320,8 @@ async function parseOffsetRequestBody(body, actorEmail) {
   const reason = normText(body?.reason);
   if (!reason) return { error: 'reason is required' };
   const remarks = normText(body?.remarks);
+  if (reason.toLowerCase() === 'others' && !remarks)
+    return { error: 'remarks are required when reason is Others' };
   const user = resolved.user;
   return {
     row: {
@@ -3202,6 +3349,32 @@ function offsetRequestIdParam(req, res) {
     return null;
   }
   return id;
+}
+
+function normalizeOffsetEvidenceInput(evidence) {
+  const selectedInputMap = new Map();
+  const rows = Array.isArray(evidence) ? evidence : [];
+  for (const item of rows) {
+    const taskId = normInt(item.taskId ?? item.task_id);
+    const changedAt = toDateOrNull(item.changedAt ?? item.changed_at);
+    const allocatedHours = offsetRoundHours(
+      item.allocatedHours ?? item.allocated_hours,
+    );
+    if (!taskId || !changedAt || allocatedHours <= 0) continue;
+    const key = offsetEvidenceKey(taskId, changedAt);
+    const prev = selectedInputMap.get(key);
+    selectedInputMap.set(key, {
+      taskId,
+      changedAt,
+      key,
+      allocatedHours: offsetRoundHours(
+        (prev?.allocatedHours || 0) + allocatedHours,
+      ),
+    });
+  }
+  return Array.from(selectedInputMap.values()).sort((a, b) =>
+    a.key.localeCompare(b.key),
+  );
 }
 
 async function sendOffsetDetail(res, id, statusCode = 200) {
@@ -3369,7 +3542,7 @@ app.post(
       await sendOffsetDetail(res, id, 201);
       queueOffsetWorkflowEmail({
         requestId: id,
-        eventName: 'create',
+        eventName: 'create_confirmation',
         actorEmail: req.userEmail,
       });
     } catch (e) {
@@ -3407,6 +3580,7 @@ app.patch(
       if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
         return res.status(403).json({ ok: false, error: 'forbidden' });
       const client = await pool.connect();
+      let summary;
       try {
         await client.query('BEGIN');
         await client.query(
@@ -3461,7 +3635,7 @@ app.patch(
             requestedMakeupHours: x.requested_makeup_hours,
           },
         });
-        await validateOffsetRequestAndPersist(id, client);
+        summary = await validateOffsetRequestAndPersist(id, client);
         await client.query('COMMIT');
       } catch (txErr) {
         await client.query('ROLLBACK');
@@ -3471,11 +3645,14 @@ app.patch(
       }
       await sendOffsetDetail(res, id);
       if (existing.status === 'returned') {
-        queueOffsetWorkflowEmail({
-          requestId: id,
-          eventName: 'resubmit',
-          actorEmail: req.userEmail,
-        });
+        const emailEvent = await resolveOffsetReadyEmailEvent(id, summary);
+        if (emailEvent) {
+          queueOffsetWorkflowEmail({
+            requestId: id,
+            eventName: emailEvent,
+            actorEmail: req.userEmail,
+          });
+        }
       }
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -3527,6 +3704,57 @@ app.get(
   },
 );
 
+app.post(
+  '/api/offset-requests/:id/validate-evidence',
+  requireAuth,
+  requireOffsetPilotAccess,
+  async (req, res) => {
+    const id = offsetRequestIdParam(req, res);
+    if (!id) return;
+    const evidence = Array.isArray(req.body?.evidence) ? req.body.evidence : [];
+    try {
+      const request = await fetchOffsetRequest(id);
+      if (!request)
+        return res.status(404).json({ ok: false, error: 'not found' });
+      if (!canReadOffsetRequest(req, request))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      if (isOffsetFinalStatus(request.status))
+        return res.status(400).json({
+          ok: false,
+          error: 'finalized requests cannot be changed',
+        });
+      if (!canEditOffsetRequest(req, request))
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+
+      const selectedInput = normalizeOffsetEvidenceInput(evidence);
+      const candidates = await fetchOffsetEvidenceCandidates(request);
+      const candidateMap = new Map(
+        candidates.map((row) => [
+          offsetEvidenceKey(row.task_id, row.changed_at),
+          row,
+        ]),
+      );
+      const evidenceRows = selectedInput.map((item) => {
+        const candidate = candidateMap.get(item.key);
+        return {
+          ...(candidate || {
+            task_id: item.taskId,
+            changed_at: item.changedAt.toISOString(),
+          }),
+          allocated_hours: item.allocatedHours,
+        };
+      });
+      const summary = await buildOffsetValidationSummary(request, pool, {
+        evidenceRows,
+        candidates,
+      });
+      res.json({ ok: true, validation: summary });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  },
+);
+
 app.patch(
   '/api/offset-requests/:id/evidence',
   requireAuth,
@@ -3558,30 +3786,10 @@ app.patch(
         });
       }
 
-      const selectedInputMap = new Map();
-      for (const item of evidence) {
-        const taskId = normInt(item.taskId ?? item.task_id);
-        const changedAt = toDateOrNull(item.changedAt ?? item.changed_at);
-        const allocatedHours = offsetRoundHours(
-          item.allocatedHours ?? item.allocated_hours,
-        );
-        if (!taskId || !changedAt || allocatedHours <= 0) continue;
-        const key = offsetEvidenceKey(taskId, changedAt);
-        const prev = selectedInputMap.get(key);
-        selectedInputMap.set(key, {
-          taskId,
-          changedAt,
-          key,
-          allocatedHours: offsetRoundHours(
-            (prev?.allocatedHours || 0) + allocatedHours,
-          ),
-        });
-      }
-      const selectedInput = Array.from(selectedInputMap.values()).sort((a, b) =>
-        a.key.localeCompare(b.key),
-      );
+      const selectedInput = normalizeOffsetEvidenceInput(evidence);
 
       const client = await pool.connect();
+      let summary;
       try {
         await client.query('BEGIN');
         for (const item of selectedInput) {
@@ -3675,7 +3883,7 @@ app.patch(
             allocatedHours,
           },
         });
-        await validateOffsetRequestAndPersist(id, client);
+        summary = await validateOffsetRequestAndPersist(id, client);
         await client.query('COMMIT');
       } catch (txErr) {
         await client.query('ROLLBACK');
@@ -3684,6 +3892,14 @@ app.patch(
         client.release();
       }
       await sendOffsetDetail(res, id);
+      const emailEvent = await resolveOffsetReadyEmailEvent(id, summary);
+      if (emailEvent) {
+        queueOffsetWorkflowEmail({
+          requestId: id,
+          eventName: emailEvent,
+          actorEmail: req.userEmail,
+        });
+      }
     } catch (e) {
       res.status(400).json({ ok: false, error: String(e?.message || e) });
     }
