@@ -2365,9 +2365,45 @@ function offsetEmailSubjectPart(value, fallback = '-') {
 }
 
 function offsetEmailSubject(row) {
-  return `Work Recovery Request - ${offsetEmailSubjectPart(offsetEmailEmployeeLabel(row), 'Employee')} - ${offsetEmailSubjectPart(row?.reason, 'Reason')} on ${offsetEmailLongDate(row?.planned_makeup_date)}`;
+  return `Work Recovery Request - ${offsetEmailSubjectPart(offsetEmailEmployeeLabel(row), 'Employee')} - ${offsetEmailSubjectPart(row?.reason, 'Reason')} on ${offsetEmailLongDate(row?.interruption_date)}`;
 }
 
+function offsetEmailEvidenceDisplay(id, title) {
+  const idText = id === null || id === undefined || id === '' ? '' : `#${id}`;
+  const titleText = String(title || '').trim();
+  return [idText, titleText].filter(Boolean).join(' ') || '-';
+}
+
+function buildOffsetEvidenceEmailTable(evidence) {
+  const rows = Array.isArray(evidence) ? evidence : [];
+  if (!rows.length) return { html: '', text: '' };
+
+  const bodyHtml = rows
+    .map((row) => {
+      const changed = fmtReportDateTimeFromTimestamp(row.changed_at) || '-';
+      const task = offsetEmailEvidenceDisplay(row.task_id, row.task_title);
+      const ticket = offsetEmailEvidenceDisplay(row.ticket_id, row.ticket_title);
+      const allocated = `${fmtH(row.allocated_hours)} hrs`;
+      return `<tr><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(changed)}</td><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(task)}</td><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(ticket)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(allocated)}</td></tr>`;
+    })
+    .join('');
+  const html = `<p><strong>Linked TFS Evidence Details</strong></p>
+<table style="font-family:sans-serif;font-size:13px;line-height:1.4;border-collapse:collapse;width:100%;max-width:860px;">
+<thead><tr><th align="left" style="padding:6px 8px;border:1px solid #ddd;background:#f6f6f6;">Changed</th><th align="left" style="padding:6px 8px;border:1px solid #ddd;background:#f6f6f6;">Task</th><th align="left" style="padding:6px 8px;border:1px solid #ddd;background:#f6f6f6;">Ticket</th><th align="right" style="padding:6px 8px;border:1px solid #ddd;background:#f6f6f6;">Allocate</th></tr></thead>
+<tbody>${bodyHtml}</tbody>
+</table>`;
+
+  const text = `\n\nLinked TFS Evidence Details:\n${rows
+    .map((row) => {
+      const changed = fmtReportDateTimeFromTimestamp(row.changed_at) || '-';
+      const task = offsetEmailEvidenceDisplay(row.task_id, row.task_title);
+      const ticket = offsetEmailEvidenceDisplay(row.ticket_id, row.ticket_title);
+      return `- Changed: ${changed} | Task: ${task} | Ticket: ${ticket} | Allocate: ${fmtH(row.allocated_hours)} hrs`;
+    })
+    .join('\n')}`;
+
+  return { html, text };
+}
 function offsetEmailThreadTopic(row) {
   return `OFFSET / MAKE-UP REQUEST #${row.id} - ${offsetEmailEmployeeLabel(row)} - ${ymdValue(row.planned_makeup_date)}`;
 }
@@ -2471,16 +2507,21 @@ function buildOffsetEmailContent({
         `<tr><th align="left" style="padding:4px 12px 4px 0;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(label)}</th><td style="padding:4px 0;">${escapeEmailHtml(value)}</td></tr>`,
     )
     .join('');
+  const approvalEvidence =
+    eventName === 'approve'
+      ? buildOffsetEvidenceEmailTable(evidence)
+      : { html: '', text: '' };
 
   const html = `<p>${greetingHtml}</p>
 <p>${escapeEmailHtml(intro)}</p>
 <table style="font-family:sans-serif;font-size:13px;line-height:1.5;border-collapse:collapse;">${tableHtml}</table>
+${approvalEvidence.html}
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`;
 
   const textRows = rows
     .map(([label, value]) => `${label}: ${value}`)
     .join('\n');
-  const text = `${greetingText}\n\n${intro}\n\n${textRows}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
+  const text = `${greetingText}\n\n${intro}\n\n${textRows}${approvalEvidence.text}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
 
   return { html, text };
 }
