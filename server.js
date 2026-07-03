@@ -1990,6 +1990,7 @@ const OFFSET_REQUEST_STATUSES = new Set([
   'cancelled',
 ]);
 const OFFSET_VALIDATION_STATUSES = new Set([
+  'pending',
   'passed',
   'warning',
   'failed',
@@ -2005,7 +2006,6 @@ const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
   'sync_freshness',
 ]);
 const OFFSET_EMAIL_WORKFLOW_EVENTS = new Set([
-  'create_confirmation',
   'ready_for_review',
   'resubmit',
   'approve',
@@ -2013,7 +2013,6 @@ const OFFSET_EMAIL_WORKFLOW_EVENTS = new Set([
   'cancel',
 ]);
 const OFFSET_EMAIL_EVENT_LABELS = {
-  create_confirmation: 'Offset / make-up request received',
   ready_for_review: 'Offset / make-up request ready for review',
   resubmit: 'Offset / make-up request resubmitted',
   approve: 'Offset / make-up request approved',
@@ -2323,6 +2322,7 @@ function offsetEmailStatusLabel(status) {
 
 function offsetEmailValidationLabel(status) {
   const s = String(status || '').toLowerCase();
+  if (s === 'pending') return 'Pending';
   if (s === 'passed') return 'Passed';
   if (s === 'warning') return 'Warning';
   if (s === 'stale') return 'Stale sync';
@@ -2330,15 +2330,42 @@ function offsetEmailValidationLabel(status) {
   return status || 'Unknown';
 }
 
-function offsetEmailTimeRange(row) {
-  const start = String(row?.interruption_start_time || '').slice(0, 5);
-  const end = String(row?.interruption_end_time || '').slice(0, 5);
-  return `${ymdValue(row?.interruption_date)} ${start || '--:--'}-${end || '--:--'}`;
+
+function offsetEmailLongDate(value) {
+  const ymd = ymdValue(value);
+  const parsed = parseYmd(ymd);
+  if (!parsed) return ymd || '-';
+  const month = new Date(Date.UTC(parsed.y, parsed.mo - 1, parsed.d)).toLocaleString(
+    'en-US',
+    { month: 'long', timeZone: 'UTC' },
+  );
+  return `${month} ${String(parsed.d).padStart(2, '0')}, ${parsed.y}`;
 }
 
-function offsetEmailAppUrl() {
-  if (!PUBLIC_BASE_URL) return '';
-  return `${PUBLIC_BASE_URL.replace(/\/+$/, '')}/`;
+function offsetEmail12HourTime(value) {
+  const raw = String(value || '').slice(0, 5);
+  const match = raw.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return '--:--';
+  const hour = Number(match[1]);
+  const minute = match[2];
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) return '--:--';
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${String(hour12).padStart(2, '0')}:${minute} ${suffix}`;
+}
+
+function offsetEmailInterruptionWindow(row) {
+  return `${offsetEmail12HourTime(row?.interruption_start_time)} - ${offsetEmail12HourTime(row?.interruption_end_time)}`;
+}
+
+function offsetEmailSubjectPart(value, fallback = '-') {
+  return String(value || fallback)
+    .replace(/[\r\n]+/g, ' ')
+    .trim() || fallback;
+}
+
+function offsetEmailSubject(row) {
+  return `Work Recovery Request - ${offsetEmailSubjectPart(offsetEmailEmployeeLabel(row), 'Employee')} - ${offsetEmailSubjectPart(row?.reason, 'Reason')} on ${offsetEmailLongDate(row?.planned_makeup_date)}`;
 }
 
 function offsetEmailThreadTopic(row) {
@@ -2385,31 +2412,23 @@ function buildOffsetEmailContent({
 }) {
   const employee = offsetEmailEmployeeLabel(row);
   const eventLabel = OFFSET_EMAIL_EVENT_LABELS[eventName] || 'Offset update';
-  const employeeDirectedEvents = new Set([
-    'create_confirmation',
-    'approve',
-    'return',
-    'cancel',
-  ]);
+  const employeeDirectedEvents = new Set(['approve', 'return', 'cancel']);
   const employeeDirected = employeeDirectedEvents.has(eventName);
   const greetingHtml = employeeDirected
     ? `Hi <strong>${escapeEmailHtml(employee)}</strong>,`
     : 'Hi @Team,';
   const greetingText = employeeDirected ? `Hi ${employee},` : 'Hi @Team,';
   const introByEvent = {
-    create_confirmation:
-      'Your offset / make-up request has been saved. Add and save TFS evidence when the make-up work is complete so it can be reviewed.',
     ready_for_review:
-      'This offset / make-up request has passed validation and is ready for admin review.',
+      'This work recovery request has passed validation and is ready for admin review.',
     resubmit:
-      'This offset / make-up request has been resubmitted and is ready for admin review.',
-    approve: 'Your offset / make-up request has been approved.',
+      'This work recovery request has been resubmitted and is ready for admin review.',
+    approve: 'Your work recovery request has been approved.',
     return:
-      'Your offset / make-up request has been returned. Review the note below, update the request or evidence, and save it again for review.',
-    cancel: 'Your offset / make-up request has been cancelled.',
+      'Your work recovery request has been returned. Review the note below, update the request or evidence, and save it again for review.',
+    cancel: 'Your work recovery request has been cancelled.',
   };
   const intro = introByEvent[eventName] || eventLabel;
-  const requestedHours = offsetRoundHours(row.requested_makeup_hours);
   const interruptedHours = offsetRoundHours(
     Number(row.interruption_duration_minutes || 0) / 60,
   );
@@ -2423,17 +2442,15 @@ function buildOffsetEmailContent({
         0,
       ),
   );
-  const failedReasons = Array.isArray(summary?.failedReasons)
-    ? summary.failedReasons
-    : [];
-  const appUrl = offsetEmailAppUrl();
   const rows = [
-    ['Request', `#${row.id}`],
     ['Employee', employee],
-    ['Interruption', offsetEmailTimeRange(row)],
+    ['Interruption Date', offsetEmailLongDate(row.interruption_date)],
+    ['Interruption Window', offsetEmailInterruptionWindow(row)],
     ['Interrupted Duration', `${fmtH(interruptedHours)} hrs`],
-    ['Requested Make-up Hours', `${fmtH(requestedHours)} hrs`],
-    ['Planned Make-up Date', ymdValue(row.planned_makeup_date)],
+    ['Reason', row.reason || '-'],
+    ['Remarks', row.remarks || '-'],
+    ['Reference No.', `#${row.id}`],
+    ['Requested Recovery Date', offsetEmailLongDate(row.planned_makeup_date)],
     ['Status', offsetEmailStatusLabel(row.status)],
     [
       'Validation',
@@ -2445,11 +2462,8 @@ function buildOffsetEmailContent({
       'Linked TFS Evidence',
       `${evidenceCount} row(s), ${fmtH(evidenceHours)} hrs allocated`,
     ],
-    ['Reason', row.reason || '-'],
-    ['Remarks', row.remarks || '-'],
   ];
-  if (actorEmail) rows.push(['Action By', actorEmail]);
-  if (note) rows.push(['Note', note]);
+  if (note) rows.push(['Review Note', note]);
 
   const tableHtml = rows
     .map(
@@ -2457,46 +2471,16 @@ function buildOffsetEmailContent({
         `<tr><th align="left" style="padding:4px 12px 4px 0;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(label)}</th><td style="padding:4px 0;">${escapeEmailHtml(value)}</td></tr>`,
     )
     .join('');
-  const includeFailureDetails = eventName !== 'create_confirmation';
-  const failedHtml =
-    includeFailureDetails && failedReasons.length
-      ? `<p><strong>Failed validation reason(s):</strong></p><ul>${failedReasons
-          .map(
-            (reason) =>
-              `<li><strong>${escapeEmailHtml(reason.label || reason.key || 'Validation')}:</strong> ${escapeEmailHtml(reason.message || '')}</li>`,
-          )
-          .join('')}</ul>`
-      : summary?.validationStatus === 'passed'
-        ? '<p><strong>Validation:</strong> All validation checks passed.</p>'
-        : '';
-  const appAction = employeeDirected ? 'view' : 'review';
-  const appHtml = appUrl
-    ? `<p>Open the app to ${appAction} the request: <a href="${escapeEmailHtml(appUrl)}">${escapeEmailHtml(appUrl)}</a></p>`
-    : '';
 
   const html = `<p>${greetingHtml}</p>
 <p>${escapeEmailHtml(intro)}</p>
 <table style="font-family:sans-serif;font-size:13px;line-height:1.5;border-collapse:collapse;">${tableHtml}</table>
-${failedHtml}
-${appHtml}
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. Please do not reply to this email.</p>`;
 
   const textRows = rows
     .map(([label, value]) => `${label}: ${value}`)
     .join('\n');
-  const failedText =
-    includeFailureDetails && failedReasons.length
-      ? `\nFailed validation reason(s):\n${failedReasons
-          .map(
-            (reason) =>
-              `- ${reason.label || reason.key || 'Validation'}: ${reason.message || ''}`,
-          )
-          .join('\n')}`
-      : summary?.validationStatus === 'passed'
-        ? '\nValidation: All validation checks passed.'
-        : '';
-  const appText = appUrl ? `\nOpen the app to ${appAction}: ${appUrl}` : '';
-  const text = `${greetingText}\n\n${intro}\n\n${textRows}${failedText}${appText}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
+  const text = `${greetingText}\n\n${intro}\n\n${textRows}\n\n---\nAutomated message - TFS Hours Report. Please do not reply to this email.`;
 
   return { html, text };
 }
@@ -2577,9 +2561,7 @@ async function resolveOffsetEmailRecipients(row, eventName) {
   let toList = [];
   let ccList = [];
 
-  if (eventName === 'create_confirmation') {
-    toList = dedupeEmails([filerEmail]);
-  } else if (eventName === 'ready_for_review' || eventName === 'resubmit') {
+  if (eventName === 'ready_for_review' || eventName === 'resubmit') {
     toList = dedupeEmails(adminEmails);
     ccList = dedupeEmails([filerEmail]).filter(
       (email) => !toList.some((to) => to.toLowerCase() === email.toLowerCase()),
@@ -2658,7 +2640,7 @@ async function sendOffsetWorkflowEmail({
   const headers = firstOffsetEmail
     ? offsetEmailRootHeaders(rootMessageId, threadTopic)
     : offsetEmailReplyHeaders(rootMessageId, threadTopic);
-  const subject = `${eventLabel} #${row.id} - ${offsetEmailEmployeeLabel(row)} - ${ymdValue(row.planned_makeup_date)}`;
+  const subject = offsetEmailSubject(row);
   const { html, text } = buildOffsetEmailContent({
     row,
     evidence,
@@ -2726,6 +2708,18 @@ function queueOffsetWorkflowEmail(args) {
       await sendOffsetWorkflowEmail(args);
     } catch (e) {
       console.error('Offset workflow email queue error:', e);
+    }
+  })();
+}
+
+function queueOffsetReadyWorkflowEmail({ requestId, summary, actorEmail }) {
+  (async () => {
+    try {
+      const eventName = await resolveOffsetReadyEmailEvent(requestId, summary);
+      if (!eventName) return;
+      await sendOffsetWorkflowEmail({ requestId, eventName, actorEmail });
+    } catch (e) {
+      console.error('Offset ready workflow email queue error:', e);
     }
   })();
 }
@@ -3500,8 +3494,10 @@ app.post(
           `INSERT INTO public.offset_requests
              (user_upn, user_name, user_team, filer_role, interruption_date,
               interruption_start_time, interruption_end_time, interruption_duration_minutes,
-              reason, requested_makeup_hours, planned_makeup_date, remarks, created_by)
-           VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8, $9, $10, $11::date, $12, $13)
+              reason, requested_makeup_hours, planned_makeup_date, remarks, created_by,
+              validation_status)
+           VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8, $9, $10, $11::date, $12, $13,
+                   'pending')
            RETURNING id`,
           [
             x.user_upn,
@@ -3520,7 +3516,6 @@ app.post(
           ],
         );
         id = r.rows[0].id;
-        await validateOffsetRequestAndPersist(id, client);
         await recordOffsetActionEvent(client, req, {
           requestId: id,
           action: 'create',
@@ -3540,11 +3535,6 @@ app.post(
         client.release();
       }
       await sendOffsetDetail(res, id, 201);
-      queueOffsetWorkflowEmail({
-        requestId: id,
-        eventName: 'create_confirmation',
-        actorEmail: req.userEmail,
-      });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -3580,7 +3570,6 @@ app.patch(
       if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
         return res.status(403).json({ ok: false, error: 'forbidden' });
       const client = await pool.connect();
-      let summary;
       try {
         await client.query('BEGIN');
         await client.query(
@@ -3601,6 +3590,8 @@ app.patch(
                returned_by = NULL,
                returned_at = NULL,
                return_note = NULL,
+               validation_status = 'pending',
+               validation_summary = '{}'::jsonb,
                updated_at = NOW()
            WHERE id = $1`,
           [
@@ -3635,7 +3626,6 @@ app.patch(
             requestedMakeupHours: x.requested_makeup_hours,
           },
         });
-        summary = await validateOffsetRequestAndPersist(id, client);
         await client.query('COMMIT');
       } catch (txErr) {
         await client.query('ROLLBACK');
@@ -3644,16 +3634,6 @@ app.patch(
         client.release();
       }
       await sendOffsetDetail(res, id);
-      if (existing.status === 'returned') {
-        const emailEvent = await resolveOffsetReadyEmailEvent(id, summary);
-        if (emailEvent) {
-          queueOffsetWorkflowEmail({
-            requestId: id,
-            eventName: emailEvent,
-            actorEmail: req.userEmail,
-          });
-        }
-      }
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -3892,14 +3872,11 @@ app.patch(
         client.release();
       }
       await sendOffsetDetail(res, id);
-      const emailEvent = await resolveOffsetReadyEmailEvent(id, summary);
-      if (emailEvent) {
-        queueOffsetWorkflowEmail({
-          requestId: id,
-          eventName: emailEvent,
-          actorEmail: req.userEmail,
-        });
-      }
+      queueOffsetReadyWorkflowEmail({
+        requestId: id,
+        summary,
+        actorEmail: req.userEmail,
+      });
     } catch (e) {
       res.status(400).json({ ok: false, error: String(e?.message || e) });
     }
@@ -3953,6 +3930,11 @@ app.post(
         validation: summary,
         actionEvents,
         validationEvents,
+      });
+      queueOffsetReadyWorkflowEmail({
+        requestId: id,
+        summary,
+        actorEmail: req.userEmail,
       });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });

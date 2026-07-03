@@ -1826,6 +1826,7 @@ const OFFSET_STATUS_LABELS = {
 };
 
 const OFFSET_VALIDATION_LABELS = {
+  pending: 'Pending',
   passed: 'Passed',
   warning: 'Warning',
   failed: 'Failed',
