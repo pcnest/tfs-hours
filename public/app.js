@@ -1407,6 +1407,9 @@ function updatePtoListControlVisibility() {
   const ptoCalendarWrap = qs('ptoCalendarWrap');
   if (ptoCalendarWrap) ptoCalendarWrap.hidden = !useCalendar;
 
+  const ptoPendingWrap = qs('ptoPendingWrap');
+  if (ptoPendingWrap) ptoPendingWrap.hidden = !useCalendar;
+
   const ptoTableWrap = qs('ptoTableWrap');
   if (ptoTableWrap) ptoTableWrap.hidden = useCalendar;
 
@@ -1676,6 +1679,27 @@ function renderPtoSectionRow(label) {
   return `<tr class="pto-section-row"><td colspan="8">${escapeHtml(label)}</td></tr>`;
 }
 
+function renderPtoPendingTable(rows) {
+  const tbody = qs('tbodyPtoPending');
+  if (!tbody) return;
+  const context = ptoRenderContext();
+  const items = normalizePtoItems(rows || [])
+    .filter((item) => !isFinalPtoStatus(item.status))
+    .sort((a, b) => {
+      const actionDiff =
+        (getPtoItemActions(a, context).isActionRequired ? 0 : 1) -
+        (getPtoItemActions(b, context).isActionRequired ? 0 : 1);
+      if (actionDiff !== 0) return actionDiff;
+      const dateDiff = a.sortDate.localeCompare(b.sortDate);
+      if (dateDiff !== 0) return dateDiff;
+      return a.key.localeCompare(b.key);
+    });
+
+  tbody.innerHTML = items.length
+    ? items.map((item) => renderPtoItemRow(item, context)).join('')
+    : renderPtoInfoRow('No pending PTO requests.');
+}
+
 function renderArchiveGroups(items, context) {
   if (!items.length) {
     return renderPtoInfoRow(
@@ -1732,6 +1756,7 @@ function renderArchiveGroups(items, context) {
 async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
   const tbody = qs('tbodyPto');
   const calendarGrid = qs('ptoCalendarGrid');
+  const pendingTbody = qs('tbodyPtoPending');
   if (!tbody && !calendarGrid) return;
   const useCalendar = isPtoCalendarRole();
   PTO_LIST_USER_FILTER = String(userFilter || '').trim();
@@ -1743,6 +1768,9 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
 
   if (useCalendar && calendarGrid) {
     calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Loading...</div>`;
+    if (pendingTbody) {
+      pendingTbody.innerHTML = `<tr><td colspan="8" class="muted">Loading...</td></tr>`;
+    }
   } else if (tbody) {
     tbody.innerHTML = `<tr><td colspan="8" class="muted">Loading...</td></tr>`;
   }
@@ -1751,12 +1779,51 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
     (useCalendar || PTO_LIST_VIEW_MODE !== 'archive') &&
     (qs('chkActionRequired')?.checked || false);
   try {
-    const p = new URLSearchParams();
     if (useCalendar) {
       const range = ptoCalendarVisibleRange();
-      p.set('from', ymdAddDays(range.startYmd, -31));
-      p.set('to', ymdAddDays(range.endYmd, 31));
+      const calendarParams = new URLSearchParams({
+        from: ymdAddDays(range.startYmd, -31),
+        to: ymdAddDays(range.endYmd, 31),
+      });
+      const pendingParams = new URLSearchParams();
+      if (PTO_LIST_USER_FILTER) {
+        calendarParams.set('assignedTo', PTO_LIST_USER_FILTER);
+        pendingParams.set('assignedTo', PTO_LIST_USER_FILTER);
+      }
+      if (actionRequired) {
+        calendarParams.set('actionRequired', 'true');
+        pendingParams.set('actionRequired', 'true');
+      }
+
+      const [calendarRes, pendingRes] = await Promise.all([
+        apiFetch(`/api/pto?${calendarParams.toString()}`),
+        apiFetch(`/api/pto${pendingParams.toString() ? '?' + pendingParams.toString() : ''}`),
+      ]);
+      const [calendarJson, pendingJson] = await Promise.all([
+        calendarRes.json().catch(() => ({})),
+        pendingRes.json().catch(() => ({})),
+      ]);
+
+      if (!calendarRes.ok || !calendarJson.ok) {
+        if (calendarGrid) {
+          calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Failed to load.</div>`;
+        }
+      } else {
+        PTO_LAST_ROWS = Array.isArray(calendarJson.rows) ? calendarJson.rows : [];
+        renderPtoEntries(PTO_LAST_ROWS);
+      }
+
+      if (!pendingRes.ok || !pendingJson.ok) {
+        if (pendingTbody) {
+          pendingTbody.innerHTML = `<tr><td colspan="8" class="muted">Failed to load pending PTO.</td></tr>`;
+        }
+      } else {
+        renderPtoPendingTable(Array.isArray(pendingJson.rows) ? pendingJson.rows : []);
+      }
+      return;
     }
+
+    const p = new URLSearchParams();
     if (PTO_LIST_USER_FILTER) p.set('assignedTo', PTO_LIST_USER_FILTER);
     if (actionRequired) p.set('actionRequired', 'true');
     const r = await apiFetch(
@@ -1764,9 +1831,7 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
     );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      if (useCalendar && calendarGrid) {
-        calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Failed to load.</div>`;
-      } else if (tbody) {
+      if (tbody) {
         tbody.innerHTML = `<tr><td colspan="8" class="muted">Failed to load.</td></tr>`;
       }
       return;
@@ -1776,12 +1841,14 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
   } catch {
     if (useCalendar && calendarGrid) {
       calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Error loading.</div>`;
+      if (pendingTbody) {
+        pendingTbody.innerHTML = `<tr><td colspan="8" class="muted">Error loading pending PTO.</td></tr>`;
+      }
     } else if (tbody) {
       tbody.innerHTML = `<tr><td colspan="8" class="muted">Error loading.</td></tr>`;
     }
   }
 }
-
 function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
   if (isPtoCalendarRole()) {

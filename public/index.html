@@ -1484,6 +1484,20 @@
       text-align: center;
     }
 
+    .pto-pending-wrap {
+      display: grid;
+      gap: 8px;
+    }
+
+    .pto-pending-title {
+      margin: 2px 0 0;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
     dialog#ptoDetailModal {
       border: none;
       border-radius: var(--radius);
@@ -2716,6 +2730,30 @@
           </div>
           <div class="pto-calendar-grid" id="ptoCalendarGrid">
             <div class="pto-calendar-message muted">Loading&#8230;</div>
+          </div>
+        </div>
+        <div class="pto-pending-wrap" id="ptoPendingWrap" hidden>
+          <h3 class="pto-pending-title">Pending PTO Requests</h3>
+          <div class="pto-table-wrap">
+            <table class="pto-table pto-individual-table mobile-card-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Date</th>
+                  <th>Hours</th>
+                  <th>Day Part</th>
+                  <th>Leave Type</th>
+                  <th>Reason</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tbodyPtoPending">
+                <tr>
+                  <td colspan="8" class="muted">Loading&#8230;</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
         <div class="pto-table-wrap" id="ptoTableWrap">
