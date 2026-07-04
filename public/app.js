@@ -15,6 +15,7 @@ let PTO_LIST_USER_FILTER = '';
 let PTO_LAST_ROWS = [];
 let PTO_CALENDAR_MONTH = '';
 let PTO_CALENDAR_ITEM_MAP = new Map();
+let PTO_CALENDAR_OFF_DAYS = { holidays: [], teamOff: [] };
 let OFFSET_CURRENT_ID = null;
 let OFFSET_CURRENT_ROW = null;
 let OFFSET_LAST_ROWS = [];
@@ -964,6 +965,7 @@ qs('formHoliday')?.addEventListener('submit', async (e) => {
     }
     qs('formHoliday').reset();
     await loadHolidays();
+    await refreshPtoCalendarIfVisible();
   } catch (err) {
     alert(`Error: ${err.message}`);
   }
@@ -1026,6 +1028,7 @@ qs('formTeamOff')?.addEventListener('submit', async (e) => {
     }
     qs('formTeamOff').reset();
     await loadTeamOff();
+    await refreshPtoCalendarIfVisible();
   } catch (err) {
     alert(`Error: ${err.message}`);
   }
@@ -1158,6 +1161,13 @@ function isPtoCalendarRole(role = window.CURRENT_USER?.role) {
   return role === 'admin' || role === 'pm';
 }
 
+function refreshPtoCalendarIfVisible() {
+  if (isPtoCalendarRole() && qs('tabPto') && !qs('tabPto').hidden) {
+    return loadPtoEntries();
+  }
+  return Promise.resolve();
+}
+
 function ptoRenderContext() {
   const role = window.CURRENT_USER?.role;
   return {
@@ -1256,6 +1266,45 @@ function ptoCalendarDurationLabel(hours, dayPart) {
   return fmtHours(n);
 }
 
+function normalizePtoCalendarOffDays({ holidays = [], teamOff = [] } = {}) {
+  const entries = [];
+  for (const row of holidays || []) {
+    const date = row?.holiday_date || '';
+    if (!date) continue;
+    entries.push({
+      type: 'holiday',
+      date,
+      title: row.name || 'Public Holiday',
+      meta: 'Work holiday',
+    });
+  }
+  for (const row of teamOff || []) {
+    const date = row?.entry_date || '';
+    if (!date) continue;
+    entries.push({
+      type: 'team-off',
+      date,
+      title: row.notes || 'Team Off',
+      meta: `Team off - ${fmtHours(row.hours)}`,
+    });
+  }
+  return entries.sort((a, b) => {
+    const dateDiff = a.date.localeCompare(b.date);
+    if (dateDiff !== 0) return dateDiff;
+    const typeDiff = a.type.localeCompare(b.type);
+    if (typeDiff !== 0) return typeDiff;
+    return a.title.localeCompare(b.title);
+  });
+}
+
+function renderPtoCalendarOffChip(entry) {
+  const cls = entry.type === 'holiday' ? 'pto-calendar-chip-holiday' : 'pto-calendar-chip-team-off';
+  return `<div class="pto-calendar-chip pto-calendar-chip-static ${cls}">
+    <span class="pto-calendar-chip-main">${escapeHtml(entry.title)}</span>
+    <span class="pto-calendar-chip-meta">${escapeHtml(entry.meta)}</span>
+  </div>`;
+}
+
 function renderPtoDetailField(label, value, allowHtml = false) {
   return `<div class="pto-detail-field"><div class="k">${escapeHtml(label)}</div><div class="v">${allowHtml ? value : escapeHtml(value || '-')}</div></div>`;
 }
@@ -1300,7 +1349,7 @@ function closePtoDetailModal() {
   if (modal?.open) modal.close();
 }
 
-function renderPtoCalendar(rows) {
+function renderPtoCalendar(rows, offDays = PTO_CALENDAR_OFF_DAYS) {
   const grid = qs('ptoCalendarGrid');
   const title = qs('ptoCalendarTitle');
   if (!grid) return;
@@ -1333,6 +1382,13 @@ function renderPtoCalendar(rows) {
     });
   });
 
+  const offEntriesByDate = new Map();
+  normalizePtoCalendarOffDays(offDays).forEach((entry) => {
+    if (entry.date < range.startYmd || entry.date > range.endYmd) return;
+    if (!offEntriesByDate.has(entry.date)) offEntriesByDate.set(entry.date, []);
+    offEntriesByDate.get(entry.date).push(entry);
+  });
+
   const todayYmd = context.todayYmd;
   const days = ptoCalendarDates(range);
   const html = days.map((ymd) => {
@@ -1346,7 +1402,10 @@ function renderPtoCalendar(rows) {
     ]
       .filter(Boolean)
       .join(' ');
-    const chips = dayEntries
+    const offChips = (offEntriesByDate.get(ymd) || [])
+      .map((entry) => renderPtoCalendarOffChip(entry))
+      .join('');
+    const ptoChips = dayEntries
       .map(({ item, hours, dayPart }) => {
         const status = ptoSafeStatusClass(item.status);
         const duration = ptoCalendarDurationLabel(hours, dayPart);
@@ -1358,6 +1417,7 @@ function renderPtoCalendar(rows) {
         </button>`;
       })
       .join('');
+    const chips = offChips + ptoChips;
     return `<div class="${cls}" data-date="${ymd}">
       <div class="pto-calendar-date"><span>${dayNum}</span>${totalHours ? `<span class="pto-calendar-total">${fmtHours(totalHours)}</span>` : ''}</div>
       <div class="pto-calendar-items">${chips}</div>
@@ -1785,6 +1845,10 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
         from: ymdAddDays(range.startYmd, -31),
         to: ymdAddDays(range.endYmd, 31),
       });
+      const offDayParams = new URLSearchParams({
+        from: range.startYmd,
+        to: range.endYmd,
+      });
       const pendingParams = new URLSearchParams();
       if (PTO_LIST_USER_FILTER) {
         calendarParams.set('assignedTo', PTO_LIST_USER_FILTER);
@@ -1795,21 +1859,29 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
         pendingParams.set('actionRequired', 'true');
       }
 
-      const [calendarRes, pendingRes] = await Promise.all([
+      const [calendarRes, holidayRes, teamOffRes, pendingRes] = await Promise.all([
         apiFetch(`/api/pto?${calendarParams.toString()}`),
+        apiFetch(`/api/holidays?${offDayParams.toString()}`),
+        apiFetch(`/api/team-off?${offDayParams.toString()}`),
         apiFetch(`/api/pto${pendingParams.toString() ? '?' + pendingParams.toString() : ''}`),
       ]);
-      const [calendarJson, pendingJson] = await Promise.all([
+      const [calendarJson, holidayJson, teamOffJson, pendingJson] = await Promise.all([
         calendarRes.json().catch(() => ({})),
+        holidayRes.json().catch(() => ({})),
+        teamOffRes.json().catch(() => ({})),
         pendingRes.json().catch(() => ({})),
       ]);
 
-      if (!calendarRes.ok || !calendarJson.ok) {
+      if (!calendarRes.ok || !calendarJson.ok || !holidayRes.ok || !holidayJson.ok || !teamOffRes.ok || !teamOffJson.ok) {
         if (calendarGrid) {
           calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Failed to load.</div>`;
         }
       } else {
         PTO_LAST_ROWS = Array.isArray(calendarJson.rows) ? calendarJson.rows : [];
+        PTO_CALENDAR_OFF_DAYS = {
+          holidays: Array.isArray(holidayJson.rows) ? holidayJson.rows : [],
+          teamOff: Array.isArray(teamOffJson.rows) ? teamOffJson.rows : [],
+        };
         renderPtoEntries(PTO_LAST_ROWS);
       }
 
@@ -2147,9 +2219,13 @@ document.addEventListener('click', async (e) => {
       alert(`Error: ${j.error || r.status}`);
       return;
     }
-    if (type === 'holiday') await loadHolidays();
-    else if (type === 'team-off') await loadTeamOff();
-    else {
+    if (type === 'holiday') {
+      await loadHolidays();
+      await refreshPtoCalendarIfVisible();
+    } else if (type === 'team-off') {
+      await loadTeamOff();
+      await refreshPtoCalendarIfVisible();
+    } else {
       await loadPtoEntries();
       if (fromPtoDetail) closePtoDetailModal();
     }
