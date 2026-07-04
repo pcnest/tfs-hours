@@ -639,6 +639,11 @@
       min-width: 90px;
     }
 
+    .field-md {
+      width: 180px;
+      min-width: 180px;
+    }
+
     .field input {
       min-width: unset;
     }
@@ -1952,6 +1957,7 @@
       .filters .actions,
       .field,
       .field-grow,
+      .field-md,
       .field-sm,
       .tf-field,
       .tf-field-grow,
@@ -2577,25 +2583,32 @@
 
     <div id="tabPto" class="tab-panel" hidden>
 
-      <!-- Public Holidays -->
+      <!-- Work Holidays -->
       <section class="panel pto-section">
-        <h2 class="pto-section-title">Work/Federal Holidays</h2>
-        <form id="formHoliday" class="pto-form" autocomplete="off">
+        <h2 class="pto-section-title">Work Holidays</h2>
+        <form id="formWorkHoliday" class="pto-form" autocomplete="off">
           <div class="pto-form-row">
+            <div class="field field-md">
+              <label for="work_holiday_type">Type</label>
+              <select id="work_holiday_type" required>
+                <option value="holiday">Federal Holiday</option>
+                <option value="team-off">Team Off</option>
+              </select>
+            </div>
             <div class="field">
-              <label for="hol_date">Date</label>
-              <input type="date" id="hol_date" required />
+              <label for="work_holiday_date">Date</label>
+              <input type="date" id="work_holiday_date" required />
             </div>
             <div class="field field-grow">
-              <label for="hol_name">Holiday</label>
-              <input type="text" id="hol_name" placeholder="e.g. Christmas Day" required />
+              <label for="work_holiday_text" id="work_holiday_text_label">Holiday</label>
+              <input type="text" id="work_holiday_text" placeholder="e.g. Christmas Day" required />
             </div>
             <div class="field field-sm">
-              <label for="hol_hours">Hours</label>
-              <input type="number" id="hol_hours" value="8" min="0.5" max="24" step="0.5" required />
+              <label for="work_holiday_hours">Hours</label>
+              <input type="number" id="work_holiday_hours" value="8" min="0.5" max="24" step="0.5" required />
             </div>
             <div class="field">
-              <button type="submit">Add Holiday</button>
+              <button type="submit">Add Off Day</button>
             </div>
           </div>
         </form>
@@ -2604,61 +2617,20 @@
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Name</th>
+                <th>Type</th>
+                <th>Name / Notes</th>
                 <th>Hours</th>
                 <th></th>
               </tr>
             </thead>
-            <tbody id="tbodyHolidays">
+            <tbody id="tbodyWorkHolidays">
               <tr>
-                <td colspan="4" class="muted">Loading&#8230;</td>
+                <td colspan="5" class="muted">Loading&#8230;</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
-
-      <!-- Team Off -->
-      <section class="panel pto-section">
-        <h2 class="pto-section-title">Team Off</h2>
-        <form id="formTeamOff" class="pto-form" autocomplete="off">
-          <div class="pto-form-row">
-            <div class="field">
-              <label for="toff_date">Date</label>
-              <input type="date" id="toff_date" required />
-            </div>
-            <div class="field field-sm">
-              <label for="toff_hours">Hours</label>
-              <input type="number" id="toff_hours" value="8" min="0.5" max="24" step="0.5" required />
-            </div>
-            <div class="field field-grow">
-              <label for="toff_notes">Notes</label>
-              <input type="text" id="toff_notes" placeholder="Optional notes" />
-            </div>
-            <div class="field">
-              <button type="submit">Add Team Off</button>
-            </div>
-          </div>
-        </form>
-        <div class="pto-table-wrap">
-          <table class="pto-table mobile-card-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Notes</th>
-                <th>Hours</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="tbodyTeamOff">
-              <tr>
-                <td colspan="4" class="muted">Loading&#8230;</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
       <!-- Individual PTO -->
       <section class="panel pto-section">
         <h2 class="pto-section-title">Individual PTO</h2>
@@ -2728,7 +2700,8 @@
               </div>
             </div>
             <div class="pto-calendar-nav" id="ptoCalendarNav" hidden>
-              <button type="button" class="ghost" data-pto-calendar-nav="prev" aria-label="Previous month">&lsaquo;</button>
+              <button type="button" class="ghost" data-pto-calendar-nav="prev"
+                aria-label="Previous month">&lsaquo;</button>
               <div class="pto-calendar-title" id="ptoCalendarTitle">Month</div>
               <button type="button" class="ghost" data-pto-calendar-nav="next" aria-label="Next month">&rsaquo;</button>
               <button type="button" class="ghost" data-pto-calendar-nav="today">Today</button>

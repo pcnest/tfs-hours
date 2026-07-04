@@ -872,8 +872,7 @@ function switchTab(name) {
   }
   if (name === 'pto') {
     populatePtoUserList();
-    loadHolidays();
-    loadTeamOff();
+    loadWorkHolidays();
     syncPtoViewButtons();
     updatePtoListControlVisibility();
     loadPtoEntries();
@@ -908,132 +907,146 @@ async function populatePtoUserList() {
   } catch {}
 }
 
-// -------- Public Holidays --------
-async function loadHolidays() {
-  const tbody = qs('tbodyHolidays');
+// -------- Work Holidays --------
+const WORK_HOLIDAY_TYPE_LABELS = {
+  holiday: 'Work/Federal Holiday',
+  'team-off': 'Team Off',
+};
+
+function normalizeWorkHolidayRows({ holidays = [], teamOff = [] } = {}) {
+  const rows = [];
+  for (const row of holidays || []) {
+    rows.push({
+      id: row.id,
+      date: row.holiday_date,
+      type: 'holiday',
+      typeLabel: WORK_HOLIDAY_TYPE_LABELS.holiday,
+      text: row.name || '',
+      hours: row.hours,
+      sortOrder: 0,
+    });
+  }
+  for (const row of teamOff || []) {
+    rows.push({
+      id: row.id,
+      date: row.entry_date,
+      type: 'team-off',
+      typeLabel: WORK_HOLIDAY_TYPE_LABELS['team-off'],
+      text: row.notes || '',
+      hours: row.hours,
+      sortOrder: 1,
+    });
+  }
+  return rows.sort(
+    (a, b) =>
+      String(a.date || '').localeCompare(String(b.date || '')) ||
+      a.sortOrder - b.sortOrder ||
+      String(a.text || '').localeCompare(String(b.text || '')),
+  );
+}
+
+async function loadWorkHolidays() {
+  const tbody = qs('tbodyWorkHolidays');
   if (!tbody) return;
   try {
-    const r = await apiFetch('/api/holidays');
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
+    const [holidayRes, teamOffRes] = await Promise.all([
+      apiFetch('/api/holidays'),
+      apiFetch('/api/team-off'),
+    ]);
+    const [holidayJson, teamOffJson] = await Promise.all([
+      holidayRes.json().catch(() => ({})),
+      teamOffRes.json().catch(() => ({})),
+    ]);
+    if (!holidayRes.ok || !holidayJson.ok || !teamOffRes.ok || !teamOffJson.ok) {
+      tbody.innerHTML = `<tr><td colspan="5" class="muted">Failed to load.</td></tr>`;
       return;
     }
-    renderHolidays(j.rows);
+    renderWorkHolidays(
+      normalizeWorkHolidayRows({
+        holidays: Array.isArray(holidayJson.rows) ? holidayJson.rows : [],
+        teamOff: Array.isArray(teamOffJson.rows) ? teamOffJson.rows : [],
+      }),
+    );
   } catch {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">Error loading.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Error loading.</td></tr>`;
   }
 }
 
-function renderHolidays(rows) {
-  const tbody = qs('tbodyHolidays');
+function renderWorkHolidays(rows) {
+  const tbody = qs('tbodyWorkHolidays');
   const isPrivileged =
     window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">No holidays defined.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">No work holidays defined.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
     .map(
       (r) => `
       <tr>
-        <td data-label="Date">${escapeHtml(r.holiday_date)}</td>
-        <td data-label="Holiday">${escapeHtml(r.name || '')}</td>
+        <td data-label="Date">${escapeHtml(r.date)}</td>
+        <td data-label="Type">${escapeHtml(r.typeLabel)}</td>
+        <td data-label="Name / Notes">${escapeHtml(r.text || '')}</td>
         <td data-label="Hours">${fmtHours(r.hours)}</td>
-        <td class="cell-actions" data-label="Actions"${isPrivileged ? '' : ' data-empty="true"'}>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="holiday">Delete</button>` : ''}</td>
+        <td class="cell-actions" data-label="Actions"${isPrivileged ? '' : ' data-empty="true"'}>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="${r.type}">Delete</button>` : ''}</td>
       </tr>`,
     )
     .join('');
 }
 
-qs('formHoliday')?.addEventListener('submit', async (e) => {
+function syncWorkHolidayFormFields() {
+  const type = qs('work_holiday_type')?.value || 'holiday';
+  const label = qs('work_holiday_text_label');
+  const textInput = qs('work_holiday_text');
+  if (!label || !textInput) return;
+  if (type === 'team-off') {
+    label.textContent = 'Notes';
+    textInput.placeholder = 'Optional notes';
+    textInput.required = false;
+  } else {
+    label.textContent = 'Holiday';
+    textInput.placeholder = 'e.g. Christmas Day';
+    textInput.required = true;
+  }
+}
+
+qs('work_holiday_type')?.addEventListener('change', syncWorkHolidayFormFields);
+syncWorkHolidayFormFields();
+
+qs('formWorkHoliday')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const holiday_date = qs('hol_date').value;
-  const name = qs('hol_name').value.trim();
-  const hours = parseFloat(qs('hol_hours').value);
-  if (!holiday_date || !name || !Number.isFinite(hours)) return;
+  const type = qs('work_holiday_type')?.value || 'holiday';
+  const date = qs('work_holiday_date').value;
+  const text = qs('work_holiday_text').value.trim();
+  const hours = parseFloat(qs('work_holiday_hours').value);
+  if (!date || !Number.isFinite(hours)) return;
+
+  const isTeamOff = type === 'team-off';
+  if (!isTeamOff && !text) return;
+
   try {
-    const r = await apiFetch('/api/holidays', {
+    const r = await apiFetch(isTeamOff ? '/api/team-off' : '/api/holidays', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ holiday_date, name, hours }),
+      body: JSON.stringify(
+        isTeamOff
+          ? { entry_date: date, hours, notes: text }
+          : { holiday_date: date, name: text, hours },
+      ),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
       alert(`Error: ${j.error || r.status}`);
       return;
     }
-    qs('formHoliday').reset();
-    await loadHolidays();
+    qs('formWorkHoliday').reset();
+    syncWorkHolidayFormFields();
+    await loadWorkHolidays();
     await refreshPtoCalendarIfVisible();
   } catch (err) {
     alert(`Error: ${err.message}`);
   }
 });
-
-// -------- Team Off --------
-async function loadTeamOff() {
-  const tbody = qs('tbodyTeamOff');
-  if (!tbody) return;
-  try {
-    const r = await apiFetch('/api/team-off');
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="4" class="muted">Failed to load.</td></tr>`;
-      return;
-    }
-    renderTeamOff(j.rows);
-  } catch {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">Error loading.</td></tr>`;
-  }
-}
-
-function renderTeamOff(rows) {
-  const tbody = qs('tbodyTeamOff');
-  const isPrivileged =
-    window.CURRENT_USER?.role === 'admin' || window.CURRENT_USER?.role === 'pm';
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">No team off days defined.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = rows
-    .map(
-      (r) => `
-      <tr>
-        <td data-label="Date">${escapeHtml(r.entry_date)}</td>
-        <td data-label="Notes">${escapeHtml(r.notes || '')}</td>
-        <td data-label="Hours">${fmtHours(r.hours)}</td>
-        <td class="cell-actions" data-label="Actions"${isPrivileged ? '' : ' data-empty="true"'}>${isPrivileged ? `<button class="btn-del" data-id="${r.id}" data-type="team-off">Delete</button>` : ''}</td>
-      </tr>`,
-    )
-    .join('');
-}
-
-qs('formTeamOff')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const entry_date = qs('toff_date').value;
-  const hours = parseFloat(qs('toff_hours').value);
-  const notes = qs('toff_notes').value.trim();
-  if (!entry_date || !Number.isFinite(hours)) return;
-  try {
-    const r = await apiFetch('/api/team-off', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ entry_date, hours, notes }),
-    });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.ok) {
-      alert(`Error: ${j.error || r.status}`);
-      return;
-    }
-    qs('formTeamOff').reset();
-    await loadTeamOff();
-    await refreshPtoCalendarIfVisible();
-  } catch (err) {
-    alert(`Error: ${err.message}`);
-  }
-});
-
 // -------- Individual PTO --------
 
 const PTO_STATUS_LABELS = {
@@ -2219,11 +2232,8 @@ document.addEventListener('click', async (e) => {
       alert(`Error: ${j.error || r.status}`);
       return;
     }
-    if (type === 'holiday') {
-      await loadHolidays();
-      await refreshPtoCalendarIfVisible();
-    } else if (type === 'team-off') {
-      await loadTeamOff();
+    if (type === 'holiday' || type === 'team-off') {
+      await loadWorkHolidays();
       await refreshPtoCalendarIfVisible();
     } else {
       await loadPtoEntries();
@@ -3582,12 +3592,10 @@ function setRoleUI(role) {
   const assignedToWrap = qs('assignedTo')?.closest('div');
   if (assignedToWrap) assignedToWrap.hidden = !isPrivileged;
 
-  // Non-privileged: hide add forms in Work/Federal Holidays and Team Off (tables remain visible)
+  // Non-privileged: hide the Work Holidays add form (table remains visible)
   if (!isPrivileged) {
-    const formHoliday = qs('formHoliday');
-    if (formHoliday) formHoliday.hidden = true;
-    const formTeamOff = qs('formTeamOff');
-    if (formTeamOff) formTeamOff.hidden = true;
+    const formWorkHoliday = qs('formWorkHoliday');
+    if (formWorkHoliday) formWorkHoliday.hidden = true;
   }
 
   // PTO submission/list controls remain role-aware.
