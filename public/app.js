@@ -2176,8 +2176,11 @@ function renderOffsetValidation(summary) {
     : summary.validationStatus === 'passed'
       ? '<div class="offset-pass-summary">All validation checks passed.</div>'
       : '';
-  const renderedCard = canManageOffsetRequest()
-    ? item('Rendered', `${fmtHours(capacity.netRenderedHours)}h`)
+  const capacityCards = canManageOffsetRequest()
+    ? `
+      ${item('Rendered', `${fmtHours(capacity.netRenderedHours)}h`)}
+      ${item('Required', `${fmtHours(capacity.regularRequiredHours)}h`)}
+      ${item('Available', `${fmtHours(capacity.availableMakeupHours)}h`)}`
     : '';
   wrap.innerHTML = `
     <div class="pto-list-bar">
@@ -2186,7 +2189,7 @@ function renderOffsetValidation(summary) {
     <div class="offset-summary-grid">
       ${item('Requested', `${fmtHours(request.requestedMakeupHours)}h`)}
       ${item('Deadline', request.deadlineYmd || '-')}
-      ${renderedCard}
+      ${capacityCards}
       ${item('Evidence', `${fmtHours(evidence.allocatedHours)}h`)}
       ${item('Sync Age', sync.syncAgeHours == null ? '-' : `${fmtHours(sync.syncAgeHours)}h`)}
     </div>

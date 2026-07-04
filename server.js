@@ -3324,6 +3324,26 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
     `Linked evidence allocates ${evidenceAllocatedHours}h of ${requestedHours}h requested.`,
   );
 
+  const requiresSurplusCapacity =
+    !!interruptionDate && !!plannedDate && plannedDate > interruptionDate;
+  const surplusCapacityOk =
+    !requiresSurplusCapacity ||
+    Number(capacity.availableMakeupHours || 0) + OFFSET_HOUR_EPSILON >=
+      requestedHours;
+  const surplusCapacityMessage = requiresSurplusCapacity
+    ? surplusCapacityOk
+      ? `Available make-up capacity is ${fmtH(capacity.availableMakeupHours)}h for ${fmtH(requestedHours)}h requested. Rendered ${fmtH(capacity.netRenderedHours)}h, required ${fmtH(capacity.regularRequiredHours)}h, already allocated ${fmtH(capacity.allocatedByOtherRequests)}h.`
+      : `Later-date make-up requires surplus hours beyond the adjusted required workday. Rendered ${fmtH(capacity.netRenderedHours)}h, required ${fmtH(capacity.regularRequiredHours)}h, already allocated ${fmtH(capacity.allocatedByOtherRequests)}h, available ${fmtH(capacity.availableMakeupHours)}h, requested ${fmtH(requestedHours)}h.`
+    : plannedDate && interruptionDate && plannedDate === interruptionDate
+      ? 'Same-day recovery does not require surplus capacity.'
+      : 'Surplus capacity is checked only when the make-up date is after the interruption date.';
+  addCheck(
+    'makeup_surplus_capacity',
+    'Make-up date has enough surplus rendered hours',
+    surplusCapacityOk,
+    surplusCapacityMessage,
+  );
+
   const hasStale = checks.some((check) => check.status === 'stale');
   const hasFailure = checks.some((check) => !check.passed);
   const validationStatus = hasStale
