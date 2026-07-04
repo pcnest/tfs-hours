@@ -2003,6 +2003,7 @@ const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
   'interruption_minimum',
   'requested_hours_match',
   'makeup_window',
+  'makeup_date_available',
   'sync_freshness',
 ]);
 const OFFSET_EMAIL_WORKFLOW_EVENTS = new Set([
@@ -3127,12 +3128,17 @@ async function fetchOffsetDayCapacity(request, db = pool) {
   );
   const offR = await db.query(
     `SELECT
-       COALESCE((SELECT SUM(hours) FROM public.team_off_entries WHERE entry_date = $1::date), 0) +
+       COALESCE((SELECT SUM(hours) FROM public.team_off_entries WHERE entry_date = $1::date), 0)
+         AS team_off_hours,
        COALESCE((SELECT SUM(hours) FROM public.public_holidays WHERE holiday_date = $1::date), 0)
-       AS shared_off_hours`,
+         AS public_holiday_hours`,
     [plannedDate],
   );
-  const sharedOffHours = offsetRoundHours(offR.rows[0]?.shared_off_hours || 0);
+  const teamOffHours = offsetRoundHours(offR.rows[0]?.team_off_hours || 0);
+  const publicHolidayHours = offsetRoundHours(
+    offR.rows[0]?.public_holiday_hours || 0,
+  );
+  const sharedOffHours = offsetRoundHours(teamOffHours + publicHolidayHours);
   const ptoR = await db.query(
     `SELECT COALESCE(SUM(hours), 0) AS pto_hours
      FROM public.pto_entries
@@ -3179,6 +3185,8 @@ async function fetchOffsetDayCapacity(request, db = pool) {
     plannedDate,
     regularRequiredHours,
     sharedOffHours,
+    teamOffHours,
+    publicHolidayHours,
     ptoHours,
     netRenderedHours,
     dailySurplusHours,
@@ -3275,6 +3283,35 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
         : plannedDate <= deadlineYmd
           ? `Requested recovery date is within the allowed interruption recovery window through ${deadlineYmd}.`
           : `Requested recovery date must be on or before ${deadlineYmd}.`,
+  );
+
+  const makeupDateBlockers = [];
+  if (plannedDate) {
+    if (!isWeekdayYmd(plannedDate)) makeupDateBlockers.push('weekend');
+    if (Number(capacity.publicHolidayHours || 0) > OFFSET_HOUR_EPSILON) {
+      makeupDateBlockers.push(
+        `public holiday (${fmtH(capacity.publicHolidayHours)}h)`,
+      );
+    }
+    if (Number(capacity.teamOffHours || 0) > OFFSET_HOUR_EPSILON) {
+      makeupDateBlockers.push(`team-off (${fmtH(capacity.teamOffHours)}h)`);
+    }
+    if (Number(capacity.ptoHours || 0) > OFFSET_HOUR_EPSILON) {
+      makeupDateBlockers.push(
+        `approved PTO for employee (${fmtH(capacity.ptoHours)}h)`,
+      );
+    }
+  }
+  const makeupDateAvailable = !!plannedDate && makeupDateBlockers.length === 0;
+  addCheck(
+    'makeup_date_available',
+    'Make-up date is a regular working day',
+    makeupDateAvailable,
+    !plannedDate
+      ? 'Make-up date is required.'
+      : makeupDateAvailable
+        ? `Make-up date ${plannedDate} is a regular working day with no public holiday, team-off, or approved PTO hours.`
+        : `Make-up date ${plannedDate} cannot be used because it falls on ${makeupDateBlockers.join(', ')}.`,
   );
 
   addCheck(

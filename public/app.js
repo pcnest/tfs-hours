@@ -1854,6 +1854,7 @@ const OFFSET_EVIDENCE_PREREQ_KEYS = new Set([
   'interruption_minimum',
   'requested_hours_match',
   'makeup_window',
+  'makeup_date_available',
   'sync_freshness',
 ]);
 
