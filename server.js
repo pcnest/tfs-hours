@@ -3073,20 +3073,57 @@ function buildOffsetEvidenceFilterSummary(request, evidenceWindow) {
   };
 }
 
+async function fetchOffsetDayLoggedHours(
+  userUpn,
+  userName,
+  plannedDate,
+  db = pool,
+) {
+  const offsetMin = getReportOffsetMinutes();
+  const tz = getReportTimeZone();
+  const rng = rangeFromToUtc(plannedDate, plannedDate, offsetMin, tz);
+  if (!rng) return 0;
+
+  const r = await db.query(
+    `
+    WITH snaps AS (
+      SELECT DISTINCT ON (s.task_id, COALESCE(s.task_changed_date, s.snapshot_at))
+        COALESCE(s.task_changed_date, s.snapshot_at) AS t,
+        s.task_id,
+        s.task_assigned_upn,
+        s.task_assigned_to,
+        COALESCE(s.task_actual_hours, 0) AS h
+      FROM public.tfs_task_hours_snapshots s
+      ORDER BY s.task_id, COALESCE(s.task_changed_date, s.snapshot_at), s.snapshot_at DESC, s.run_id DESC
+    )
+    SELECT COALESCE(SUM(h), 0) AS logged_hours
+    FROM snaps
+    WHERE t >= $1::timestamptz
+      AND t < $2::timestamptz
+      AND h <> 0
+      AND (
+        LOWER(COALESCE(task_assigned_upn, '')) = LOWER($3)
+        OR LOWER(COALESCE(task_assigned_to, '')) = LOWER($4)
+      )
+    `,
+    [
+      rng.fromUtc.toISOString(),
+      rng.toExclusiveUtc.toISOString(),
+      userUpn || '',
+      userName || userUpn || '',
+    ],
+  );
+
+  return offsetRoundHours(r.rows[0]?.logged_hours || 0);
+}
+
 async function fetchOffsetDayCapacity(request, db = pool) {
   const plannedDate = ymdValue(request.planned_makeup_date);
-  const evidenceWindow = offsetEvidenceWindow(request);
-  const dayRows = await fetchOffsetDayRows(
+  const netRenderedHours = await fetchOffsetDayLoggedHours(
     request.user_upn,
     request.user_name,
     plannedDate,
     db,
-    evidenceWindow.sameDay && evidenceWindow.cutoffUtc
-      ? { changedAtFromUtc: evidenceWindow.cutoffUtc }
-      : {},
-  );
-  const netRenderedHours = offsetRoundHours(
-    dayRows.reduce((sum, row) => sum + Number(row.delta_hours || 0), 0),
   );
   const offR = await db.query(
     `SELECT
