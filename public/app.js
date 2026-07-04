@@ -21,6 +21,8 @@ let OFFSET_CURRENT_VALIDATION = null;
 let OFFSET_CURRENT_ACTION_EVENTS = [];
 let OFFSET_CURRENT_VALIDATION_EVENTS = [];
 let OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
+let OFFSET_CREATE_IDEMPOTENCY_KEY = null;
+let OFFSET_SAVE_IN_FLIGHT = false;
 const OFFSET_UI_ENABLED = true; // set to false to hide the "Offset Requests" tab and related UI
 const PTO_ARCHIVE_EXPANDED = new Set();
 const PTO_FINAL_STATUSES = new Set(['approved', 'denied', 'cancelled']);
@@ -1866,7 +1868,7 @@ function canUseOffsetRequestFilters() {
 }
 
 function canViewOffsetEmployeeField() {
-  return ['admin', 'pm'].includes(window.CURRENT_USER?.role);
+  return window.CURRENT_USER?.role === 'admin';
 }
 
 function syncOffsetRoleUi() {
@@ -1967,6 +1969,29 @@ function canManageOffsetRequest() {
   return window.CURRENT_USER?.role === 'admin';
 }
 
+function makeOffsetIdempotencyKey() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getOffsetCreateIdempotencyKey() {
+  if (!OFFSET_CREATE_IDEMPOTENCY_KEY) {
+    OFFSET_CREATE_IDEMPOTENCY_KEY = makeOffsetIdempotencyKey();
+  }
+  return OFFSET_CREATE_IDEMPOTENCY_KEY;
+}
+
+function resetOffsetCreateIdempotencyKey() {
+  if (!OFFSET_CURRENT_ID && !OFFSET_SAVE_IN_FLIGHT) {
+    OFFSET_CREATE_IDEMPOTENCY_KEY = null;
+  }
+}
+
 function offsetCurrentUserLabel() {
   return window.CURRENT_USER?.name || window.CURRENT_USER?.email || '';
 }
@@ -1977,7 +2002,7 @@ function isOffsetEvidenceLocked(row = OFFSET_CURRENT_ROW) {
 
 function syncOffsetFormAccess(row = OFFSET_CURRENT_ROW) {
   syncOffsetRoleUi();
-  const canEdit = canEditOffsetRequest(row);
+  const canEdit = canEditOffsetRequest(row) && !OFFSET_SAVE_IN_FLIGHT;
   const isAdmin = window.CURRENT_USER?.role === 'admin';
   const employee = qs('offset_user');
   if (employee) {
@@ -2368,6 +2393,7 @@ function fillOffsetForm(row, detail = {}) {
 function clearOffsetForm() {
   OFFSET_CURRENT_ID = null;
   OFFSET_CURRENT_ROW = null;
+  OFFSET_CREATE_IDEMPOTENCY_KEY = null;
   OFFSET_CURRENT_ACTION_EVENTS = [];
   OFFSET_CURRENT_VALIDATION_EVENTS = [];
   OFFSET_LAST_EVIDENCE_FILTER_SUMMARY = null;
@@ -2506,6 +2532,7 @@ async function openOffsetRequest(id) {
 
 async function saveOffsetRequest() {
   const status = qs('offsetFormStatus');
+  if (OFFSET_SAVE_IN_FLIGHT) return;
   if (!canEditOffsetRequest(OFFSET_CURRENT_ROW)) {
     if (status) status.textContent = 'This request is read-only.';
     return;
@@ -2514,11 +2541,14 @@ async function saveOffsetRequest() {
   syncOffsetReasonRequirement();
   const form = qs('formOffset');
   if (form && !form.reportValidity()) return;
+  OFFSET_SAVE_IN_FLIGHT = true;
+  syncOffsetFormAccess(OFFSET_CURRENT_ROW);
   if (status) status.textContent = 'Saving request.';
   try {
     await populatePtoUserList();
     const body = offsetRequestBodyFromForm();
     const id = OFFSET_CURRENT_ID;
+    if (!id) body.idempotency_key = getOffsetCreateIdempotencyKey();
     const r = await apiFetch(
       id ? `/api/offset-requests/${id}` : '/api/offset-requests',
       {
@@ -2533,13 +2563,21 @@ async function saveOffsetRequest() {
       return;
     }
     OFFSET_CURRENT_ID = j.row.id;
+    OFFSET_CREATE_IDEMPOTENCY_KEY = null;
     fillOffsetForm(j.row, j);
     renderOffsetEvidenceFromSaved(j.evidence || []);
     await loadOffsetRequests();
     await loadOffsetEvidenceCandidates();
-    if (status) status.textContent = `Saved request #${j.row.id}.`;
+    if (status) {
+      status.textContent = j.idempotent
+        ? `Loaded existing request #${j.row.id}.`
+        : `Saved request #${j.row.id}.`;
+    }
   } catch (err) {
     if (status) status.textContent = `Error: ${err.message}`;
+  } finally {
+    OFFSET_SAVE_IN_FLIGHT = false;
+    syncOffsetFormAccess(OFFSET_CURRENT_ROW);
   }
 }
 
@@ -2940,6 +2978,18 @@ qs('btnOffsetCancelReviewNote')?.addEventListener('click', () => {
 qs('offset_start')?.addEventListener('input', syncOffsetRequestedHours);
 qs('offset_end')?.addEventListener('input', syncOffsetRequestedHours);
 qs('offset_reason')?.addEventListener('change', syncOffsetReasonRequirement);
+[
+  'offset_user',
+  'offset_date',
+  'offset_start',
+  'offset_end',
+  'offset_makeup_date',
+  'offset_reason',
+  'offset_remarks',
+].forEach((id) => {
+  qs(id)?.addEventListener('input', resetOffsetCreateIdempotencyKey);
+  qs(id)?.addEventListener('change', resetOffsetCreateIdempotencyKey);
+});
 [
   'offsetFilterStatus',
   'offsetFilterValidation',

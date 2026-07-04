@@ -2068,6 +2068,53 @@ function canTransitionOffsetRequest(row, action) {
   return false;
 }
 
+function offsetActiveDuplicateLockKey(row) {
+  return [
+    'offset-active-request',
+    normIdentity(row?.user_upn),
+    ymdValue(row?.interruption_date),
+    String(row?.interruption_start_time || '').slice(0, 5),
+    String(row?.interruption_end_time || '').slice(0, 5),
+    ymdValue(row?.planned_makeup_date),
+  ].join('|');
+}
+
+async function lockOffsetActiveDuplicateKey(db, row) {
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+    offsetActiveDuplicateLockKey(row),
+  ]);
+}
+
+async function fetchActiveDuplicateOffsetRequest(row, excludeId = null, db = pool) {
+  const params = [
+    row.user_upn,
+    row.interruption_date,
+    row.interruption_start_time,
+    row.interruption_end_time,
+    row.planned_makeup_date,
+  ];
+  let excludeSql = '';
+  if (excludeId) {
+    params.push(excludeId);
+    excludeSql = `AND id <> $${params.length}`;
+  }
+  const r = await db.query(
+    `SELECT id
+     FROM public.offset_requests
+     WHERE LOWER(user_upn) = LOWER($1)
+       AND interruption_date = $2::date
+       AND interruption_start_time = $3::time
+       AND interruption_end_time = $4::time
+       AND planned_makeup_date = $5::date
+       AND status IN ('pending_review', 'returned', 'approved')
+       ${excludeSql}
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    params,
+  );
+  return r.rows[0] || null;
+}
+
 function offsetRoundHours(v) {
   const n = Number(v);
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
@@ -2172,6 +2219,19 @@ async function fetchOffsetRequest(id, db = pool) {
     [id],
   );
   return r.rows[0] || null;
+}
+
+async function fetchOffsetRequestByIdempotencyKey(idempotencyKey, db = pool) {
+  const key = normText(idempotencyKey);
+  if (!key) return null;
+  const r = await db.query(
+    `SELECT id
+     FROM public.offset_requests
+     WHERE idempotency_key = $1
+     LIMIT 1`,
+    [key],
+  );
+  return r.rows[0]?.id ? fetchOffsetRequest(r.rows[0].id, db) : null;
 }
 
 async function fetchOffsetRequestEvidence(requestId, db = pool) {
@@ -2492,7 +2552,7 @@ function buildOffsetEmailContent({
     ['Employee', employee],
     ['Interruption Date', offsetEmailLongDate(row.interruption_date)],
     ['Interruption Window', offsetEmailInterruptionWindow(row)],
-    ['Interrupted Duration', `${fmtH(interruptedHours)} hrs`],
+    ['Interruption Duration', `${fmtH(interruptedHours)} hrs`],
     ['Reason', row.reason || '-'],
     ['Remarks', row.remarks || '-'],
 
@@ -3380,6 +3440,9 @@ async function parseOffsetRequestBody(body, actorEmail) {
   const remarks = normText(body?.remarks);
   if (reason.toLowerCase() === 'others' && !remarks)
     return { error: 'remarks are required when reason is Others' };
+  const idempotencyKey = normText(body?.idempotency_key);
+  if (idempotencyKey && idempotencyKey.length > 120)
+    return { error: 'idempotency_key is too long' };
   const user = resolved.user;
   return {
     row: {
@@ -3395,6 +3458,7 @@ async function parseOffsetRequestBody(body, actorEmail) {
       requested_makeup_hours: offsetRoundHours(requestedMakeupHours),
       planned_makeup_date: plannedMakeupDate,
       remarks,
+      idempotency_key: idempotencyKey,
       created_by: actorEmail,
     },
   };
@@ -3435,7 +3499,7 @@ function normalizeOffsetEvidenceInput(evidence) {
   );
 }
 
-async function sendOffsetDetail(res, id, statusCode = 200) {
+async function sendOffsetDetail(res, id, statusCode = 200, extra = {}) {
   const row = await fetchOffsetRequest(id);
   if (!row) return res.status(404).json({ ok: false, error: 'not found' });
   const evidence = await fetchOffsetRequestEvidence(id);
@@ -3443,7 +3507,7 @@ async function sendOffsetDetail(res, id, statusCode = 200) {
   const validationEvents = await fetchOffsetValidationEvents(id);
   res
     .status(statusCode)
-    .json({ ok: true, row, evidence, actionEvents, validationEvents });
+    .json({ ok: true, row, evidence, actionEvents, validationEvents, ...extra });
 }
 
 app.get(
@@ -3552,55 +3616,122 @@ app.post(
         return res.status(403).json({ ok: false, error: 'forbidden' });
       const client = await pool.connect();
       let id;
+      let idempotentReplay = false;
       try {
         await client.query('BEGIN');
-        const r = await client.query(
-          `INSERT INTO public.offset_requests
-             (user_upn, user_name, user_team, filer_role, interruption_date,
-              interruption_start_time, interruption_end_time, interruption_duration_minutes,
-              reason, requested_makeup_hours, planned_makeup_date, remarks, created_by,
-              validation_status)
-           VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8, $9, $10, $11::date, $12, $13,
-                   'pending')
-           RETURNING id`,
-          [
-            x.user_upn,
-            x.user_name,
-            x.user_team,
-            x.filer_role,
-            x.interruption_date,
-            x.interruption_start_time,
-            x.interruption_end_time,
-            x.interruption_duration_minutes,
-            x.reason,
-            x.requested_makeup_hours,
-            x.planned_makeup_date,
-            x.remarks,
-            x.created_by,
-          ],
-        );
-        id = r.rows[0].id;
-        await recordOffsetActionEvent(client, req, {
-          requestId: id,
-          action: 'create',
-          fromStatus: null,
-          toStatus: 'pending_review',
-          metadata: {
-            interruptionDate: x.interruption_date,
-            plannedMakeupDate: x.planned_makeup_date,
-            requestedMakeupHours: x.requested_makeup_hours,
-          },
-        });
+        if (x.idempotency_key) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+            `offset-idempotency:${x.idempotency_key}`,
+          ]);
+          const existingByKey = await fetchOffsetRequestByIdempotencyKey(
+            x.idempotency_key,
+            client,
+          );
+          if (existingByKey) {
+            if (!canReadOffsetRequest(req, existingByKey))
+              throw makeHttpError(403, 'forbidden');
+            id = existingByKey.id;
+            idempotentReplay = true;
+          }
+        }
+
+        if (!idempotentReplay) {
+          await lockOffsetActiveDuplicateKey(client, x);
+          const duplicate = await fetchActiveDuplicateOffsetRequest(
+            x,
+            null,
+            client,
+          );
+          if (duplicate) {
+            const err = makeHttpError(
+              409,
+              'an active offset request already exists for this interruption window',
+            );
+            err.existingId = duplicate.id;
+            throw err;
+          }
+
+          const r = await client.query(
+            `INSERT INTO public.offset_requests
+               (user_upn, user_name, user_team, filer_role, interruption_date,
+                interruption_start_time, interruption_end_time, interruption_duration_minutes,
+                reason, requested_makeup_hours, planned_makeup_date, remarks, created_by,
+                idempotency_key, validation_status)
+             VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8, $9, $10, $11::date, $12, $13,
+                     $14, 'pending')
+             RETURNING id`,
+            [
+              x.user_upn,
+              x.user_name,
+              x.user_team,
+              x.filer_role,
+              x.interruption_date,
+              x.interruption_start_time,
+              x.interruption_end_time,
+              x.interruption_duration_minutes,
+              x.reason,
+              x.requested_makeup_hours,
+              x.planned_makeup_date,
+              x.remarks,
+              x.created_by,
+              x.idempotency_key,
+            ],
+          );
+          id = r.rows[0].id;
+          await recordOffsetActionEvent(client, req, {
+            requestId: id,
+            action: 'create',
+            fromStatus: null,
+            toStatus: 'pending_review',
+            metadata: {
+              interruptionDate: x.interruption_date,
+              plannedMakeupDate: x.planned_makeup_date,
+              requestedMakeupHours: x.requested_makeup_hours,
+            },
+          });
+        }
         await client.query('COMMIT');
       } catch (txErr) {
         await client.query('ROLLBACK');
-        throw txErr;
+        if (
+          txErr?.code === '23505' &&
+          txErr?.constraint === 'ux_offset_requests_idempotency_key' &&
+          x.idempotency_key
+        ) {
+          const existingByKey = await fetchOffsetRequestByIdempotencyKey(
+            x.idempotency_key,
+          );
+          if (existingByKey && canReadOffsetRequest(req, existingByKey)) {
+            id = existingByKey.id;
+            idempotentReplay = true;
+          } else {
+            throw txErr;
+          }
+        } else if (
+          txErr?.code === '23505' &&
+          txErr?.constraint === 'ux_offset_requests_active_duplicate'
+        ) {
+          const err = makeHttpError(
+            409,
+            'an active offset request already exists for this interruption window',
+          );
+          throw err;
+        } else {
+          throw txErr;
+        }
       } finally {
         client.release();
       }
-      await sendOffsetDetail(res, id, 201);
+      await sendOffsetDetail(
+        res,
+        id,
+        idempotentReplay ? 200 : 201,
+        idempotentReplay ? { idempotent: true } : {},
+      );
     } catch (e) {
-      res.status(500).json({ ok: false, error: String(e?.message || e) });
+      const body = { ok: false, error: String(e?.message || e) };
+      if (e?.existingId) body.existingId = e.existingId;
+      res.status(e?.status || 500).json(body);
     }
   },
 );
@@ -3636,7 +3767,22 @@ app.patch(
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(
+        await lockOffsetActiveDuplicateKey(client, x);
+        const duplicate = await fetchActiveDuplicateOffsetRequest(
+          x,
+          id,
+          client,
+        );
+        if (duplicate) {
+          const err = makeHttpError(
+            409,
+            'an active offset request already exists for this interruption window',
+          );
+          err.existingId = duplicate.id;
+          throw err;
+        }
+
+        const update = await client.query(
           `UPDATE public.offset_requests
            SET user_upn = $2,
                user_name = $3,
@@ -3657,7 +3803,9 @@ app.patch(
                validation_status = 'pending',
                validation_summary = '{}'::jsonb,
                updated_at = NOW()
-           WHERE id = $1`,
+           WHERE id = $1
+             AND status NOT IN ('approved', 'cancelled')
+           RETURNING id`,
           [
             id,
             x.user_upn,
@@ -3674,6 +3822,8 @@ app.patch(
             x.remarks,
           ],
         );
+        if (!update.rows.length)
+          throw makeHttpError(400, 'finalized requests cannot be edited');
         await client.query(
           'DELETE FROM public.offset_request_evidence WHERE request_id = $1',
           [id],
@@ -3699,7 +3849,9 @@ app.patch(
       }
       await sendOffsetDetail(res, id);
     } catch (e) {
-      res.status(500).json({ ok: false, error: String(e?.message || e) });
+      const body = { ok: false, error: String(e?.message || e) };
+      if (e?.existingId) body.existingId = e.existingId;
+      res.status(e?.status || 500).json(body);
     }
   },
 );
@@ -3904,16 +4056,20 @@ app.patch(
             ],
           );
         }
-        await client.query(
+        const requestUpdate = await client.query(
           `UPDATE public.offset_requests
            SET status = 'pending_review',
                returned_by = NULL,
                returned_at = NULL,
                return_note = NULL,
                updated_at = NOW()
-           WHERE id = $1`,
+           WHERE id = $1
+             AND status NOT IN ('approved', 'cancelled')
+           RETURNING id`,
           [id],
         );
+        if (!requestUpdate.rows.length)
+          throw makeHttpError(400, 'finalized requests cannot be changed');
         const allocatedHours = offsetRoundHours(
           selected.reduce((sum, item) => sum + item.allocatedHours, 0),
         );
