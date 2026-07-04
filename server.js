@@ -2063,9 +2063,16 @@ function canManageOffsetRequest(req) {
 function canTransitionOffsetRequest(row, action) {
   if (!row) return false;
   if (action === 'validate')
-    return row.status === 'pending_review' || row.status === 'returned';
+    return (
+      row.status === 'pending_review' ||
+      row.status === 'returned' ||
+      row.status === 'approved'
+    );
   if (action === 'approve' || action === 'return' || action === 'cancel')
-    return row.status === 'pending_review';
+    return (
+      row.status === 'pending_review' ||
+      (action === 'cancel' && row.status === 'returned')
+    );
   return false;
 }
 
@@ -2184,14 +2191,48 @@ function offsetRequestDateYmd(request) {
   );
 }
 
-async function resolveOffsetDeadlineYmd(anchorDate, workingDayWindow) {
+async function fetchApprovedPtoDays(userUpn, userName, fromYmd, toYmd, db = pool) {
+  if (!fromYmd || !toYmd || fromYmd > toYmd) return new Set();
+  const r = await db.query(
+    `SELECT entry_date::text AS ymd
+     FROM public.pto_entries
+     WHERE entry_date BETWEEN $1::date AND $2::date
+       AND status = 'approved'
+       AND (
+         LOWER(COALESCE(user_upn, '')) = LOWER($3)
+         OR LOWER(COALESCE(user_name, '')) = LOWER($4)
+       )`,
+    [fromYmd, toYmd, userUpn || '', userName || userUpn || ''],
+  );
+  return new Set(r.rows.map((row) => row.ymd));
+}
+
+async function resolveOffsetDeadlineYmd(
+  anchorDate,
+  workingDayWindow,
+  request = null,
+  db = pool,
+) {
   const windowDays = Math.max(1, Number(workingDayWindow) || 1);
   const scanTo = addDaysToYmd(anchorDate, 45);
   const sharedOffDays = await fetchSharedOffDays(anchorDate, scanTo);
+  const ptoOffDays = request
+    ? await fetchApprovedPtoDays(
+        request.user_upn,
+        request.user_name,
+        anchorDate,
+        scanTo,
+        db,
+      )
+    : new Set();
   let current = addDaysToYmd(anchorDate, 1);
   let workingDays = 0;
   while (current && current <= scanTo) {
-    if (isWeekdayYmd(current) && !sharedOffDays.has(current)) {
+    if (
+      isWeekdayYmd(current) &&
+      !sharedOffDays.has(current) &&
+      !ptoOffDays.has(current)
+    ) {
       workingDays += 1;
       if (workingDays === windowDays) return current;
     }
@@ -3015,17 +3056,21 @@ async function fetchOffsetDayRows(
   return r.rows;
 }
 
-async function fetchOffsetEvidenceCandidates(request, db = pool) {
+async function fetchOffsetEvidenceCandidateResult(request, db = pool) {
   const evidenceWindow = offsetEvidenceWindow(request);
-  const dayRows = await fetchOffsetDayRows(
+  const allDayRows = await fetchOffsetDayRows(
     request.user_upn,
     request.user_name,
     ymdValue(request.planned_makeup_date),
     db,
-    evidenceWindow.sameDay && evidenceWindow.cutoffUtc
-      ? { changedAtFromUtc: evidenceWindow.cutoffUtc }
-      : {},
   );
+  const dayRows =
+    evidenceWindow.sameDay && evidenceWindow.cutoffUtc
+      ? allDayRows.filter((row) => {
+          const changedAt = new Date(row.changed_at);
+          return !isNaN(changedAt) && changedAt >= evidenceWindow.cutoffUtc;
+        })
+      : allDayRows;
   const usedByOthers = await fetchOffsetUsedEvidence(request.id, db);
   const selectedRows = await fetchOffsetRequestEvidence(request.id, db);
   const selected = new Map();
@@ -3036,27 +3081,49 @@ async function fetchOffsetEvidenceCandidates(request, db = pool) {
     );
   }
 
-  return dayRows
-    .map((row) => {
-      const eligible = Math.max(0, offsetRoundHours(row.delta_hours));
-      const key = offsetEvidenceKey(row.task_id, row.changed_at);
-      const used = offsetRoundHours(usedByOthers.get(key) || 0);
-      const selectedAllocated = offsetRoundHours(selected.get(key) || 0);
-      const remaining = Math.max(0, offsetRoundHours(eligible - used));
-      return {
-        ...row,
-        evidence_key: key,
-        eligible_hours: eligible,
-        used_hours: used,
-        remaining_hours: remaining,
-        selected_allocated_hours: selectedAllocated,
-      };
-    })
-    .filter(
-      (row) =>
-        row.eligible_hours > 0 &&
-        (row.remaining_hours > 0 || row.selected_allocated_hours > 0),
-    );
+  const enrichedRows = dayRows.map((row) => {
+    const eligible = Math.max(0, offsetRoundHours(row.delta_hours));
+    const key = offsetEvidenceKey(row.task_id, row.changed_at);
+    const used = offsetRoundHours(usedByOthers.get(key) || 0);
+    const selectedAllocated = offsetRoundHours(selected.get(key) || 0);
+    const remaining = Math.max(0, offsetRoundHours(eligible - used));
+    return {
+      ...row,
+      evidence_key: key,
+      eligible_hours: eligible,
+      used_hours: used,
+      remaining_hours: remaining,
+      selected_allocated_hours: selectedAllocated,
+    };
+  });
+  const positiveRows = enrichedRows.filter(
+    (row) => row.eligible_hours > OFFSET_HOUR_EPSILON,
+  );
+  const candidates = positiveRows.filter(
+    (row) => row.remaining_hours > 0 || row.selected_allocated_hours > 0,
+  );
+  const totalPositiveRows = allDayRows.filter(
+    (row) => Number(row.delta_hours || 0) > OFFSET_HOUR_EPSILON,
+  );
+
+  return {
+    candidates,
+    diagnostics: {
+      positiveDeltaRows: totalPositiveRows.length,
+      fullyUsedRows: positiveRows.filter(
+        (row) =>
+          row.remaining_hours <= OFFSET_HOUR_EPSILON &&
+          row.selected_allocated_hours <= OFFSET_HOUR_EPSILON,
+      ).length,
+      candidateRows: candidates.length,
+      cutoffExcludedRows: Math.max(0, totalPositiveRows.length - positiveRows.length),
+    },
+  };
+}
+
+async function fetchOffsetEvidenceCandidates(request, db = pool) {
+  const result = await fetchOffsetEvidenceCandidateResult(request, db);
+  return result.candidates;
 }
 
 function buildOffsetEvidenceFilterSummary(request, evidenceWindow) {
@@ -3195,6 +3262,86 @@ async function fetchOffsetDayCapacity(request, db = pool) {
   };
 }
 
+async function fetchOffsetMakeupDateAvailability(
+  request,
+  db = pool,
+  capacity = null,
+) {
+  const plannedDate = ymdValue(request?.planned_makeup_date);
+  if (!plannedDate) {
+    return {
+      available: false,
+      blockers: ['make-up date is required'],
+      message: 'Make-up date is required.',
+      plannedDate: '',
+    };
+  }
+
+  let publicHolidayHours = capacity?.publicHolidayHours;
+  let teamOffHours = capacity?.teamOffHours;
+  let ptoHours = capacity?.ptoHours;
+
+  if (
+    publicHolidayHours === undefined ||
+    teamOffHours === undefined ||
+    ptoHours === undefined
+  ) {
+    const r = await db.query(
+      `SELECT
+         COALESCE((SELECT SUM(hours) FROM public.team_off_entries WHERE entry_date = $1::date), 0)
+           AS team_off_hours,
+         COALESCE((SELECT SUM(hours) FROM public.public_holidays WHERE holiday_date = $1::date), 0)
+           AS public_holiday_hours,
+         COALESCE((
+           SELECT SUM(hours)
+           FROM public.pto_entries
+           WHERE entry_date = $1::date
+             AND status = 'approved'
+             AND (
+               LOWER(COALESCE(user_upn, '')) = LOWER($2)
+               OR LOWER(COALESCE(user_name, '')) = LOWER($3)
+             )
+         ), 0) AS pto_hours`,
+      [
+        plannedDate,
+        request?.user_upn || '',
+        request?.user_name || request?.user_upn || '',
+      ],
+    );
+    publicHolidayHours = r.rows[0]?.public_holiday_hours || 0;
+    teamOffHours = r.rows[0]?.team_off_hours || 0;
+    ptoHours = r.rows[0]?.pto_hours || 0;
+  }
+
+  publicHolidayHours = offsetRoundHours(publicHolidayHours || 0);
+  teamOffHours = offsetRoundHours(teamOffHours || 0);
+  ptoHours = offsetRoundHours(ptoHours || 0);
+
+  const blockers = [];
+  if (!isWeekdayYmd(plannedDate)) blockers.push('weekend');
+  if (publicHolidayHours > OFFSET_HOUR_EPSILON) {
+    blockers.push(`public holiday (${fmtH(publicHolidayHours)}h)`);
+  }
+  if (teamOffHours > OFFSET_HOUR_EPSILON) {
+    blockers.push(`team-off (${fmtH(teamOffHours)}h)`);
+  }
+  if (ptoHours > OFFSET_HOUR_EPSILON) {
+    blockers.push(`approved PTO for employee (${fmtH(ptoHours)}h)`);
+  }
+
+  const available = blockers.length === 0;
+  return {
+    available,
+    blockers,
+    message: available
+      ? `Make-up date ${plannedDate} is a regular working day with no public holiday, team-off, or approved PTO hours.`
+      : `Make-up date ${plannedDate} cannot be used because it falls on ${blockers.join(', ')}.`,
+    plannedDate,
+    publicHolidayHours,
+    teamOffHours,
+    ptoHours,
+  };
+}
 async function buildOffsetValidationSummary(request, db = pool, options = {}) {
   const checks = [];
   const addCheck = (key, label, passed, message, status = null) => {
@@ -3217,6 +3364,8 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
   const deadlineYmd = await resolveOffsetDeadlineYmd(
     interruptionDate,
     OFFSET_WORKING_DAY_WINDOW,
+    request,
+    db,
   );
   const lastSyncAt = await fetchLastSyncAt(db);
   const syncAgeHours = lastSyncAt
@@ -3285,33 +3434,16 @@ async function buildOffsetValidationSummary(request, db = pool, options = {}) {
           : `Requested recovery date must be on or before ${deadlineYmd}.`,
   );
 
-  const makeupDateBlockers = [];
-  if (plannedDate) {
-    if (!isWeekdayYmd(plannedDate)) makeupDateBlockers.push('weekend');
-    if (Number(capacity.publicHolidayHours || 0) > OFFSET_HOUR_EPSILON) {
-      makeupDateBlockers.push(
-        `public holiday (${fmtH(capacity.publicHolidayHours)}h)`,
-      );
-    }
-    if (Number(capacity.teamOffHours || 0) > OFFSET_HOUR_EPSILON) {
-      makeupDateBlockers.push(`team-off (${fmtH(capacity.teamOffHours)}h)`);
-    }
-    if (Number(capacity.ptoHours || 0) > OFFSET_HOUR_EPSILON) {
-      makeupDateBlockers.push(
-        `approved PTO for employee (${fmtH(capacity.ptoHours)}h)`,
-      );
-    }
-  }
-  const makeupDateAvailable = !!plannedDate && makeupDateBlockers.length === 0;
+  const makeupDateAvailability = await fetchOffsetMakeupDateAvailability(
+    request,
+    db,
+    capacity,
+  );
   addCheck(
     'makeup_date_available',
     'Make-up date is a regular working day',
-    makeupDateAvailable,
-    !plannedDate
-      ? 'Make-up date is required.'
-      : makeupDateAvailable
-        ? `Make-up date ${plannedDate} is a regular working day with no public holiday, team-off, or approved PTO hours.`
-        : `Make-up date ${plannedDate} cannot be used because it falls on ${makeupDateBlockers.join(', ')}.`,
+    makeupDateAvailability.available,
+    makeupDateAvailability.message,
   );
 
   addCheck(
@@ -3708,6 +3840,13 @@ app.post(
       const x = parsed.row;
       if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
         return res.status(403).json({ ok: false, error: 'forbidden' });
+      const makeupAvailability = await fetchOffsetMakeupDateAvailability(x);
+      if (!makeupAvailability.available)
+        return res.status(400).json({
+          ok: false,
+          error: makeupAvailability.message,
+          makeupDateAvailability: makeupAvailability,
+        });
       const client = await pool.connect();
       let id;
       let idempotentReplay = false;
@@ -3858,6 +3997,13 @@ app.patch(
       const x = parsed.row;
       if (req.userRole !== 'admin' && !offsetIsOwnRequest(req, x))
         return res.status(403).json({ ok: false, error: 'forbidden' });
+      const makeupAvailability = await fetchOffsetMakeupDateAvailability(x);
+      if (!makeupAvailability.available)
+        return res.status(400).json({
+          ok: false,
+          error: makeupAvailability.message,
+          makeupDateAvailability: makeupAvailability,
+        });
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
@@ -3979,11 +4125,12 @@ app.get(
           filterSummary,
         });
       }
-      const candidates = await fetchOffsetEvidenceCandidates(request);
+      const candidateResult = await fetchOffsetEvidenceCandidateResult(request);
       const capacity = await fetchOffsetDayCapacity(request);
       res.json({
         ok: true,
-        candidates,
+        candidates: candidateResult.candidates,
+        diagnostics: candidateResult.diagnostics,
         capacity,
         evidenceWindow,
         filterSummary,
@@ -4214,7 +4361,7 @@ app.post(
       if (!canTransitionOffsetRequest(existing, 'validate'))
         return res.status(400).json({
           ok: false,
-          error: 'only pending or returned requests can be rechecked',
+          error: 'only pending, returned, or approved requests can be rechecked',
         });
       const client = await pool.connect();
       let summary;
@@ -4245,11 +4392,13 @@ app.post(
         actionEvents,
         validationEvents,
       });
-      queueOffsetReadyWorkflowEmail({
-        requestId: id,
-        summary,
-        actorEmail: req.userEmail,
-      });
+      if (existing.status !== 'approved') {
+        queueOffsetReadyWorkflowEmail({
+          requestId: id,
+          summary,
+          actorEmail: req.userEmail,
+        });
+      }
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -4426,7 +4575,7 @@ app.patch(
       if (!canTransitionOffsetRequest(existing, 'cancel'))
         return res.status(400).json({
           ok: false,
-          error: 'only pending review requests can be cancelled',
+          error: 'only pending review or returned requests can be cancelled',
         });
       const client = await pool.connect();
       try {
@@ -4439,7 +4588,7 @@ app.patch(
                cancel_note = $3,
                updated_at = NOW()
            WHERE id = $1
-             AND status = 'pending_review'
+             AND status IN ('pending_review', 'returned')
            RETURNING id`,
           [id, req.userEmail, note],
         );

@@ -2480,7 +2480,8 @@ function renderOffsetRequests(rows) {
       const canManage = canManageOffsetRequest();
       const isPending = row.status === 'pending_review';
       const isReturned = row.status === 'returned';
-      const canRecheck = canManage && (isPending || isReturned);
+      const isApproved = row.status === 'approved';
+      const canRecheck = canManage && (isPending || isReturned || isApproved);
       const canApprove =
         canManage && isPending && row.validation_status === 'passed';
       const statusNote =
@@ -2505,7 +2506,7 @@ function renderOffsetRequests(rows) {
             ${canRecheck ? `<button type="button" class="ghost" data-offset-action="validate" data-id="${row.id}">Recheck</button>` : ''}
             ${canApprove ? `<button type="button" class="btn-approve" data-offset-action="approve" data-id="${row.id}">Approve</button>` : ''}
             ${canManage && isPending ? `<button type="button" class="btn-deny" data-offset-action="return" data-id="${row.id}">Return</button>` : ''}
-            ${canManage && isPending ? `<button type="button" class="btn-cancel" data-offset-action="cancel" data-id="${row.id}">Cancel</button>` : ''}
+            ${canManage && (isPending || isReturned) ? `<button type="button" class="btn-cancel" data-offset-action="cancel" data-id="${row.id}">Cancel</button>` : ''}
           </div>
         </td>
       </tr>`;
@@ -2637,11 +2638,19 @@ async function loadOffsetEvidenceCandidates() {
       const cutoffTime = String(
         j.evidenceWindow?.interruptionEndTime || '',
       ).slice(0, 5);
+      const diagnostics = j.diagnostics || {};
+      const positiveDeltaRows = Number(diagnostics.positiveDeltaRows || 0);
+      const fullyUsedRows = Number(diagnostics.fullyUsedRows || 0);
+      const cutoffExcludedRows = Number(diagnostics.cutoffExcludedRows || 0);
       status.textContent = OFFSET_CANDIDATES.length
         ? `${OFFSET_CANDIDATES.length} candidate row(s) loaded.`
-        : j.evidenceWindow?.sameDay && cutoffTime
-          ? `No positive TFS delta rows found on or after interruption end time ${cutoffTime}.`
-          : 'No positive TFS delta rows found for this make-up date.';
+        : positiveDeltaRows <= 0
+          ? 'No positive TFS delta rows found for this make-up date.'
+          : fullyUsedRows > 0
+            ? `${fullyUsedRows} positive TFS delta row(s) found, but their available hours are already allocated to other active offset requests.`
+            : j.evidenceWindow?.sameDay && cutoffTime && cutoffExcludedRows > 0
+              ? `Positive TFS delta rows exist for this date, but none are on or after interruption end time ${cutoffTime}.`
+              : 'No available TFS evidence rows found for this make-up date.';
     }
   } catch (err) {
     if (status) status.textContent = `Error: ${err.message}`;
