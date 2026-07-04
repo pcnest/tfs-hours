@@ -2330,15 +2330,13 @@ function offsetEmailValidationLabel(status) {
   return status || 'Unknown';
 }
 
-
 function offsetEmailLongDate(value) {
   const ymd = ymdValue(value);
   const parsed = parseYmd(ymd);
   if (!parsed) return ymd || '-';
-  const month = new Date(Date.UTC(parsed.y, parsed.mo - 1, parsed.d)).toLocaleString(
-    'en-US',
-    { month: 'long', timeZone: 'UTC' },
-  );
+  const month = new Date(
+    Date.UTC(parsed.y, parsed.mo - 1, parsed.d),
+  ).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
   return `${month} ${String(parsed.d).padStart(2, '0')}, ${parsed.y}`;
 }
 
@@ -2359,9 +2357,11 @@ function offsetEmailInterruptionWindow(row) {
 }
 
 function offsetEmailSubjectPart(value, fallback = '-') {
-  return String(value || fallback)
-    .replace(/[\r\n]+/g, ' ')
-    .trim() || fallback;
+  return (
+    String(value || fallback)
+      .replace(/[\r\n]+/g, ' ')
+      .trim() || fallback
+  );
 }
 
 function offsetEmailSubject(row) {
@@ -2382,7 +2382,10 @@ function buildOffsetEvidenceEmailTable(evidence) {
     .map((row) => {
       const changed = fmtReportDateTimeFromTimestamp(row.changed_at) || '-';
       const task = offsetEmailEvidenceDisplay(row.task_id, row.task_title);
-      const ticket = offsetEmailEvidenceDisplay(row.ticket_id, row.ticket_title);
+      const ticket = offsetEmailEvidenceDisplay(
+        row.ticket_id,
+        row.ticket_title,
+      );
       const allocated = `${fmtH(row.allocated_hours)} hrs`;
       return `<tr><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(changed)}</td><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(task)}</td><td style="padding:6px 8px;border:1px solid #ddd;vertical-align:top;">${escapeEmailHtml(ticket)}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:right;vertical-align:top;white-space:nowrap;">${escapeEmailHtml(allocated)}</td></tr>`;
     })
@@ -2397,7 +2400,10 @@ function buildOffsetEvidenceEmailTable(evidence) {
     .map((row) => {
       const changed = fmtReportDateTimeFromTimestamp(row.changed_at) || '-';
       const task = offsetEmailEvidenceDisplay(row.task_id, row.task_title);
-      const ticket = offsetEmailEvidenceDisplay(row.ticket_id, row.ticket_title);
+      const ticket = offsetEmailEvidenceDisplay(
+        row.ticket_id,
+        row.ticket_title,
+      );
       return `- Date: ${changed} | Task: ${task} | Ticket: ${ticket} | Allocate: ${fmtH(row.allocated_hours)} hrs`;
     })
     .join('\n')}`;
@@ -2460,13 +2466,13 @@ function buildOffsetEmailContent({
   const approverLabel = actorName || actorEmail || 'admin';
   const introByEvent = {
     ready_for_review:
-      'This work recovery request has passed validation and is ready for admin review.',
+      'This Work Recovery request has passed validation and is ready for review/approval.',
     resubmit:
-      'This work recovery request has been resubmitted and is ready for admin review.',
-    approve: `The Work Recovery request for ${employee} on ${requestedRecoveryDate} has been confirmed by ${approverLabel}.`,
+      'This Work Recovery request has been resubmitted and is ready for review/approval.',
+    approve: `The Work Recovery request for <strong>${employee}</strong> on <strong>${requestedRecoveryDate}</strong> has been confirmed by <strong>${approverLabel}</strong>.`,
     return:
-      'Your work recovery request has been returned. Review the note below, update the request or evidence, and save it again for review.',
-    cancel: 'Your work recovery request has been cancelled.',
+      'Your Work Recovery request has been returned. Review the note below, update the request or evidence, and save it again for review.',
+    cancel: 'Your Work Recovery request has been cancelled.',
   };
   const intro = introByEvent[eventName] || eventLabel;
   const interruptedHours = offsetRoundHours(
@@ -2489,7 +2495,7 @@ function buildOffsetEmailContent({
     ['Interrupted Duration', `${fmtH(interruptedHours)} hrs`],
     ['Reason', row.reason || '-'],
     ['Remarks', row.remarks || '-'],
-    ['Reference No.', `#${row.id}`],
+
     ['Requested Recovery Date', offsetEmailLongDate(row.planned_makeup_date)],
     ['Status', offsetEmailStatusLabel(row.status)],
     [
@@ -2502,6 +2508,7 @@ function buildOffsetEmailContent({
       'Linked TFS Evidence',
       `${evidenceCount} row(s), ${fmtH(evidenceHours)} hrs allocated`,
     ],
+    ['Reference No.', `#${row.id}`],
   ];
   if (eventName === 'approve') {
     rows = rows.filter(
@@ -2667,10 +2674,7 @@ async function sendOffsetWorkflowEmail({
   const summary = summaryFromDb.validationStatus
     ? summaryFromDb
     : await buildOffsetValidationSummary(row);
-  const { toList, ccList } = await resolveOffsetEmailRecipients(
-    row,
-    eventName,
-  );
+  const { toList, ccList } = await resolveOffsetEmailRecipients(row, eventName);
   if (!toList.length) {
     await recordOffsetEmailEvent(
       requestId,
