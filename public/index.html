@@ -1312,6 +1312,254 @@
       gap: 6px;
     }
 
+    .pto-calendar-nav {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+
+    .pto-calendar-nav button {
+      padding: 7px 11px;
+      border-radius: 999px;
+      line-height: 1;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .pto-calendar-title {
+      min-width: 150px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink);
+    }
+
+    .pto-calendar-wrap {
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      overflow: hidden;
+      background: white;
+    }
+
+    .pto-calendar-weekdays,
+    .pto-calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+    }
+
+    .pto-calendar-weekdays {
+      border-bottom: 1px solid var(--stroke);
+      background: #fbf7ef;
+    }
+
+    .pto-calendar-weekdays span {
+      padding: 9px 10px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .pto-calendar-grid {
+      min-height: 460px;
+    }
+
+    .pto-calendar-day {
+      min-height: 118px;
+      padding: 8px;
+      border-right: 1px solid #ece8df;
+      border-bottom: 1px solid #ece8df;
+      background: white;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 6px;
+      align-content: start;
+    }
+
+    .pto-calendar-day:nth-child(7n) {
+      border-right: none;
+    }
+
+    .pto-calendar-day.is-outside-month {
+      background: #fbfaf7;
+      color: var(--muted);
+    }
+
+    .pto-calendar-day.is-today {
+      box-shadow: inset 0 0 0 2px rgba(31, 122, 107, 0.32);
+    }
+
+    .pto-calendar-date {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .pto-calendar-total {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .pto-calendar-items {
+      display: grid;
+      gap: 5px;
+      align-content: start;
+    }
+
+    .pto-calendar-chip {
+      width: 100%;
+      min-width: 0;
+      padding: 6px 7px;
+      border: 1px solid var(--stroke);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: #f8fbfa;
+      color: var(--ink);
+      text-align: left;
+      display: grid;
+      gap: 2px;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .pto-calendar-chip:hover {
+      background: #eef7f4;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .pto-calendar-chip-main {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .pto-calendar-chip-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .pto-calendar-chip.pto-calendar-status-pending,
+    .pto-calendar-chip.pto-calendar-status-lead_approved,
+    .pto-calendar-chip.pto-calendar-status-external_pending {
+      border-left-color: #b7791f;
+      background: #fffaf0;
+    }
+
+    .pto-calendar-chip.pto-calendar-status-approved {
+      border-left-color: var(--accent);
+      background: #f1fbf6;
+    }
+
+    .pto-calendar-chip.pto-calendar-status-cancelled {
+      border-left-color: #6c757d;
+      background: #f4f5f6;
+    }
+
+    .pto-calendar-chip.pto-calendar-status-denied {
+      border-left-color: #b42318;
+      background: #fff1f1;
+    }
+
+    .pto-calendar-message {
+      grid-column: 1 / -1;
+      padding: 24px;
+      text-align: center;
+    }
+
+    dialog#ptoDetailModal {
+      border: none;
+      border-radius: var(--radius);
+      padding: 0;
+      max-width: 560px;
+      width: calc(100% - 32px);
+      box-shadow: var(--shadow);
+      background: white;
+    }
+
+    dialog#ptoDetailModal::backdrop {
+      background: rgba(16, 24, 24, 0.35);
+      backdrop-filter: blur(2px);
+    }
+
+    .pto-detail-body {
+      display: grid;
+      gap: 12px;
+      padding: 16px 20px;
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+
+    .pto-detail-summary {
+      display: grid;
+      gap: 4px;
+    }
+
+    .pto-detail-summary strong {
+      font-size: 18px;
+      font-family: var(--font-display);
+    }
+
+    .pto-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .pto-detail-field {
+      display: grid;
+      gap: 3px;
+      padding: 9px 10px;
+      border: 1px solid var(--stroke);
+      border-radius: 8px;
+      background: #fbfaf7;
+      min-width: 0;
+    }
+
+    .pto-detail-field .k {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .pto-detail-field .v {
+      font-size: 13px;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+    }
+
+    .pto-detail-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 12px 20px 16px;
+      border-top: 1px solid var(--stroke);
+    }
+
+    .pto-detail-actions:empty {
+      display: none;
+    }
+
     /* Daily hours modal */
     dialog#dailyModal {
       border: none;
@@ -1709,6 +1957,50 @@
       .segmented-btn {
         width: 100%;
         text-align: center;
+      }
+
+      .pto-calendar-nav {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        width: 100%;
+        margin-left: 0;
+      }
+
+      .pto-calendar-nav button[data-pto-calendar-nav="today"] {
+        grid-column: 1 / -1;
+        width: 100%;
+      }
+
+      .pto-calendar-title {
+        min-width: 0;
+      }
+
+      .pto-calendar-weekdays {
+        display: none;
+      }
+
+      .pto-calendar-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        min-height: 0;
+      }
+
+      .pto-calendar-day {
+        min-height: 0;
+        border-right: none;
+      }
+
+      .pto-calendar-day.is-outside-month {
+        display: none;
+      }
+
+      .pto-detail-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .pto-detail-actions .pto-table-actions,
+      .pto-detail-actions .pto-table-actions button {
+        width: 100%;
       }
 
       .stats {
@@ -2384,7 +2676,7 @@
               <label for="pto_list_user">Browse User</label>
               <input type="text" id="pto_list_user" list="ptoUserList" placeholder="All users or Name / UPN" />
             </div>
-            <div class="field">
+            <div class="field" id="ptoViewModeWrap">
               <label for="ptoViewMode">PTO View</label>
               <div class="segmented" id="ptoViewMode" role="group" aria-label="PTO view mode">
                 <button type="button" class="segmented-btn is-active" data-pto-view="active" aria-pressed="true">Current
@@ -2393,6 +2685,12 @@
                   aria-pressed="false">Archive</button>
                 <button type="button" class="segmented-btn" data-pto-view="all" aria-pressed="false">All</button>
               </div>
+            </div>
+            <div class="pto-calendar-nav" id="ptoCalendarNav" hidden>
+              <button type="button" class="ghost" data-pto-calendar-nav="prev" aria-label="Previous month">&lsaquo;</button>
+              <div class="pto-calendar-title" id="ptoCalendarTitle">Month</div>
+              <button type="button" class="ghost" data-pto-calendar-nav="next" aria-label="Next month">&rsaquo;</button>
+              <button type="button" class="ghost" data-pto-calendar-nav="today">Today</button>
             </div>
             <div class="field" id="pto_view_wrap">
               <label for="btnPtoView">&nbsp;</label>
@@ -2406,7 +2704,21 @@
             </label>
           </div>
         </div>
-        <div class="pto-table-wrap">
+        <div class="pto-calendar-wrap" id="ptoCalendarWrap" hidden>
+          <div class="pto-calendar-weekdays" aria-hidden="true">
+            <span>Sun</span>
+            <span>Mon</span>
+            <span>Tue</span>
+            <span>Wed</span>
+            <span>Thu</span>
+            <span>Fri</span>
+            <span>Sat</span>
+          </div>
+          <div class="pto-calendar-grid" id="ptoCalendarGrid">
+            <div class="pto-calendar-message muted">Loading&#8230;</div>
+          </div>
+        </div>
+        <div class="pto-table-wrap" id="ptoTableWrap">
           <table class="pto-table pto-individual-table mobile-card-table">
             <thead>
               <tr>
@@ -2454,6 +2766,15 @@
         </tbody>
       </table>
     </div>
+  </dialog>
+
+  <dialog id="ptoDetailModal">
+    <div class="modal-header">
+      <h3>PTO Details</h3>
+      <button type="button" class="modal-close" id="btnPtoDetailClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="pto-detail-body" id="ptoDetailBody"></div>
+    <div class="pto-detail-actions" id="ptoDetailActions"></div>
   </dialog>
 
   <script src="app.js"></script>

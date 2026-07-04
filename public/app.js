@@ -13,6 +13,8 @@ let PTO_USERS_CACHE = [];
 let PTO_LIST_VIEW_MODE = 'active';
 let PTO_LIST_USER_FILTER = '';
 let PTO_LAST_ROWS = [];
+let PTO_CALENDAR_MONTH = '';
+let PTO_CALENDAR_ITEM_MAP = new Map();
 let OFFSET_CURRENT_ID = null;
 let OFFSET_CURRENT_ROW = null;
 let OFFSET_LAST_ROWS = [];
@@ -1152,6 +1154,219 @@ function isOverduePendingPto(item, todayYmd) {
   return item?.status === 'pending' && item?.sortDate < todayYmd;
 }
 
+function isPtoCalendarRole(role = window.CURRENT_USER?.role) {
+  return role === 'admin' || role === 'pm';
+}
+
+function ptoRenderContext() {
+  const role = window.CURRENT_USER?.role;
+  return {
+    role,
+    myEmail: (window.CURRENT_USER?.email || '').toLowerCase(),
+    myTeam: window.CURRENT_USER?.team || '',
+    isPrivileged: role === 'admin' || role === 'pm',
+    isLead: role === 'lead',
+    todayYmd: ymdTodayInReportTz(),
+  };
+}
+
+function ptoCalendarMonthKey() {
+  if (!PTO_CALENDAR_MONTH) PTO_CALENDAR_MONTH = ymdTodayInReportTz().slice(0, 7);
+  return PTO_CALENDAR_MONTH;
+}
+
+function ptoCalendarMonthDate(monthKey = ptoCalendarMonthKey()) {
+  const [year, month] = String(monthKey || '')
+    .split('-')
+    .map((v) => Number(v));
+  if (!Number.isFinite(year) || !Number.isFinite(month)) {
+    const today = ymdTodayInReportTz();
+    return new Date(`${today.slice(0, 7)}-01T00:00:00.000Z`);
+  }
+  return new Date(Date.UTC(year, month - 1, 1));
+}
+
+function ptoYmdFromUtcDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function ptoCalendarShiftMonth(delta) {
+  const d = ptoCalendarMonthDate();
+  d.setUTCMonth(d.getUTCMonth() + delta);
+  PTO_CALENDAR_MONTH = ptoYmdFromUtcDate(d).slice(0, 7);
+}
+
+function ptoCalendarVisibleRange(monthKey = ptoCalendarMonthKey()) {
+  const first = ptoCalendarMonthDate(monthKey);
+  const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0));
+  const leadingDays = first.getUTCDay();
+  const trailingDays = 6 - last.getUTCDay();
+  return {
+    startYmd: ptoYmdFromUtcDate(new Date(first.getTime() - leadingDays * 86400000)),
+    endYmd: ptoYmdFromUtcDate(new Date(last.getTime() + trailingDays * 86400000)),
+  };
+}
+
+function ptoCalendarDates(range) {
+  const dates = [];
+  const cur = new Date(`${range.startYmd}T00:00:00.000Z`);
+  const end = new Date(`${range.endYmd}T00:00:00.000Z`);
+  while (cur <= end) {
+    dates.push(ptoYmdFromUtcDate(cur));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function ptoSafeStatusClass(status) {
+  return String(status || '').replace(/[^a-z0-9_-]/gi, '');
+}
+
+function ptoItemDateText(item) {
+  if (item.type === 'batch' && item.sortDate !== item.endDate) {
+    return `${item.sortDate} - ${item.endDate} (${item.dayCount} day${item.dayCount !== 1 ? 's' : ''})`;
+  }
+  if (item.type === 'batch') return `${item.sortDate} (${item.dayCount} day)`;
+  return item.sortDate;
+}
+
+function ptoItemStatusNotes(item, todayYmd) {
+  const notes = [];
+  if (isOverduePendingPto(item, todayYmd)) notes.push('Overdue - awaiting approval.');
+  if (item.statusNote) notes.push(item.statusNote);
+  return notes;
+}
+
+function ptoItemCalendarEntries(item) {
+  if (item.type === 'batch') {
+    return item.rows.map((row) => ({
+      date: row.entry_date,
+      hours: Number(row.hours || 0),
+      dayPart: row.day_part || item.dayPart || '',
+      item,
+    }));
+  }
+  return [{ date: item.sortDate, hours: item.hours, dayPart: item.dayPart, item }];
+}
+
+function ptoCalendarDurationLabel(hours, dayPart) {
+  const n = Number(hours || 0);
+  if (n === 8) return 'Full';
+  if (n === 4) return formatPtoDayPart(dayPart) || 'Half day';
+  return fmtHours(n);
+}
+
+function renderPtoDetailField(label, value, allowHtml = false) {
+  return `<div class="pto-detail-field"><div class="k">${escapeHtml(label)}</div><div class="v">${allowHtml ? value : escapeHtml(value || '-')}</div></div>`;
+}
+
+function renderPtoDetail(item, context) {
+  const notes = ptoItemStatusNotes(item, context.todayYmd);
+  const noteHtml = notes.length
+    ? notes.map((note) => `<span class="pto-status-note">${escapeHtml(note)}</span>`).join('')
+    : '';
+  const dayPart = formatPtoDayPart(item.dayPart) || '-';
+  const fields = [
+    renderPtoDetailField('Date', ptoItemDateText(item)),
+    renderPtoDetailField('Hours', fmtHours(item.hours)),
+    renderPtoDetailField('Day Part', dayPart),
+    renderPtoDetailField('Leave Type', item.leaveType || '-'),
+    renderPtoDetailField('Status', `${ptoBadge(item.status)}${noteHtml}`, true),
+    renderPtoDetailField('Reason', item.notes || '-'),
+  ];
+
+  return `
+    <div class="pto-detail-summary">
+      <strong>${escapeHtml(item.userName || item.userUpn || 'PTO')}</strong>
+      <span class="muted">${escapeHtml(item.userUpn || '')}</span>
+    </div>
+    <div class="pto-detail-grid">${fields.join('')}</div>`;
+}
+
+function openPtoDetailModal(itemKey) {
+  const item = PTO_CALENDAR_ITEM_MAP.get(itemKey);
+  const modal = qs('ptoDetailModal');
+  const body = qs('ptoDetailBody');
+  const actions = qs('ptoDetailActions');
+  if (!item || !modal || !body || !actions) return;
+  const context = ptoRenderContext();
+  body.innerHTML = renderPtoDetail(item, context);
+  actions.innerHTML = renderPtoActionCell(item, context);
+  modal.showModal();
+}
+
+function closePtoDetailModal() {
+  const modal = qs('ptoDetailModal');
+  if (modal?.open) modal.close();
+}
+
+function renderPtoCalendar(rows) {
+  const grid = qs('ptoCalendarGrid');
+  const title = qs('ptoCalendarTitle');
+  if (!grid) return;
+
+  const monthKey = ptoCalendarMonthKey();
+  const range = ptoCalendarVisibleRange(monthKey);
+  const context = ptoRenderContext();
+  if (title) title.textContent = ptoMonthLabel(monthKey);
+
+  const items = normalizePtoItems(rows).sort((a, b) => {
+    const actionDiff =
+      (getPtoItemActions(a, context).isActionRequired ? 0 : 1) -
+      (getPtoItemActions(b, context).isActionRequired ? 0 : 1);
+    if (actionDiff !== 0) return actionDiff;
+    const dateDiff = a.sortDate.localeCompare(b.sortDate);
+    if (dateDiff !== 0) return dateDiff;
+    return a.key.localeCompare(b.key);
+  });
+  PTO_CALENDAR_ITEM_MAP = new Map(items.map((item) => [item.key, item]));
+
+  const entriesByDate = new Map();
+  const hoursByDate = new Map();
+  items.forEach((item) => {
+    ptoItemCalendarEntries(item).forEach((entry) => {
+      if (entry.date < range.startYmd || entry.date > range.endYmd) return;
+      if (!entriesByDate.has(entry.date)) entriesByDate.set(entry.date, []);
+      entriesByDate.get(entry.date).push(entry);
+      const h = Number(entry.hours || 0);
+      hoursByDate.set(entry.date, (hoursByDate.get(entry.date) || 0) + (Number.isFinite(h) ? h : 0));
+    });
+  });
+
+  const todayYmd = context.todayYmd;
+  const days = ptoCalendarDates(range);
+  const html = days.map((ymd) => {
+    const dayEntries = entriesByDate.get(ymd) || [];
+    const totalHours = hoursByDate.get(ymd) || 0;
+    const dayNum = Number(ymd.slice(8, 10));
+    const cls = [
+      'pto-calendar-day',
+      ymd.slice(0, 7) === monthKey ? '' : 'is-outside-month',
+      ymd === todayYmd ? 'is-today' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const chips = dayEntries
+      .map(({ item, hours, dayPart }) => {
+        const status = ptoSafeStatusClass(item.status);
+        const duration = ptoCalendarDurationLabel(hours, dayPart);
+        const leaveType = item.leaveType || 'PTO';
+        const meta = `${duration}${item.type === 'batch' ? ' batch' : ''} - ${leaveType}`;
+        return `<button type="button" class="pto-calendar-chip pto-calendar-status-${status}" data-pto-calendar-item="${escapeHtml(item.key)}">
+          <span class="pto-calendar-chip-main">${escapeHtml(item.userName || item.userUpn || 'PTO')}</span>
+          <span class="pto-calendar-chip-meta">${escapeHtml(meta)}</span>
+        </button>`;
+      })
+      .join('');
+    return `<div class="${cls}" data-date="${ymd}">
+      <div class="pto-calendar-date"><span>${dayNum}</span>${totalHours ? `<span class="pto-calendar-total">${fmtHours(totalHours)}</span>` : ''}</div>
+      <div class="pto-calendar-items">${chips}</div>
+    </div>`;
+  });
+
+  grid.innerHTML = html.join('');
+}
+
 function syncPtoViewButtons() {
   document.querySelectorAll('[data-pto-view]').forEach((btn) => {
     const active = btn.dataset.ptoView === PTO_LIST_VIEW_MODE;
@@ -1163,8 +1378,9 @@ function syncPtoViewButtons() {
 function updatePtoListControlVisibility() {
   const role = window.CURRENT_USER?.role;
   const isPrivileged = role === 'admin' || role === 'pm';
+  const useCalendar = isPtoCalendarRole(role);
   const canAction = role === 'lead' || role === 'pm';
-  const showActionFilter = canAction && PTO_LIST_VIEW_MODE !== 'archive';
+  const showActionFilter = canAction && (useCalendar || PTO_LIST_VIEW_MODE !== 'archive');
 
   const ptoUserWrap = qs('pto_user_wrap');
   if (ptoUserWrap) ptoUserWrap.hidden = !isPrivileged;
@@ -1181,6 +1397,18 @@ function updatePtoListControlVisibility() {
 
   const ptoListUserWrap = qs('pto_list_user_wrap');
   if (ptoListUserWrap) ptoListUserWrap.hidden = !isPrivileged;
+
+  const ptoViewModeWrap = qs('ptoViewModeWrap');
+  if (ptoViewModeWrap) ptoViewModeWrap.hidden = useCalendar;
+
+  const ptoCalendarNav = qs('ptoCalendarNav');
+  if (ptoCalendarNav) ptoCalendarNav.hidden = !useCalendar;
+
+  const ptoCalendarWrap = qs('ptoCalendarWrap');
+  if (ptoCalendarWrap) ptoCalendarWrap.hidden = !useCalendar;
+
+  const ptoTableWrap = qs('ptoTableWrap');
+  if (ptoTableWrap) ptoTableWrap.hidden = useCalendar;
 
   const ptoViewWrap = qs('pto_view_wrap');
   if (ptoViewWrap) ptoViewWrap.hidden = !isPrivileged;
@@ -1503,7 +1731,9 @@ function renderArchiveGroups(items, context) {
 
 async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
   const tbody = qs('tbodyPto');
-  if (!tbody) return;
+  const calendarGrid = qs('ptoCalendarGrid');
+  if (!tbody && !calendarGrid) return;
+  const useCalendar = isPtoCalendarRole();
   PTO_LIST_USER_FILTER = String(userFilter || '').trim();
   PTO_LAST_ROWS = [];
   const filterInput = qs('pto_list_user');
@@ -1511,11 +1741,22 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
     filterInput.value = PTO_LIST_USER_FILTER;
   }
 
+  if (useCalendar && calendarGrid) {
+    calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Loading...</div>`;
+  } else if (tbody) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">Loading...</td></tr>`;
+  }
+
   const actionRequired =
-    PTO_LIST_VIEW_MODE !== 'archive' &&
+    (useCalendar || PTO_LIST_VIEW_MODE !== 'archive') &&
     (qs('chkActionRequired')?.checked || false);
   try {
     const p = new URLSearchParams();
+    if (useCalendar) {
+      const range = ptoCalendarVisibleRange();
+      p.set('from', ymdAddDays(range.startYmd, -31));
+      p.set('to', ymdAddDays(range.endYmd, 31));
+    }
     if (PTO_LIST_USER_FILTER) p.set('assignedTo', PTO_LIST_USER_FILTER);
     if (actionRequired) p.set('actionRequired', 'true');
     const r = await apiFetch(
@@ -1523,31 +1764,31 @@ async function loadPtoEntries(userFilter = PTO_LIST_USER_FILTER) {
     );
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) {
-      tbody.innerHTML = `<tr><td colspan="8" class="muted">Failed to load.</td></tr>`;
+      if (useCalendar && calendarGrid) {
+        calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Failed to load.</div>`;
+      } else if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="8" class="muted">Failed to load.</td></tr>`;
+      }
       return;
     }
     PTO_LAST_ROWS = Array.isArray(j.rows) ? j.rows : [];
     renderPtoEntries(j.rows);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="8" class="muted">Error loading.</td></tr>`;
+    if (useCalendar && calendarGrid) {
+      calendarGrid.innerHTML = `<div class="pto-calendar-message muted">Error loading.</div>`;
+    } else if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="8" class="muted">Error loading.</td></tr>`;
+    }
   }
 }
 
 function renderPtoEntries(rows) {
   const tbody = qs('tbodyPto');
-  const role = window.CURRENT_USER?.role;
-  const myEmail = (window.CURRENT_USER?.email || '').toLowerCase();
-  const myTeam = window.CURRENT_USER?.team || '';
-  const isPrivileged = role === 'admin' || role === 'pm';
-  const isLead = role === 'lead';
-  const context = {
-    role,
-    myEmail,
-    myTeam,
-    isPrivileged,
-    isLead,
-    todayYmd: ymdTodayInReportTz(),
-  };
+  if (isPtoCalendarRole()) {
+    renderPtoCalendar(rows || []);
+    return;
+  }
+  const context = ptoRenderContext();
 
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="8" class="muted">No PTO entries defined.</td></tr>`;
@@ -1611,20 +1852,20 @@ async function ptoAction(id, batchId, action) {
   let note = null;
   if (action === 'deny') {
     note = window.prompt('Reason for denial (optional):') ?? '';
-    if (note === null) return;
+    if (note === null) return false;
   }
   if (action === 'cancel') {
     note = window.prompt('Reason for cancellation (required):');
-    if (note === null) return; // user dismissed
+    if (note === null) return false; // user dismissed
     note = (note || '').trim();
     if (!note) {
       alert('A cancellation reason is required.');
-      return;
+      return false;
     }
   }
   if (action === 'external-approve') {
     note = window.prompt('External approval note (optional):');
-    if (note === null) return;
+    if (note === null) return false;
     note = (note || '').trim();
   }
   const url = batchId
@@ -1640,11 +1881,13 @@ async function ptoAction(id, batchId, action) {
     if (!r.ok || !j.ok) {
       alert(`Error: ${j.error || r.status}`);
       await loadPtoEntries();
-      return;
+      return false;
     }
     await loadPtoEntries();
+    return true;
   } catch (err) {
     alert(`Error: ${err.message}`);
+    return false;
   }
 }
 
@@ -1658,7 +1901,9 @@ document.addEventListener('click', async (e) => {
   const batchId = btn.dataset.batchId || null;
   const action = btn.dataset.action;
   if ((!id && !batchId) || !action) return;
-  await ptoAction(id, batchId, action);
+  const fromPtoDetail = !!btn.closest('#ptoDetailModal');
+  const ok = await ptoAction(id, batchId, action);
+  if (ok && fromPtoDetail) closePtoDetailModal();
 });
 
 qs('chkActionRequired')?.addEventListener('change', () => loadPtoEntries());
@@ -1789,6 +2034,29 @@ qs('btnPtoView')?.addEventListener('click', () => {
   loadPtoEntries(user);
 });
 
+document.addEventListener('click', (e) => {
+  const nav = e.target.closest('[data-pto-calendar-nav]');
+  if (!nav) return;
+  const action = nav.dataset.ptoCalendarNav;
+  if (action === 'prev') ptoCalendarShiftMonth(-1);
+  else if (action === 'next') ptoCalendarShiftMonth(1);
+  else if (action === 'today') PTO_CALENDAR_MONTH = ymdTodayInReportTz().slice(0, 7);
+  else return;
+  loadPtoEntries();
+});
+
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest('[data-pto-calendar-item]');
+  if (!chip) return;
+  openPtoDetailModal(chip.dataset.ptoCalendarItem);
+});
+
+qs('btnPtoDetailClose')?.addEventListener('click', closePtoDetailModal);
+
+qs('ptoDetailModal')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closePtoDetailModal();
+});
+
 // -------- Delete delegation (all three tables) --------
 document.addEventListener('click', async (e) => {
   const btn = e.target.closest('.btn-del');
@@ -1796,6 +2064,7 @@ document.addEventListener('click', async (e) => {
   const id = btn.dataset.id;
   const batchId = btn.dataset.batchId;
   const type = btn.dataset.type;
+  const fromPtoDetail = !!btn.closest('#ptoDetailModal');
   if (!type) return;
   let url;
   if (type === 'holiday') url = `/api/holidays/${id}`;
@@ -1813,7 +2082,10 @@ document.addEventListener('click', async (e) => {
     }
     if (type === 'holiday') await loadHolidays();
     else if (type === 'team-off') await loadTeamOff();
-    else await loadPtoEntries();
+    else {
+      await loadPtoEntries();
+      if (fromPtoDetail) closePtoDetailModal();
+    }
   } catch (err) {
     alert(`Error: ${err.message}`);
   }

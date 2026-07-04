@@ -2093,7 +2093,11 @@ async function lockOffsetActiveDuplicateKey(db, row) {
   ]);
 }
 
-async function fetchActiveDuplicateOffsetRequest(row, excludeId = null, db = pool) {
+async function fetchActiveDuplicateOffsetRequest(
+  row,
+  excludeId = null,
+  db = pool,
+) {
   const params = [
     row.user_upn,
     row.interruption_date,
@@ -2191,7 +2195,13 @@ function offsetRequestDateYmd(request) {
   );
 }
 
-async function fetchApprovedPtoDays(userUpn, userName, fromYmd, toYmd, db = pool) {
+async function fetchApprovedPtoDays(
+  userUpn,
+  userName,
+  fromYmd,
+  toYmd,
+  db = pool,
+) {
   if (!fromYmd || !toYmd || fromYmd > toYmd) return new Set();
   const r = await db.query(
     `SELECT entry_date::text AS ymd
@@ -2571,7 +2581,7 @@ function buildOffsetEmailContent({
       'This Work Recovery request has passed validation and is ready for review/approval.',
     resubmit:
       'This Work Recovery request has been resubmitted and is ready for review/approval.',
-    approve: `The Work Recovery request for <strong>${employee}</strong> on <strong>${requestedRecoveryDate}</strong> has been confirmed by <strong>${approverLabel}</strong>.`,
+    approve: `The Work Recovery request for <strong>${escapeEmailHtml(employee)}</strong> on <strong>${escapeEmailHtml(requestedRecoveryDate)}</strong> has been confirmed by <strong>${escapeEmailHtml(approverLabel)}</strong>.`,
     return:
       'Your Work Recovery request has been returned. Review the note below, update the request or evidence, and save it again for review.',
     cancel: 'Your Work Recovery request has been cancelled.',
@@ -3116,7 +3126,10 @@ async function fetchOffsetEvidenceCandidateResult(request, db = pool) {
           row.selected_allocated_hours <= OFFSET_HOUR_EPSILON,
       ).length,
       candidateRows: candidates.length,
-      cutoffExcludedRows: Math.max(0, totalPositiveRows.length - positiveRows.length),
+      cutoffExcludedRows: Math.max(
+        0,
+        totalPositiveRows.length - positiveRows.length,
+      ),
     },
   };
 }
@@ -3733,7 +3746,14 @@ async function sendOffsetDetail(res, id, statusCode = 200, extra = {}) {
   const validationEvents = await fetchOffsetValidationEvents(id);
   res
     .status(statusCode)
-    .json({ ok: true, row, evidence, actionEvents, validationEvents, ...extra });
+    .json({
+      ok: true,
+      row,
+      evidence,
+      actionEvents,
+      validationEvents,
+      ...extra,
+    });
 }
 
 app.get(
@@ -4361,7 +4381,8 @@ app.post(
       if (!canTransitionOffsetRequest(existing, 'validate'))
         return res.status(400).json({
           ok: false,
-          error: 'only pending, returned, or approved requests can be rechecked',
+          error:
+            'only pending, returned, or approved requests can be rechecked',
         });
       const client = await pool.connect();
       let summary;
