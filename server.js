@@ -5208,6 +5208,38 @@ async function buildLeadApprovalEmailDetails(approvedByLead, leadActionedAt) {
   };
 }
 
+async function resolveExternalApproverDisplayName(approvedBy) {
+  const approverIdentity = normText(approvedBy);
+  if (!approverIdentity) return '';
+  const identityKey = normIdentity(approverIdentity);
+  const configuredContact = SPECIAL_PTO_EXTERNAL_APPROVER_CONTACTS.find(
+    (item) => normIdentity(item.email) === identityKey,
+  );
+  if (configuredContact?.name) return configuredContact.name;
+  return resolveUserDisplayNameByEmail(approverIdentity);
+}
+
+async function buildExternalApprovalEmailDetails(approvedBy, approvedAt) {
+  const approverIdentity = normText(approvedBy);
+  if (!approverIdentity) return { html: '', text: '' };
+  const approverName = await resolveExternalApproverDisplayName(
+    approverIdentity,
+  );
+  const approvalDate = normText(approvedAt)
+    ? fmtReportCalendarDateFromTimestamp(approvedAt)
+    : '';
+  const summaryHtml = approvalDate
+    ? `External approval: <strong>${escapeEmailHtml(approverName)}</strong> on <strong>${escapeEmailHtml(approvalDate)}</strong>.`
+    : `External approval: <strong>${escapeEmailHtml(approverName)}</strong>.`;
+  const summaryText = approvalDate
+    ? `External approval: ${approverName} on ${approvalDate}.`
+    : `External approval: ${approverName}.`;
+  return {
+    html: `<p>${summaryHtml}</p>`,
+    text: `\n${summaryText}`,
+  };
+}
+
 function ptoRowsDateRange(rows) {
   const list = Array.isArray(rows) && rows.length ? rows : [];
   const first = list[0];
@@ -5464,6 +5496,12 @@ async function sendPtoFinalApprovalEmail(
     entry.approved_by_lead,
     entry.lead_actioned_at,
   );
+  const externalApprovalDetails = isSpecialPtoWorkflow(entry)
+    ? await buildExternalApprovalEmailDetails(
+        options.externalApprovedBy || entry.external_received_by,
+        options.externalApprovedAt || entry.external_received_at,
+      )
+    : { html: '', text: '' };
   if (
     isSpecialPtoWorkflow(entry) &&
     (entry.filer_role === 'lead' || entry.filer_role === 'pm')
@@ -5522,11 +5560,12 @@ async function sendPtoFinalApprovalEmail(
     subject: replyMeta.subject,
     html: `<p>Hi @Team,</p><p>The PTO request for <strong>${escapeEmailHtml(displayName)}</strong> (${escapeEmailHtml(dateLabel)}) has been <strong>fully approved by ${escapeEmailHtml(actorLabel || '')}</strong>.</p>
 ${leadApprovalDetails.html}
+${externalApprovalDetails.html}
 ${decisionDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(totalHours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report.</p>`,
-    text: `PTO for ${displayName} (${dateLabel}) fully approved by ${actorLabel || ''}.${leadApprovalDetails.text}${decisionDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
+    text: `PTO for ${displayName} (${dateLabel}) fully approved by ${actorLabel || ''}.${leadApprovalDetails.text}${externalApprovalDetails.text}${decisionDetails.text}\nLeave Duration: ${fmtH(totalHours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
     headers: replyMeta.headers,
     attachments,
   });
@@ -5680,6 +5719,7 @@ async function processExternalPtoDecision(req, res, action) {
   let tokenRow = null;
   let rows = [];
   let entry = null;
+  let externalApprovalRecord = null;
   try {
     await client.query('BEGIN');
     const ctx = await loadExternalPtoTokenContext(token, client, true);
@@ -5706,14 +5746,15 @@ async function processExternalPtoDecision(req, res, action) {
     }
 
     if (tokenRow.batch_id) {
-      await client.query(
+      const externalUpdateRes = await client.query(
         action === 'approved'
           ? `UPDATE public.pto_entries
              SET status = $1,
                  external_received_at = NOW(),
                  external_received_by = $2,
                  external_received_note = $3
-             WHERE batch_id = $4`
+             WHERE batch_id = $4
+             RETURNING external_received_at, external_received_by`
           : `UPDATE public.pto_entries
              SET status = 'denied',
                  denied_by = $1,
@@ -5722,20 +5763,23 @@ async function processExternalPtoDecision(req, res, action) {
                  external_received_at = NOW(),
                  external_received_by = $1,
                  external_received_note = $2
-             WHERE batch_id = $3`,
+             WHERE batch_id = $3
+             RETURNING external_received_at, external_received_by`,
         action === 'approved'
           ? [nextStatus, tokenRow.recipient_email, note, tokenRow.batch_id]
           : [tokenRow.recipient_email, note, tokenRow.batch_id],
       );
+      externalApprovalRecord = externalUpdateRes.rows[0] || null;
     } else {
-      await client.query(
+      const externalUpdateRes = await client.query(
         action === 'approved'
           ? `UPDATE public.pto_entries
              SET status = $1,
                  external_received_at = NOW(),
                  external_received_by = $2,
                  external_received_note = $3
-             WHERE id = $4`
+             WHERE id = $4
+             RETURNING external_received_at, external_received_by`
           : `UPDATE public.pto_entries
              SET status = 'denied',
                  denied_by = $1,
@@ -5744,11 +5788,13 @@ async function processExternalPtoDecision(req, res, action) {
                  external_received_at = NOW(),
                  external_received_by = $1,
                  external_received_note = $2
-             WHERE id = $3`,
+             WHERE id = $3
+             RETURNING external_received_at, external_received_by`,
         action === 'approved'
           ? [nextStatus, tokenRow.recipient_email, note, tokenRow.pto_entry_id]
           : [tokenRow.recipient_email, note, tokenRow.pto_entry_id],
       );
+      externalApprovalRecord = externalUpdateRes.rows[0] || null;
     }
 
     await client.query(
@@ -5808,6 +5854,10 @@ async function processExternalPtoDecision(req, res, action) {
           await sendPtoFinalApprovalEmail(entry, rows, externalApproverLabel, {
             externalActorEmail: externalApproverLabel,
             externalDecisionNote: note,
+            externalApprovedBy:
+              externalApprovalRecord?.external_received_by ||
+              tokenRow.recipient_email,
+            externalApprovedAt: externalApprovalRecord?.external_received_at,
           });
         } else if (notification === 'denied') {
           await sendPtoExternalDenialEmail(
@@ -6160,6 +6210,7 @@ app.patch(
         `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
                 p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
                 p.approved_by_lead, p.lead_actioned_at, p.batch_id,
+                p.external_received_at, p.external_received_by,
                 p.email_message_id, p.notes, p.created_at
          FROM public.pto_entries p
          LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
@@ -6346,6 +6397,12 @@ app.patch(
                 entry.approved_by_lead,
                 entry.lead_actioned_at,
               );
+              const externalApprovalDetails = isSpecialPtoWorkflow(entry)
+                ? await buildExternalApprovalEmailDetails(
+                    entry.external_received_by,
+                    entry.external_received_at,
+                  )
+                : { html: '', text: '' };
               if (
                 ['dev', 'qa'].includes(entry.filer_role) ||
                 entry.filer_role === 'lead'
@@ -6402,10 +6459,11 @@ app.patch(
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${dateRange}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> (${escapeEmailHtml(dateRange)}) has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
 ${leadApprovalDetails.html}
+${externalApprovalDetails.html}
 <p><strong>Leave Duration:</strong> ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
 <p>The approved request has been added to the team calendar.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report. </p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} (${dateRange}) fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}${externalApprovalDetails.text}\nLeave Duration: ${fmtH(batchRes.rows.length * Number(entry.hours || 0))} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
                   headers: replyHeaders,
                   attachments: pmBatchAttachments,
                 });
@@ -6613,7 +6671,7 @@ app.patch(
               );
             } else if (transition.notification === 'final_approved') {
               await sendPtoFinalApprovalEmail(
-                entry,
+                { ...entry, ...updatedRows[0] },
                 batchRes.rows,
                 req.userName || req.userEmail,
               );
@@ -7188,7 +7246,7 @@ app.patch(
               );
             } else if (transition.notification === 'final_approved') {
               await sendPtoFinalApprovalEmail(
-                entry,
+                { ...entry, ...updatedRow },
                 [entry],
                 req.userName || req.userEmail,
               );
@@ -7223,6 +7281,7 @@ app.patch(
         `SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.leave_type,
               p.day_part, p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
               p.approved_by_lead, p.lead_actioned_at,
+              p.external_received_at, p.external_received_by,
               p.email_message_id, p.batch_id, p.notes, p.created_at
        FROM public.pto_entries p
        LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
@@ -7403,6 +7462,12 @@ app.patch(
                 entry.approved_by_lead,
                 entry.lead_actioned_at,
               );
+              const externalApprovalDetails = isSpecialPtoWorkflow(entry)
+                ? await buildExternalApprovalEmailDetails(
+                    entry.external_received_by,
+                    entry.external_received_at,
+                  )
+                : { html: '', text: '' };
               if (
                 ['dev', 'qa'].includes(entry.filer_role) ||
                 entry.filer_role === 'lead'
@@ -7456,10 +7521,11 @@ app.patch(
                   subject: `Re: LEAVE REQUEST \u2013 ${entry.user_name || entry.user_upn} \u2013 ${entry.leave_type} Leave on ${fmtSubjectDate(entry.entry_date)}`,
                   html: `<p>Hi @Team,</p><p>The PTO request for <strong>${displayName}</strong> on <strong>${entryDate}</strong> has been <strong>fully approved by ${escapeEmailHtml(req.userName || req.userEmail)}</strong>.</p>
                   ${leadApprovalDetails.html}
+                  ${externalApprovalDetails.html}
                   <p><strong>Leave Duration:</strong> ${fmtH(entry.hours)} hrs<br>${buildPtoDayPartHtml(entry.day_part)}<strong>Leave Type:</strong> ${escapeEmailHtml(entry.leave_type)}</p>
                   <p>The approved request has been added to the team calendar.</p>
 <p style="color:#999;font-size:11px;">Automated message &mdash; TFS Hours Report.</p>`,
-                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
+                  text: `PTO for ${entry.user_name || entry.user_upn} on ${fmtSubjectDate(entry.entry_date)} fully approved by ${req.userName || req.userEmail}.${leadApprovalDetails.text}${externalApprovalDetails.text}\nLeave Duration: ${fmtH(entry.hours)} hrs${buildPtoDayPartText(entry.day_part)}\nLeave Type: ${entry.leave_type}.\n\n---\nAutomated message — TFS Hours Report.`,
                   headers: replyHeaders,
                   attachments: pmApprovalAttachments,
                 });
