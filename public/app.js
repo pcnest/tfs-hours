@@ -1053,6 +1053,7 @@ const PTO_STATUS_LABELS = {
   pending: 'Pending',
   lead_approved: 'Lead Approved',
   external_pending: 'External Pending',
+  pm_final_pending: 'PM Final Pending',
   approved: 'Approved',
   denied: 'Denied',
   cancelled: 'Cancelled',
@@ -1596,12 +1597,25 @@ function getPtoItemActions(
         canDeny = true;
       }
     } else if (item.filerRole === 'lead') {
-      if (role === 'pm' && sameTeam && item.status === 'pending') {
+      if (
+        isLead &&
+        sameTeam &&
+        filerUpn !== myEmail &&
+        item.status === 'pending'
+      ) {
         canApprove = true;
         canDeny = true;
       } else if (
         role === 'pm' &&
         sameTeam &&
+        item.status === 'pm_final_pending'
+      ) {
+        canApprove = true;
+        canDeny = true;
+      } else if (
+        isLead &&
+        sameTeam &&
+        filerUpn !== myEmail &&
         item.status === 'external_pending' &&
         externalManualFallbackVisible
       ) {

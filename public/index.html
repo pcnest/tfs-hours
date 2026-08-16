@@ -1027,6 +1027,11 @@
       color: #3d2472;
     }
 
+    .pto-status-pm_final_pending {
+      background: #cfe2ff;
+      color: #084298;
+    }
+
     .pto-status-approved {
       background: #d1e7dd;
       color: #0a3622;
@@ -1463,7 +1468,8 @@
 
     .pto-calendar-chip.pto-calendar-status-pending,
     .pto-calendar-chip.pto-calendar-status-lead_approved,
-    .pto-calendar-chip.pto-calendar-status-external_pending {
+    .pto-calendar-chip.pto-calendar-status-external_pending,
+    .pto-calendar-chip.pto-calendar-status-pm_final_pending {
       border-left-color: #b7791f;
       background: #fffaf0;
     }
@@ -2282,8 +2288,8 @@
                 </div>
               </div>
               <p class="muted" style="font-size:12px;margin:8px 0 4px;">
-                Uses the <strong>Report Date Range</strong> selected above. Emails all users whose missing hours exceed
-                the threshold.
+                Uses the <strong>Report Date Range</strong> selected above, but excludes its <strong>To</strong> date
+                from the notification calculation. Emails all users whose missing hours exceed the threshold.
               </p>
               <div id="notifyStatus" class="status muted"></div>
               <div id="notifyPreviewWrap" class="notify-preview-wrap" hidden>

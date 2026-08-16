@@ -733,8 +733,18 @@ async function getApproverEmails(filerRole, filerTeam, filerEmail) {
     }
   } else if (filerRole === 'lead') {
     if (specialTeam) {
-      q = `SELECT email FROM public.users WHERE role = 'pm' AND LOWER(COALESCE(team, '')) = LOWER($1)`;
-      params = [filerTeam];
+      if (filerEmail) {
+        q = `SELECT email FROM public.users
+             WHERE role = 'lead'
+               AND LOWER(COALESCE(team, '')) = LOWER($1)
+               AND LOWER(email) != LOWER($2)`;
+        params = [filerTeam, filerEmail];
+      } else {
+        q = `SELECT email FROM public.users
+             WHERE role = 'lead'
+               AND LOWER(COALESCE(team, '')) = LOWER($1)`;
+        params = [filerTeam];
+      }
     } else {
       q = `SELECT email FROM public.users WHERE role = 'pm'`;
       params = [];
@@ -770,6 +780,27 @@ async function getApproverEmails(filerRole, filerTeam, filerEmail) {
   }
   try {
     const r = await pool.query(q, params);
+    return r.rows.map((row) => row.email);
+  } catch {
+    return [];
+  }
+}
+
+async function getSameTeamPmEmails(team, excludeEmail = null) {
+  if (!normIdentity(team)) return [];
+  try {
+    const params = [team];
+    let excludeClause = '';
+    if (excludeEmail) {
+      params.push(excludeEmail);
+      excludeClause = ` AND LOWER(email) != LOWER($2)`;
+    }
+    const r = await pool.query(
+      `SELECT email FROM public.users
+       WHERE role = 'pm'
+         AND LOWER(COALESCE(team, '')) = LOWER($1)${excludeClause}`,
+      params,
+    );
     return r.rows.map((row) => row.email);
   } catch {
     return [];
@@ -4876,7 +4907,9 @@ app.get('/api/pto', requireAuth, async (req, res) => {
     SELECT p.id, p.user_upn, p.user_name, p.entry_date::text, p.hours, p.day_part, p.leave_type, p.notes, p.created_at,
            p.status, p.filer_role, COALESCE(p.filer_team, u.team) AS filer_team,
            p.approved_by_lead, p.lead_actioned_at,
-           p.approved_by_pm, p.pm_actioned_at, p.denied_by, p.denied_at, p.denial_note, p.batch_id,
+           p.approved_by_pm, p.pm_actioned_at,
+           p.final_approved_by_pm, p.final_pm_actioned_at,
+           p.denied_by, p.denied_at, p.denial_note, p.batch_id,
            p.cancelled_by, p.cancelled_at, p.cancel_note,
            p.external_requested_at, p.external_requested_by, p.external_request_recipients,
            p.external_received_at, p.external_received_by, p.external_received_note
@@ -4907,7 +4940,7 @@ app.get('/api/pto', requireAuth, async (req, res) => {
       return res.json({ ok: true, rows: r.rows });
     }
 
-    // Lead: own entries UNION team's visible dev/qa entries
+    // Lead: own entries UNION team's visible dev/qa entries and special-team lead PTO.
     if (req.userRole === 'lead') {
       const params = [];
       const dateWhere = [];
@@ -4931,11 +4964,17 @@ app.get('/api/pto', requireAuth, async (req, res) => {
         const pendingTeamClause = `filer_role IN ('dev','qa') AND status = 'pending' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
         const approvedTeamClause = `filer_role IN ('dev','qa') AND status = 'approved' AND COALESCE(p.filer_team, u.team) = $${teamIdx}`;
         if (isSpecialPtoTeamName(req.userTeam)) {
-          const externalPendingTeamClause = `filer_role = 'qa' AND status = 'external_pending' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx})`;
+          params.push(req.userEmail);
+          const actorIdx = params.length;
+          const otherSpecialLeadClause = `filer_role = 'lead' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx}) AND LOWER(COALESCE(p.user_upn, '')) != LOWER($${actorIdx})`;
+          const specialLeadPendingClause = `${otherSpecialLeadClause} AND status = 'pending'`;
+          const specialLeadVisibleClause = `${otherSpecialLeadClause} AND status IN ('pending','external_pending','pm_final_pending','approved')`;
+          const externalPendingTeamClause = `status = 'external_pending' AND LOWER(COALESCE(p.filer_team, u.team, '')) = LOWER($${teamIdx}) AND (filer_role = 'qa' OR (${otherSpecialLeadClause}))`;
+          const normalAndSpecialLeadPendingClause = `((${pendingTeamClause}) OR (${specialLeadPendingClause}))`;
           actionableTeamClause = PTO_EXTERNAL_MANUAL_FALLBACK_VISIBLE
-            ? `((${pendingTeamClause}) OR (${externalPendingTeamClause}))`
-            : pendingTeamClause;
-          visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}) OR (${externalPendingTeamClause}))`;
+            ? `((${normalAndSpecialLeadPendingClause}) OR (${externalPendingTeamClause}))`
+            : normalAndSpecialLeadPendingClause;
+          visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}) OR (${externalPendingTeamClause}) OR (${specialLeadVisibleClause}))`;
         } else {
           actionableTeamClause = pendingTeamClause;
           visibleTeamClause = `((${actionableTeamClause}) OR (${approvedTeamClause}))`;
@@ -5419,13 +5458,13 @@ async function sendSpecialExternalApprovalRequestEmail(
   }
 }
 
-async function sendSpecialExternalReceivedLeadApprovedEmail(
+async function sendSpecialExternalReceivedFinalInternalPendingEmail(
   entry,
   rows,
   actorLabel,
   options = {},
 ) {
-  const pmEmails = await getApproverEmails('lead', entry.filer_team, null);
+  const pmEmails = await getSameTeamPmEmails(entry.filer_team);
   const leadEmails = await getApproverEmails('qa', entry.filer_team, null);
   const toList = dedupeEmails([entry.user_upn, ...leadEmails, ...pmEmails]);
   if (!toList.length) return;
@@ -5506,11 +5545,7 @@ async function sendPtoFinalApprovalEmail(
     isSpecialPtoWorkflow(entry) &&
     (entry.filer_role === 'lead' || entry.filer_role === 'pm')
   ) {
-    workflowRecipientEmails = await getApproverEmails(
-      entry.filer_role,
-      entry.filer_team,
-      entry.user_upn,
-    );
+    workflowRecipientEmails = await getCurrentPtoApproverEmails(entry);
   } else if (
     ['dev', 'qa'].includes(entry.filer_role) ||
     entry.filer_role === 'lead'
@@ -5581,11 +5616,7 @@ async function sendPtoExternalDenialEmail(entry, rows, actorLabel, denialNote) {
     dateLabel,
     'PTO external denial email',
   );
-  const approverEmails = await getApproverEmails(
-    entry.filer_role,
-    entry.filer_team,
-    entry.user_upn,
-  );
+  const approverEmails = await getCurrentPtoApproverEmails(entry);
   const ccEmails = dedupeEmails(approverEmails);
 
   await transporter.sendMail({
@@ -5610,8 +5641,16 @@ function getExternalTokenApprovalTransition(entry) {
   if (entry?.status !== 'external_pending')
     return { error: 'entry is not awaiting external approval' };
   if (entry.filer_role === 'qa')
-    return { nextStatus: 'lead_approved', notification: 'lead_approved' };
-  if (entry.filer_role === 'lead' || entry.filer_role === 'pm')
+    return {
+      nextStatus: 'lead_approved',
+      notification: 'final_internal_pending',
+    };
+  if (entry.filer_role === 'lead')
+    return {
+      nextStatus: 'pm_final_pending',
+      notification: 'final_internal_pending',
+    };
+  if (entry.filer_role === 'pm')
     return { nextStatus: 'approved', notification: 'final_approved' };
   return { error: 'entry is not in the special PTO workflow' };
 }
@@ -5840,8 +5879,8 @@ async function processExternalPtoDecision(req, res, action) {
         const externalApproverLabel = getExternalApproverDisplayName(
           tokenRow.recipient_email,
         );
-        if (notification === 'lead_approved') {
-          await sendSpecialExternalReceivedLeadApprovedEmail(
+        if (notification === 'final_internal_pending') {
+          await sendSpecialExternalReceivedFinalInternalPendingEmail(
             entry,
             rows,
             externalApproverLabel,
@@ -6322,6 +6361,22 @@ app.patch(
           [transition.nextStatus, req.userEmail, batchId],
         );
         updatedRows = r.rows;
+      } else if (transition.approvalStage === 'final_pm') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+           SET status = $1, final_approved_by_pm = $2, final_pm_actioned_at = NOW()
+           WHERE batch_id = $3 AND status = 'pm_final_pending'
+           RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                     status, filer_role, filer_team, email_message_id, batch_id,
+                     final_approved_by_pm, final_pm_actioned_at`,
+          [transition.nextStatus, req.userEmail, batchId],
+        );
+        if (r.rows.length !== batchRes.rows.length)
+          throw makeHttpError(
+            409,
+            'batch is no longer pending final PM approval',
+          );
+        updatedRows = r.rows;
       } else {
         const r = await pool.query(
           `UPDATE public.pto_entries
@@ -6564,11 +6619,7 @@ app.patch(
                 : {}),
             };
             const dateRange = _batchDenyDateRange;
-            const approverEmails = await getApproverEmails(
-              entry.filer_role,
-              entry.filer_team,
-              entry.user_upn,
-            );
+            const approverEmails = await getCurrentPtoApproverEmails(entry);
             const ccEmails = approverEmails.filter(
               (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
             );
@@ -6663,8 +6714,8 @@ app.patch(
       if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
-            if (transition.notification === 'lead_approved') {
-              await sendSpecialExternalReceivedLeadApprovedEmail(
+            if (transition.notification === 'final_internal_pending') {
+              await sendSpecialExternalReceivedFinalInternalPendingEmail(
                 entry,
                 batchRes.rows,
                 req.userName || req.userEmail,
@@ -6761,11 +6812,7 @@ app.patch('/api/pto/batch/:batchId/cancel', requireAuth, async (req, res) => {
                 }
               : {}),
           };
-          const approverEmails = await getApproverEmails(
-            entry.filer_role,
-            entry.filer_team,
-            entry.user_upn,
-          );
+          const approverEmails = await getCurrentPtoApproverEmails(entry);
           const toList = approverEmails.filter(
             (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
           );
@@ -6862,6 +6909,21 @@ function isSpecialPtoWorkflow(entry) {
   );
 }
 
+async function getCurrentPtoApproverEmails(entry) {
+  if (
+    isSpecialPtoWorkflow(entry) &&
+    entry?.filer_role === 'lead' &&
+    ['pm_final_pending', 'approved'].includes(entry?.status)
+  ) {
+    return getSameTeamPmEmails(entry.filer_team);
+  }
+  return getApproverEmails(
+    entry?.filer_role,
+    entry?.filer_team,
+    entry?.user_upn,
+  );
+}
+
 function isCurrentPtoReadyForLead(entry) {
   return (
     ['dev', 'qa'].includes(entry?.filer_role) && entry?.status === 'pending'
@@ -6955,21 +7017,39 @@ function getSpecialInternalApprovalTransition(entry, actor) {
   }
 
   if (filer_role === 'lead') {
-    if (status !== 'pending')
+    if (status === 'pending') {
+      if (actorRole !== 'lead')
+        return {
+          error: 'special-team lead PTO requires another same-team lead approval',
+        };
+      if (filerEmailKey === actorEmailKey)
+        return { error: 'leads cannot action their own PTO' };
+      if (!hasStrictSameTeam(entry, actor?.team))
+        return { error: 'filer is not in your team' };
       return {
-        error:
-          status === 'external_pending'
-            ? 'entry is awaiting external approval confirmation'
-            : 'entry is not pending PM approval',
+        nextStatus: 'external_pending',
+        approvalStage: 'lead',
+        notification: 'external_request',
       };
-    if (actorRole !== 'pm')
-      return { error: 'special-team lead PTO requires same-team PM approval' };
-    if (!hasStrictSameTeam(entry, actor?.team))
-      return { error: 'filer is not in your team' };
+    }
+    if (status === 'pm_final_pending') {
+      if (actorRole !== 'pm')
+        return {
+          error: 'special-team lead PTO requires same-team PM final approval',
+        };
+      if (!hasStrictSameTeam(entry, actor?.team))
+        return { error: 'filer is not in your team' };
+      return {
+        nextStatus: 'approved',
+        approvalStage: 'final_pm',
+        notification: 'final_approved',
+      };
+    }
     return {
-      nextStatus: 'external_pending',
-      approvalStage: 'pm',
-      notification: 'external_request',
+      error:
+        status === 'external_pending'
+          ? 'entry is awaiting external approval confirmation'
+          : 'entry is not pending PM approval',
     };
   }
 
@@ -7025,20 +7105,23 @@ function getExternalReceivedTransition(entry, actor) {
       return { error: 'filer is not in your team' };
     return {
       nextStatus: 'lead_approved',
-      notification: 'lead_approved',
+      notification: 'final_internal_pending',
     };
   }
 
   if (filer_role === 'lead') {
-    if (actorRole !== 'pm')
+    if (actorRole !== 'lead')
       return {
-        error: 'special-team lead PTO requires same-team PM confirmation',
+        error:
+          'special-team lead PTO requires another same-team lead confirmation',
       };
+    if (filerEmailKey === actorEmailKey)
+      return { error: 'leads cannot action their own PTO' };
     if (!hasStrictSameTeam(entry, actor?.team))
       return { error: 'filer is not in your team' };
     return {
-      nextStatus: 'approved',
-      notification: 'final_approved',
+      nextStatus: 'pm_final_pending',
+      notification: 'final_internal_pending',
     };
   }
 
@@ -7238,8 +7321,8 @@ app.patch(
       if (BREVO_API_KEY && NOTIFY_FROM_EMAIL) {
         (async () => {
           try {
-            if (transition.notification === 'lead_approved') {
-              await sendSpecialExternalReceivedLeadApprovedEmail(
+            if (transition.notification === 'final_internal_pending') {
+              await sendSpecialExternalReceivedFinalInternalPendingEmail(
                 entry,
                 [entry],
                 req.userName || req.userEmail,
@@ -7387,8 +7470,24 @@ app.patch(
           [transition.nextStatus, req.userEmail, id],
         );
         updatedRow = r.rows[0];
+      } else if (transition.approvalStage === 'final_pm') {
+        const r = await pool.query(
+          `UPDATE public.pto_entries
+         SET status = $1, final_approved_by_pm = $2, final_pm_actioned_at = NOW()
+         WHERE id = $3 AND status = 'pm_final_pending'
+         RETURNING id, user_upn, user_name, entry_date::text, hours, day_part, leave_type, notes,
+                   status, filer_role, filer_team, email_message_id,
+                   final_approved_by_pm, final_pm_actioned_at`,
+          [transition.nextStatus, req.userEmail, id],
+        );
+        if (!r.rows[0])
+          throw makeHttpError(
+            409,
+            'entry is no longer pending final PM approval',
+          );
+        updatedRow = r.rows[0];
       } else {
-        // PM final approval
+        // Standard PM final approval
         const r = await pool.query(
           `UPDATE public.pto_entries
          SET status = $1, approved_by_pm = $2, pm_actioned_at = NOW()
@@ -7615,11 +7714,7 @@ app.patch(
                   }
                 : {}),
             };
-            const approverEmails = await getApproverEmails(
-              entry.filer_role,
-              entry.filer_team,
-              entry.user_upn,
-            );
+            const approverEmails = await getCurrentPtoApproverEmails(entry);
             // CC approvers excluding the actor (they already know they denied it)
             const ccEmails = approverEmails.filter(
               (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
@@ -7717,11 +7812,7 @@ app.patch('/api/pto/:id/cancel', requireAuth, async (req, res) => {
                 }
               : {}),
           };
-          const approverEmails = await getApproverEmails(
-            entry.filer_role,
-            entry.filer_team,
-            entry.user_upn,
-          );
+          const approverEmails = await getCurrentPtoApproverEmails(entry);
           // Notify approvers only (filer initiated the cancel; they know)
           const toList = approverEmails.filter(
             (e) => e.toLowerCase() !== req.userEmail.toLowerCase(),
@@ -8110,6 +8201,45 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
   };
 }
 
+async function computeNotificationUserHours(
+  fromStr,
+  reportToStr,
+  offsetMin,
+  tz,
+) {
+  const evaluatedToStr = addDaysToYmd(reportToStr, -1);
+
+  // Excluding the report's To date leaves no completed days for a one-day range.
+  // Still return the user list so Preview can render a consistent zero-hours result.
+  if (!evaluatedToStr || evaluatedToStr < fromStr) {
+    const usersR = await pool.query(
+      `SELECT email, name FROM public.users WHERE email LIKE '%@%' AND role <> 'admin' ORDER BY name ASC`,
+    );
+    return {
+      evaluatedToStr: null,
+      weekdayHours: 0,
+      sharedOffHours: 0,
+      requiredHours: 0,
+      ptoByName: new Map(),
+      loggedByName: new Map(),
+      users: usersR.rows,
+    };
+  }
+
+  const rng = rangeFromToUtc(fromStr, evaluatedToStr, offsetMin, tz);
+  if (!rng) return null;
+
+  return {
+    evaluatedToStr,
+    ...(await computeUserHours(
+      fromStr,
+      evaluatedToStr,
+      rng.fromUtc,
+      rng.toExclusiveUtc,
+    )),
+  };
+}
+
 // ---------- Hours preview (no emails sent) ----------
 app.get(
   '/api/notifications/hours-preview',
@@ -8131,24 +8261,31 @@ app.get(
 
     const offsetMin = getReportOffsetMinutes();
     const tz = getReportTimeZone();
-    const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-    if (!rng)
+    const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+    if (!reportRng)
       return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
     try {
+      const notificationHours = await computeNotificationUserHours(
+        fromStr,
+        toStr,
+        offsetMin,
+        tz,
+      );
+      if (!notificationHours)
+        return res
+          .status(400)
+          .json({ ok: false, error: 'invalid notification date range' });
+
       const {
+        evaluatedToStr,
         weekdayHours,
         sharedOffHours,
         requiredHours,
         ptoByName,
         loggedByName,
         users,
-      } = await computeUserHours(
-        fromStr,
-        toStr,
-        rng.fromUtc,
-        rng.toExclusiveUtc,
-      );
+      } = notificationHours;
 
       const rows = users.map((user) => {
         const nameKey = user.name ? user.name.trim().toLowerCase() : '';
@@ -8169,7 +8306,16 @@ app.get(
       });
 
       rows.sort((a, b) => b.missing - a.missing);
-      res.json({ ok: true, weekdayHours, sharedOffHours, requiredHours, rows });
+      res.json({
+        ok: true,
+        evaluatedFrom: fromStr,
+        evaluatedTo: evaluatedToStr,
+        excludedTo: toStr,
+        weekdayHours,
+        sharedOffHours,
+        requiredHours,
+        rows,
+      });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
@@ -8218,26 +8364,31 @@ app.post(
 
     const offsetMin = getReportOffsetMinutes();
     const tz = getReportTimeZone();
-    const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-    if (!rng)
+    const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+    if (!reportRng)
       return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
-    const { fromUtc, toExclusiveUtc } = rng;
-
     try {
+      const notificationHours = await computeNotificationUserHours(
+        fromStr,
+        toStr,
+        offsetMin,
+        tz,
+      );
+      if (!notificationHours)
+        return res
+          .status(400)
+          .json({ ok: false, error: 'invalid notification date range' });
+
       const {
+        evaluatedToStr,
         weekdayHours,
         sharedOffHours,
         requiredHours,
         ptoByName,
         loggedByName,
         users,
-      } = await computeUserHours(
-        fromStr,
-        toStr,
-        rng.fromUtc,
-        rng.toExclusiveUtc,
-      );
+      } = notificationHours;
 
       // Identify offenders
       const offenders = [];
@@ -8265,6 +8416,9 @@ app.post(
           ok: true,
           sent: 0,
           offenders: 0,
+          evaluatedFrom: fromStr,
+          evaluatedTo: evaluatedToStr,
+          excludedTo: toStr,
           message: `No users have missing hours above ${threshold}h for this period.`,
         });
       }
@@ -8279,7 +8433,9 @@ app.post(
           year: 'numeric',
         });
       };
-      const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
+      const period = evaluatedToStr
+        ? `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(evaluatedToStr)}`
+        : `${fmtPeriodDate(fromStr)} (no completed days)`;
       const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
       let sent = 0;
       const errors = [];
@@ -8378,6 +8534,9 @@ app.post(
         ok: true,
         sent,
         offenders: offenders.length,
+        evaluatedFrom: fromStr,
+        evaluatedTo: evaluatedToStr,
+        excludedTo: toStr,
         ...(errors.length ? { errors } : {}),
       });
     } catch (e) {
@@ -8457,19 +8616,31 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
 
   const offsetMin = getReportOffsetMinutes();
   const tz = getReportTimeZone();
-  const rng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-  if (!rng)
+  const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
+  if (!reportRng)
     return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
   try {
+    const notificationHours = await computeNotificationUserHours(
+      fromStr,
+      toStr,
+      offsetMin,
+      tz,
+    );
+    if (!notificationHours)
+      return res
+        .status(400)
+        .json({ ok: false, error: 'invalid notification date range' });
+
     const {
+      evaluatedToStr,
       weekdayHours,
       sharedOffHours,
       requiredHours,
       ptoByName,
       loggedByName,
       users,
-    } = await computeUserHours(fromStr, toStr, rng.fromUtc, rng.toExclusiveUtc);
+    } = notificationHours;
 
     const offenders = [];
     for (const user of users) {
@@ -8497,6 +8668,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         period: resolvedPeriod,
         from: fromStr,
         to: toStr,
+        evaluatedFrom: fromStr,
+        evaluatedTo: evaluatedToStr,
+        excludedTo: toStr,
         threshold,
         offenders: offenders.length,
         sent: 0,
@@ -8527,7 +8701,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         year: 'numeric',
       });
     };
-    const period = `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(toStr)}`;
+    const period = evaluatedToStr
+      ? `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(evaluatedToStr)}`
+      : `${fmtPeriodDate(fromStr)} (no completed days)`;
     const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
     let sent = 0;
     const errors = [];
@@ -8627,6 +8803,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
       period: resolvedPeriod,
       from: fromStr,
       to: toStr,
+      evaluatedFrom: fromStr,
+      evaluatedTo: evaluatedToStr,
+      excludedTo: toStr,
       threshold,
       offenders: offenders.length,
       sent,
@@ -8647,8 +8826,12 @@ function getPendingPtoStageLabel(
 ) {
   if (status === 'external_pending')
     return 'Awaiting external approval confirmation';
+  if (status === 'pm_final_pending')
+    return 'Awaiting same-team PM final approval';
   if (filerRole === 'dev' || filerRole === 'qa')
     return 'Awaiting lead approval';
+  if (filerRole === 'lead' && isSpecialPtoTeamName(filerTeam))
+    return 'Awaiting another same-team lead approval';
   if (filerRole === 'lead') return 'Awaiting PM approval';
   if (filerRole === 'pm') return 'Awaiting approval from another PM';
   return 'Awaiting approval';
@@ -8683,7 +8866,7 @@ async function fetchPendingPtoReminderCandidates() {
             COALESCE(p.filer_team, u.team) AS filer_team
      FROM public.pto_entries p
      LEFT JOIN public.users u ON LOWER(u.email) = LOWER(p.user_upn)
-     WHERE p.status IN ('pending','external_pending')
+     WHERE p.status IN ('pending','external_pending','pm_final_pending')
      ORDER BY COALESCE(p.batch_id::text, 'single:' || p.id::text), p.entry_date ASC, p.id ASC`,
   );
 
@@ -8771,11 +8954,13 @@ async function getOverduePtoRecipients(request, notificationType) {
   }
 
   const currentApprovers = dedupeEmails(
-    await getApproverEmails(
-      request.filerRole,
-      request.filerTeam,
-      request.userUpn || null,
-    ),
+    request.status === 'pm_final_pending' && request.filerRole === 'lead'
+      ? await getSameTeamPmEmails(request.filerTeam)
+      : await getApproverEmails(
+          request.filerRole,
+          request.filerTeam,
+          request.userUpn || null,
+        ),
   );
 
   if (notificationType === 'reminder') {
