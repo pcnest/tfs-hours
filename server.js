@@ -7,6 +7,9 @@ const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
+const TASK_REPORT_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.TASK_REPORT_ENABLED || '').trim(),
+);
 const {
   DEVELOPER_REPORT_SQL,
   TASK_REPORT_SQL,
@@ -18,7 +21,7 @@ const {
   normalizeIntlHour,
   taskReportNames,
   tfsReportNames,
-} = require('./task-report');
+} = TASK_REPORT_ENABLED ? require('./task-report') : {};
 const {
   VALID_MISSING_HOURS_PERIODS,
   buildMissingHoursRows,
@@ -390,7 +393,9 @@ function getTimeZoneParts(date, timeZone) {
     year: Number(map.year),
     month: Number(map.month),
     day: Number(map.day),
-    hour: normalizeIntlHour(map.hour),
+    hour: TASK_REPORT_ENABLED
+      ? normalizeIntlHour(map.hour)
+      : Number(map.hour),
     minute: Number(map.minute),
     second: Number(map.second),
   };
@@ -955,7 +960,8 @@ app.patch('/api/users/:email/team', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- Isolated Task report ingest / export ----------
+if (TASK_REPORT_ENABLED) {
+  // ---------- Isolated Task report ingest / export (feature-gated) ----------
 function buildTaskReportItemUpsert(runId, syncedAt, items) {
   const cols = [
     'work_item_id',
@@ -1594,6 +1600,7 @@ app.get(
     }
   },
 );
+} // TASK_REPORT_ENABLED
 
 // ---------- Ingest ----------
 function buildUpsertLatest(rows) {
