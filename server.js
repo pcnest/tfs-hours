@@ -7,6 +7,23 @@ const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
+const {
+  DEVELOPER_REPORT_SQL,
+  TASK_REPORT_SQL,
+  aggregateBacklogRows,
+  aggregateTeamRows,
+  buildTaskWorkbook,
+  buildTfsReportWorkbook,
+  isValidCalendarDate,
+  normalizeIntlHour,
+  taskReportNames,
+  tfsReportNames,
+} = require('./task-report');
+const {
+  VALID_MISSING_HOURS_PERIODS,
+  buildMissingHoursRows,
+  resolveMissingHoursRange,
+} = require('./missing-hours');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -14,6 +31,8 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
 const SYNC_API_KEY = process.env.SYNC_API_KEY || '';
+const TASK_REPORT_SYNC_API_KEY = process.env.TASK_REPORT_SYNC_API_KEY || '';
+const TFS_PROJECT = (process.env.TFS_PROJECT || '').trim();
 const PTO_REMINDER_API_KEY = process.env.PTO_REMINDER_API_KEY || '';
 const MISSING_HOURS_NOTIFY_API_KEY =
   process.env.MISSING_HOURS_NOTIFY_API_KEY || '';
@@ -296,6 +315,15 @@ function requireApiKey(req, res) {
   return requireConfiguredApiKey(req, res, SYNC_API_KEY, 'SYNC_API_KEY');
 }
 
+function requireTaskReportApiKey(req, res) {
+  return requireConfiguredApiKey(
+    req,
+    res,
+    TASK_REPORT_SYNC_API_KEY,
+    'TASK_REPORT_SYNC_API_KEY',
+  );
+}
+
 function toDateOrNull(v) {
   if (!v) return null;
   const d = new Date(v);
@@ -362,7 +390,7 @@ function getTimeZoneParts(date, timeZone) {
     year: Number(map.year),
     month: Number(map.month),
     day: Number(map.day),
-    hour: Number(map.hour),
+    hour: normalizeIntlHour(map.hour),
     minute: Number(map.minute),
     second: Number(map.second),
   };
@@ -926,6 +954,646 @@ app.patch('/api/users/:email/team', requireAuth, async (req, res) => {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+// ---------- Isolated Task report ingest / export ----------
+function buildTaskReportItemUpsert(runId, syncedAt, items) {
+  const cols = [
+    'work_item_id',
+    'work_item_type',
+    'title',
+    'parent_id',
+    'area_path',
+    'cost_type',
+    'released_to_production_at',
+    'last_seen_run_id',
+    'synced_at',
+  ];
+  const values = [];
+  const valuesSql = items
+    .map((item, rowIndex) => {
+      const base = rowIndex * cols.length;
+      const p = (columnIndex) => `$${base + columnIndex + 1}`;
+      values.push(
+        item.workItemId,
+        item.workItemType,
+        item.title,
+        item.parentId,
+        item.areaPath,
+        item.costType,
+        item.releasedToProductionAt,
+        runId,
+        syncedAt,
+      );
+      return `(${cols.map((_, index) => p(index)).join(',')})`;
+    })
+    .join(',');
+
+  return {
+    text: `
+      INSERT INTO public.tfs_task_report_items (${cols.join(',')})
+      VALUES ${valuesSql}
+      ON CONFLICT (work_item_id) DO UPDATE SET
+        work_item_type = EXCLUDED.work_item_type,
+        title = EXCLUDED.title,
+        parent_id = EXCLUDED.parent_id,
+        area_path = EXCLUDED.area_path,
+        cost_type = EXCLUDED.cost_type,
+        released_to_production_at = EXCLUDED.released_to_production_at,
+        last_seen_run_id = EXCLUDED.last_seen_run_id,
+        synced_at = EXCLUDED.synced_at`,
+    values,
+  };
+}
+
+function buildTaskReportEntryUpsert(runId, entries) {
+  const cols = [
+    'task_id',
+    'revision_id',
+    'changed_at',
+    'task_title',
+    'task_activity',
+    'task_assigned_to',
+    'task_assigned_upn',
+    'actual_hours',
+    'first_seen_run_id',
+    'last_seen_run_id',
+  ];
+  const values = [];
+  const valuesSql = entries
+    .map((entry, rowIndex) => {
+      const base = rowIndex * cols.length;
+      const p = (columnIndex) => `$${base + columnIndex + 1}`;
+      values.push(
+        entry.taskId,
+        entry.revisionId,
+        entry.changedAt,
+        entry.taskTitle,
+        entry.taskActivity,
+        entry.taskAssignedTo,
+        entry.taskAssignedUpn,
+        entry.actualHours,
+        runId,
+        runId,
+      );
+      return `(${cols.map((_, index) => p(index)).join(',')})`;
+    })
+    .join(',');
+
+  return {
+    text: `
+      INSERT INTO public.tfs_task_report_entries (${cols.join(',')})
+      VALUES ${valuesSql}
+      ON CONFLICT (task_id, revision_id) DO UPDATE SET
+        changed_at = EXCLUDED.changed_at,
+        task_title = EXCLUDED.task_title,
+        task_activity = EXCLUDED.task_activity,
+        task_assigned_to = EXCLUDED.task_assigned_to,
+        task_assigned_upn = EXCLUDED.task_assigned_upn,
+        actual_hours = EXCLUDED.actual_hours,
+        last_seen_run_id = EXCLUDED.last_seen_run_id,
+        updated_at = NOW()`,
+    values,
+  };
+}
+
+function normalizeTaskReportItems(items) {
+  const normalized = [];
+  const seen = new Set();
+  for (let index = 0; index < items.length; index += 1) {
+    const raw = items[index] || {};
+    const workItemId = normInt(raw.workItemId);
+    if (workItemId === null || workItemId <= 0) {
+      throw makeHttpError(400, `items[${index}].workItemId is required`);
+    }
+    const releasedToProductionAt = raw.releasedToProductionAt
+      ? toDateOrNull(raw.releasedToProductionAt)
+      : null;
+    if (raw.releasedToProductionAt && !releasedToProductionAt) {
+      throw makeHttpError(
+        400,
+        `items[${index}].releasedToProductionAt is invalid`,
+      );
+    }
+    if (seen.has(workItemId)) continue;
+    seen.add(workItemId);
+    normalized.push({
+      workItemId,
+      workItemType: normText(raw.workItemType),
+      title: normText(raw.title),
+      parentId: normInt(raw.parentId),
+      areaPath: normText(raw.areaPath),
+      costType: normText(raw.costType),
+      releasedToProductionAt,
+    });
+  }
+  return normalized;
+}
+
+function normalizeTaskReportEntries(entries) {
+  const normalized = [];
+  const byKey = new Map();
+  for (let index = 0; index < entries.length; index += 1) {
+    const raw = entries[index] || {};
+    const taskId = normInt(raw.taskId);
+    const revisionId = normInt(raw.revisionId);
+    const changedAt = toDateOrNull(raw.changedAtUtc ?? raw.changedAt);
+    const actualHours = normNum(raw.actualHours);
+    if (taskId === null || taskId <= 0) {
+      throw makeHttpError(400, `entries[${index}].taskId is required`);
+    }
+    if (revisionId === null || revisionId <= 0) {
+      throw makeHttpError(400, `entries[${index}].revisionId is required`);
+    }
+    if (!changedAt) {
+      throw makeHttpError(400, `entries[${index}].changedAtUtc is invalid`);
+    }
+    if (actualHours === null) {
+      throw makeHttpError(400, `entries[${index}].actualHours must be numeric`);
+    }
+    byKey.set(`${taskId}:${revisionId}`, {
+      taskId,
+      revisionId,
+      changedAt,
+      taskTitle: normText(raw.taskTitle),
+      taskActivity: normText(raw.activity ?? raw.taskActivity),
+      taskAssignedTo: normText(raw.taskAssignedTo),
+      taskAssignedUpn: normText(raw.taskAssignedToUPN ?? raw.taskAssignedUpn),
+      actualHours,
+    });
+  }
+  normalized.push(...byKey.values());
+  return normalized;
+}
+
+app.post('/api/task-report-sync', async (req, res) => {
+  if (!requireTaskReportApiKey(req, res)) return;
+
+  try {
+    const rawItems = req.body?.items;
+    const rawEntries = req.body?.entries;
+    if (!Array.isArray(rawItems) || !Array.isArray(rawEntries)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'items and entries arrays are required',
+      });
+    }
+    if (rawItems.length + rawEntries.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'at least one item or entry is required',
+      });
+    }
+    if (rawItems.length > 2000 || rawEntries.length > 2000) {
+      return res.status(413).json({
+        ok: false,
+        error: 'a sync request may contain at most 2000 items and 2000 entries',
+      });
+    }
+
+    const items = normalizeTaskReportItems(rawItems);
+    const entries = normalizeTaskReportEntries(rawEntries);
+    const runAt = toDateOrNull(req.body?.syncedAtUtc) || new Date();
+    const source = normText(req.body?.source) || 'tfs-task-report-sync';
+    const runKey = normText(req.body?.runKey);
+    if (runKey && (runKey.length > 100 || !/^[a-zA-Z0-9._:-]+$/.test(runKey))) {
+      return res.status(400).json({ ok: false, error: 'invalid runKey' });
+    }
+    const runStatus = req.body?.isFinalBatch === false ? 'started' : 'completed';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const runResult = await client.query(
+        `INSERT INTO public.tfs_task_report_runs
+           (run_at, source, item_count, entry_count, status, source_run_key)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (source_run_key) DO UPDATE
+         SET run_at = GREATEST(tfs_task_report_runs.run_at, EXCLUDED.run_at),
+             source = EXCLUDED.source,
+             item_count = tfs_task_report_runs.item_count + EXCLUDED.item_count,
+             entry_count = tfs_task_report_runs.entry_count + EXCLUDED.entry_count,
+             status = EXCLUDED.status
+         RETURNING run_id, run_at`,
+        [runAt, source, items.length, entries.length, runStatus, runKey],
+      );
+      const runId = runResult.rows[0].run_id;
+      const committedRunAt = runResult.rows[0].run_at;
+
+      for (const itemChunk of chunkArray(items, 200)) {
+        if (!itemChunk.length) continue;
+        const query = buildTaskReportItemUpsert(
+          runId,
+          committedRunAt,
+          itemChunk,
+        );
+        await client.query(query.text, query.values);
+      }
+      for (const entryChunk of chunkArray(entries, 200)) {
+        if (!entryChunk.length) continue;
+        const query = buildTaskReportEntryUpsert(runId, entryChunk);
+        await client.query(query.text, query.values);
+      }
+
+      await client.query(`
+        WITH entry_identities AS (
+          SELECT DISTINCT ON (LOWER(TRIM(task_assigned_to)))
+            LOWER(TRIM(task_assigned_to)) AS name_key,
+            task_assigned_upn,
+            LOWER(TRIM(task_assigned_upn)) AS upn_key
+          FROM public.tfs_task_report_entries
+          WHERE task_assigned_to IS NOT NULL
+            AND TRIM(task_assigned_to) <> ''
+            AND task_assigned_upn IS NOT NULL
+            AND TRIM(task_assigned_upn) <> ''
+          ORDER BY LOWER(TRIM(task_assigned_to)), changed_at DESC
+        )
+        UPDATE public.tfs_task_report_member_locations m
+        SET assigned_upn = e.task_assigned_upn,
+            assigned_upn_key = e.upn_key,
+            updated_at = NOW()
+        FROM entry_identities e
+        WHERE m.assigned_name_key = e.name_key
+          AND m.assigned_upn_key IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM public.tfs_task_report_member_locations existing
+            WHERE existing.assigned_upn_key = e.upn_key
+              AND existing.id <> m.id
+          )
+      `);
+
+      const unmappedResult = await client.query(`
+        SELECT COUNT(*)::int AS count
+        FROM (
+          SELECT DISTINCT
+            LOWER(TRIM(COALESCE(e.task_assigned_upn, ''))) AS upn_key,
+            LOWER(TRIM(COALESCE(e.task_assigned_to, ''))) AS name_key
+          FROM public.tfs_task_report_entries e
+          WHERE COALESCE(TRIM(e.task_assigned_upn), TRIM(e.task_assigned_to), '') <> ''
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.tfs_task_report_member_locations m
+              WHERE (m.assigned_upn_key IS NOT NULL
+                     AND m.assigned_upn_key = LOWER(TRIM(COALESCE(e.task_assigned_upn, ''))))
+                 OR m.assigned_name_key = LOWER(TRIM(COALESCE(e.task_assigned_to, '')))
+            )
+        ) missing
+      `);
+      await client.query('COMMIT');
+
+      const unmappedCount = Number(unmappedResult.rows[0]?.count || 0);
+      const warnings = [];
+      if (unmappedCount) {
+        warnings.push(
+          `${unmappedCount} reporting assignee(s) have no Member Location mapping.`,
+        );
+      }
+      res.json({
+        ok: true,
+        runId,
+        runAt: committedRunAt,
+        itemCount: items.length,
+        entryCount: entries.length,
+        warnings,
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    const status = Number(error?.status) || 500;
+    if (status >= 500) console.error('Task report ingest error:', error);
+    res.status(status).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
+app.get(
+  '/api/task-report/member-locations',
+  requireAuth,
+  async (req, res) => {
+    if (req.userRole !== 'admin')
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    try {
+      const result = await pool.query(`
+        SELECT id, assigned_upn, assigned_name, member_location,
+               created_at, updated_at
+        FROM public.tfs_task_report_member_locations
+        ORDER BY assigned_name
+      `);
+      res.json({ ok: true, rows: result.rows });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  },
+);
+
+app.put(
+  '/api/task-report/member-locations',
+  requireAuth,
+  async (req, res) => {
+    if (req.userRole !== 'admin')
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    const assignedName = normText(req.body?.assignedName);
+    const assignedUpn = normText(req.body?.assignedUpn);
+    const memberLocation = normText(req.body?.memberLocation);
+    if (!assignedName || !memberLocation) {
+      return res.status(400).json({
+        ok: false,
+        error: 'assignedName and memberLocation are required',
+      });
+    }
+    try {
+      const result = await pool.query(
+        `INSERT INTO public.tfs_task_report_member_locations
+           (assigned_upn, assigned_upn_key, assigned_name, assigned_name_key,
+            member_location)
+         VALUES ($1, LOWER(TRIM($1)), $2, LOWER(TRIM($2)), $3)
+         ON CONFLICT (assigned_name_key) DO UPDATE SET
+           assigned_upn = EXCLUDED.assigned_upn,
+           assigned_upn_key = EXCLUDED.assigned_upn_key,
+           assigned_name = EXCLUDED.assigned_name,
+           member_location = EXCLUDED.member_location,
+           updated_at = NOW()
+         RETURNING id, assigned_upn, assigned_name, member_location,
+                   created_at, updated_at`,
+        [assignedUpn, assignedName, memberLocation],
+      );
+      res.json({ ok: true, row: result.rows[0] });
+    } catch (error) {
+      if (error?.code === '23505') {
+        return res.status(409).json({
+          ok: false,
+          error: 'that assignee UPN is already mapped to another name',
+        });
+      }
+      res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  },
+);
+
+app.delete(
+  '/api/task-report/member-locations/:id',
+  requireAuth,
+  async (req, res) => {
+    if (req.userRole !== 'admin')
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    const id = normInt(req.params.id);
+    if (id === null || id <= 0)
+      return res.status(400).json({ ok: false, error: 'invalid id' });
+    try {
+      const result = await pool.query(
+        `DELETE FROM public.tfs_task_report_member_locations
+         WHERE id = $1 RETURNING id`,
+        [id],
+      );
+      if (!result.rows.length)
+        return res.status(404).json({ ok: false, error: 'mapping not found' });
+      res.json({ ok: true, id });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  },
+);
+
+app.get(
+  '/api/reports/task.xlsx',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const from = validateDateStr(req.query.from);
+    const to = validateDateStr(req.query.to);
+    if (!from || !to || !isValidCalendarDate(from) || !isValidCalendarDate(to)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'from and to required (YYYY-MM-DD)',
+      });
+    }
+    const fromParts = parseYmd(from);
+    const toParts = parseYmd(to);
+    const fromDay = Date.UTC(fromParts.y, fromParts.mo - 1, fromParts.d);
+    const toDay = Date.UTC(toParts.y, toParts.mo - 1, toParts.d);
+    const inclusiveDays = Math.floor((toDay - fromDay) / 86400000) + 1;
+    if (inclusiveDays < 1) {
+      return res.status(400).json({ ok: false, error: 'to must be on or after from' });
+    }
+    if (inclusiveDays > 366) {
+      return res.status(400).json({
+        ok: false,
+        error: 'task reports may cover at most 366 calendar days',
+      });
+    }
+
+    const timeZone = getReportTimeZone();
+    if (!timeZone) {
+      return res.status(503).json({
+        ok: false,
+        error: 'REPORT_TZ_IANA must be configured for Task report exports',
+      });
+    }
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+    } catch {
+      return res.status(503).json({
+        ok: false,
+        error: 'REPORT_TZ_IANA is not a valid IANA timezone',
+      });
+    }
+    const range = rangeFromToUtc(from, to, 0, timeZone);
+    if (!range) {
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+    }
+
+    try {
+      const result = await pool.query(TASK_REPORT_SQL, [
+        range.fromUtc.toISOString(),
+        range.toExclusiveUtc.toISOString(),
+      ]);
+      if (result.rows.length > 100000) {
+        return res.status(413).json({
+          ok: false,
+          error: 'task report exceeds the 100,000-row export limit',
+        });
+      }
+
+      const names = taskReportNames(from, to);
+      const unmappedLocations = new Set(
+        result.rows
+          .filter((row) => !row.member_location)
+          .map(
+            (row) =>
+              normIdentity(row.task_assigned_upn) ||
+              normIdentity(row.task_assigned_to),
+          )
+          .filter(Boolean),
+      ).size;
+      const workbookBuffer = await buildTaskWorkbook(result.rows, {
+        sheetName: names.sheetName,
+        reportTimeZone: timeZone,
+        reportOffsetMinutes: 0,
+        projectName: TFS_PROJECT,
+      });
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${names.fileName}"; filename*=UTF-8''${encodeURIComponent(
+          names.fileName,
+        )}`,
+      );
+      res.setHeader(
+        'X-Task-Report-Unmapped-Locations',
+        String(unmappedLocations),
+      );
+      res.send(Buffer.from(workbookBuffer));
+    } catch (error) {
+      console.error('Task report export error:', error);
+      res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  },
+);
+
+app.get(
+  '/api/reports/tfs.xlsx',
+  requireAuth,
+  requireManagerOrAbove,
+  async (req, res) => {
+    const from = validateDateStr(req.query.from);
+    const to = validateDateStr(req.query.to);
+    if (!from || !to || !isValidCalendarDate(from) || !isValidCalendarDate(to)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'from and to required (YYYY-MM-DD)',
+      });
+    }
+    const fromParts = parseYmd(from);
+    const toParts = parseYmd(to);
+    const fromDay = Date.UTC(fromParts.y, fromParts.mo - 1, fromParts.d);
+    const toDay = Date.UTC(toParts.y, toParts.mo - 1, toParts.d);
+    const inclusiveDays = Math.floor((toDay - fromDay) / 86400000) + 1;
+    if (inclusiveDays < 1) {
+      return res.status(400).json({ ok: false, error: 'to must be on or after from' });
+    }
+    if (inclusiveDays > 366) {
+      return res.status(400).json({
+        ok: false,
+        error: 'TFS reports may cover at most 366 calendar days',
+      });
+    }
+
+    const timeZone = getReportTimeZone();
+    if (!timeZone) {
+      return res.status(503).json({
+        ok: false,
+        error: 'REPORT_TZ_IANA must be configured for TFS report exports',
+      });
+    }
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+    } catch {
+      return res.status(503).json({
+        ok: false,
+        error: 'REPORT_TZ_IANA is not a valid IANA timezone',
+      });
+    }
+    const range = rangeFromToUtc(from, to, 0, timeZone);
+    if (!range) {
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+    }
+
+    try {
+      const [taskResult, developerResult] = await Promise.all([
+        pool.query(TASK_REPORT_SQL, [
+          range.fromUtc.toISOString(),
+          range.toExclusiveUtc.toISOString(),
+        ]),
+        pool.query(DEVELOPER_REPORT_SQL, [
+          range.fromUtc.toISOString(),
+          range.toExclusiveUtc.toISOString(),
+          from,
+          to,
+        ]),
+      ]);
+      if (taskResult.rows.length > 100000) {
+        return res.status(413).json({
+          ok: false,
+          error: 'task report exceeds the 100,000-row export limit',
+        });
+      }
+
+      const names = tfsReportNames(from, to);
+      const unmappedLocations = new Set(
+        taskResult.rows
+          .filter((row) => !row.member_location)
+          .map(
+            (row) =>
+              normIdentity(row.task_assigned_upn) ||
+              normIdentity(row.task_assigned_to),
+          )
+          .filter(Boolean),
+      ).size;
+      const unmappedMembers = new Set(
+        developerResult.rows
+          .filter((row) => row.mapped !== true)
+          .map((row) => normIdentity(row.identity_key))
+          .filter(Boolean),
+      ).size;
+      const unresolvedBacklogTasks = aggregateBacklogRows(
+        taskResult.rows,
+      ).unresolvedTaskCount;
+      const unresolvedTeamTasks = aggregateTeamRows(taskResult.rows, {
+        projectName: TFS_PROJECT,
+      }).unresolvedTaskCount;
+      const workbookBuffer = await buildTfsReportWorkbook(
+        taskResult.rows,
+        developerResult.rows,
+        {
+          developerSheetName: names.developerSheetName,
+          teamSheetName: names.teamSheetName,
+          backlogSheetName: names.backlogSheetName,
+          taskSheetName: names.taskSheetName,
+          reportTimeZone: timeZone,
+          reportOffsetMinutes: 0,
+          projectName: TFS_PROJECT,
+        },
+      );
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${names.fileName}"; filename*=UTF-8''${encodeURIComponent(
+          names.fileName,
+        )}`,
+      );
+      res.setHeader(
+        'X-Task-Report-Unmapped-Locations',
+        String(unmappedLocations),
+      );
+      res.setHeader(
+        'X-Developer-Report-Unmapped-Members',
+        String(unmappedMembers),
+      );
+      res.setHeader(
+        'X-Backlog-Report-Unresolved-Tasks',
+        String(unresolvedBacklogTasks),
+      );
+      res.setHeader(
+        'X-Team-Report-Unresolved-Tasks',
+        String(unresolvedTeamTasks),
+      );
+      res.send(Buffer.from(workbookBuffer));
+    } catch (error) {
+      console.error('Combined TFS report export error:', error);
+      res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  },
+);
 
 // ---------- Ingest ----------
 function buildUpsertLatest(rows) {
@@ -8078,55 +8746,6 @@ app.get('/api/hours/metrics', requireAuth, async (req, res) => {
 });
 
 // ---------- Shared helper: compute per-user hours for a period ----------
-// ---------- Missing-hours auto-notify: period resolver ----------
-function resolveMissingHoursPeriod(period, todayYmd) {
-  const p = parseYmd(todayYmd);
-  if (!p) return null;
-
-  const todayUtc = Date.UTC(p.y, p.mo - 1, p.d);
-  const dow = new Date(todayUtc).getUTCDay(); // 0=Sun
-
-  if (period === 'prev_week') {
-    const mondayOffset = dow === 0 ? -6 : 1 - dow;
-    const thisMonday = new Date(todayUtc + mondayOffset * 86400 * 1000);
-    const lastMonday = new Date(thisMonday.getTime() - 7 * 86400 * 1000);
-    const lastSunday = new Date(thisMonday.getTime() - 1 * 86400 * 1000);
-    return {
-      fromStr: lastMonday.toISOString().slice(0, 10),
-      toStr: lastSunday.toISOString().slice(0, 10),
-    };
-  }
-
-  if (period === 'prev_month') {
-    const firstOfThisMonth = Date.UTC(p.y, p.mo - 1, 1);
-    const lastOfPrevMonth = new Date(firstOfThisMonth - 86400 * 1000);
-    const firstOfPrevMonth = new Date(
-      Date.UTC(
-        lastOfPrevMonth.getUTCFullYear(),
-        lastOfPrevMonth.getUTCMonth(),
-        1,
-      ),
-    );
-    return {
-      fromStr: firstOfPrevMonth.toISOString().slice(0, 10),
-      toStr: lastOfPrevMonth.toISOString().slice(0, 10),
-    };
-  }
-
-  if (period === 'this_week') {
-    const mondayOffset = dow === 0 ? -6 : 1 - dow;
-    const thisMonday = new Date(todayUtc + mondayOffset * 86400 * 1000);
-    return {
-      fromStr: thisMonday.toISOString().slice(0, 10),
-      toStr: todayYmd,
-    };
-  }
-
-  // this_month (default)
-  const firstOfMonth = `${String(p.y).padStart(4, '0')}-${String(p.mo).padStart(2, '0')}-01`;
-  return { fromStr: firstOfMonth, toStr: todayYmd };
-}
-
 async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
   const wdR = await pool.query(
     `SELECT (COUNT(*) * 8)::float AS weekday_hours
@@ -8201,43 +8820,22 @@ async function computeUserHours(fromStr, toStr, fromUtc, toExclusiveUtc) {
   };
 }
 
-async function computeNotificationUserHours(
-  fromStr,
-  reportToStr,
-  offsetMin,
-  tz,
-) {
-  const evaluatedToStr = addDaysToYmd(reportToStr, -1);
-
-  // Excluding the report's To date leaves no completed days for a one-day range.
-  // Still return the user list so Preview can render a consistent zero-hours result.
-  if (!evaluatedToStr || evaluatedToStr < fromStr) {
-    const usersR = await pool.query(
-      `SELECT email, name FROM public.users WHERE email LIKE '%@%' AND role <> 'admin' ORDER BY name ASC`,
-    );
-    return {
-      evaluatedToStr: null,
-      weekdayHours: 0,
-      sharedOffHours: 0,
-      requiredHours: 0,
-      ptoByName: new Map(),
-      loggedByName: new Map(),
-      users: usersR.rows,
-    };
-  }
-
-  const rng = rangeFromToUtc(fromStr, evaluatedToStr, offsetMin, tz);
+async function computeNotificationUserHours(rangeInfo, offsetMin, tz) {
+  if (!rangeInfo?.hasCompletedDays) return null;
+  const rng = rangeFromToUtc(
+    rangeInfo.evaluatedFrom,
+    rangeInfo.evaluatedTo,
+    offsetMin,
+    tz,
+  );
   if (!rng) return null;
 
-  return {
-    evaluatedToStr,
-    ...(await computeUserHours(
-      fromStr,
-      evaluatedToStr,
-      rng.fromUtc,
-      rng.toExclusiveUtc,
-    )),
-  };
+  return computeUserHours(
+    rangeInfo.evaluatedFrom,
+    rangeInfo.evaluatedTo,
+    rng.fromUtc,
+    rng.toExclusiveUtc,
+  );
 }
 
 // ---------- Hours preview (no emails sent) ----------
@@ -8259,16 +8857,16 @@ app.get(
         .status(400)
         .json({ ok: false, error: 'threshold must be a positive number' });
 
+    const rangeInfo = resolveMissingHoursRange({ from: fromStr, to: toStr });
+    if (!rangeInfo)
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
     const offsetMin = getReportOffsetMinutes();
     const tz = getReportTimeZone();
-    const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-    if (!reportRng)
-      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
     try {
       const notificationHours = await computeNotificationUserHours(
-        fromStr,
-        toStr,
+        rangeInfo,
         offsetMin,
         tz,
       );
@@ -8277,43 +8875,15 @@ app.get(
           .status(400)
           .json({ ok: false, error: 'invalid notification date range' });
 
-      const {
-        evaluatedToStr,
-        weekdayHours,
-        sharedOffHours,
-        requiredHours,
-        ptoByName,
-        loggedByName,
-        users,
-      } = notificationHours;
-
-      const rows = users.map((user) => {
-        const nameKey = user.name ? user.name.trim().toLowerCase() : '';
-        const ptoHours = ptoByName.get(nameKey) ?? 0;
-        const loggedHours = loggedByName.get(nameKey) ?? 0;
-        const missing = requiredHours - ptoHours - loggedHours;
-        return {
-          name: user.name || user.email,
-          email: user.email,
-          weekdayHours,
-          sharedOffHours,
-          requiredHours,
-          ptoHours,
-          loggedHours,
-          missing,
-          overThreshold: missing > threshold,
-        };
-      });
-
-      rows.sort((a, b) => b.missing - a.missing);
+      const rows = buildMissingHoursRows(notificationHours, threshold);
       res.json({
         ok: true,
-        evaluatedFrom: fromStr,
-        evaluatedTo: evaluatedToStr,
-        excludedTo: toStr,
-        weekdayHours,
-        sharedOffHours,
-        requiredHours,
+        evaluatedFrom: rangeInfo.evaluatedFrom,
+        evaluatedTo: rangeInfo.evaluatedTo,
+        excludedTo: rangeInfo.excludedTo,
+        weekdayHours: notificationHours.weekdayHours,
+        sharedOffHours: notificationHours.sharedOffHours,
+        requiredHours: notificationHours.requiredHours,
         rows,
       });
     } catch (e) {
@@ -8362,16 +8932,16 @@ app.post(
         .status(400)
         .json({ ok: false, error: 'threshold must be a positive number' });
 
+    const rangeInfo = resolveMissingHoursRange({ from: fromStr, to: toStr });
+    if (!rangeInfo)
+      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
     const offsetMin = getReportOffsetMinutes();
     const tz = getReportTimeZone();
-    const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-    if (!reportRng)
-      return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
     try {
       const notificationHours = await computeNotificationUserHours(
-        fromStr,
-        toStr,
+        rangeInfo,
         offsetMin,
         tz,
       );
@@ -8380,45 +8950,19 @@ app.post(
           .status(400)
           .json({ ok: false, error: 'invalid notification date range' });
 
-      const {
-        evaluatedToStr,
-        weekdayHours,
-        sharedOffHours,
-        requiredHours,
-        ptoByName,
-        loggedByName,
-        users,
-      } = notificationHours;
-
-      // Identify offenders
-      const offenders = [];
-      for (const user of users) {
-        const nameKey = user.name ? user.name.trim().toLowerCase() : '';
-        const ptoHours = ptoByName.get(nameKey) ?? 0;
-        const loggedHours = loggedByName.get(nameKey) ?? 0;
-        const missing = requiredHours - ptoHours - loggedHours;
-        if (missing > threshold) {
-          offenders.push({
-            email: user.email,
-            name: user.name || user.email,
-            weekdayHours,
-            sharedOffHours,
-            requiredHours,
-            ptoHours,
-            loggedHours,
-            missing,
-          });
-        }
-      }
+      const offenders = buildMissingHoursRows(
+        notificationHours,
+        threshold,
+      ).filter((row) => row.overThreshold);
 
       if (offenders.length === 0) {
         return res.json({
           ok: true,
           sent: 0,
           offenders: 0,
-          evaluatedFrom: fromStr,
-          evaluatedTo: evaluatedToStr,
-          excludedTo: toStr,
+          evaluatedFrom: rangeInfo.evaluatedFrom,
+          evaluatedTo: rangeInfo.evaluatedTo,
+          excludedTo: rangeInfo.excludedTo,
           message: `No users have missing hours above ${threshold}h for this period.`,
         });
       }
@@ -8433,9 +8977,9 @@ app.post(
           year: 'numeric',
         });
       };
-      const period = evaluatedToStr
-        ? `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(evaluatedToStr)}`
-        : `${fmtPeriodDate(fromStr)} (no completed days)`;
+      const period = `${fmtPeriodDate(
+        rangeInfo.evaluatedFrom,
+      )} to ${fmtPeriodDate(rangeInfo.evaluatedTo)}`;
       const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
       let sent = 0;
       const errors = [];
@@ -8534,9 +9078,9 @@ app.post(
         ok: true,
         sent,
         offenders: offenders.length,
-        evaluatedFrom: fromStr,
-        evaluatedTo: evaluatedToStr,
-        excludedTo: toStr,
+        evaluatedFrom: rangeInfo.evaluatedFrom,
+        evaluatedTo: rangeInfo.evaluatedTo,
+        excludedTo: rangeInfo.excludedTo,
         ...(errors.length ? { errors } : {}),
       });
     } catch (e) {
@@ -8593,37 +9137,53 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
   let toStr = validateDateStr(toRaw);
   const todayYmd = currentReportYmd();
 
-  const VALID_PERIODS = ['prev_week', 'prev_month', 'this_week', 'this_month'];
   let resolvedPeriod = normText(periodRaw) || null;
-  if (resolvedPeriod && !VALID_PERIODS.includes(resolvedPeriod)) {
+  if (
+    resolvedPeriod &&
+    !VALID_MISSING_HOURS_PERIODS.includes(resolvedPeriod)
+  ) {
     return res.status(400).json({
       ok: false,
-      error: `Invalid period. Must be one of: ${VALID_PERIODS.join(', ')}`,
+      error: `Invalid period. Must be one of: ${VALID_MISSING_HOURS_PERIODS.join(', ')}`,
     });
   }
 
-  if (!fromStr || !toStr) {
-    const periodToUse = resolvedPeriod || 'this_month';
-    const range = resolveMissingHoursPeriod(periodToUse, todayYmd);
-    if (!range)
-      return res
-        .status(500)
-        .json({ ok: false, error: 'Could not resolve report period.' });
-    fromStr = range.fromStr;
-    toStr = range.toStr;
-    resolvedPeriod = periodToUse;
+  const hasExplicitRange = Boolean(fromStr && toStr);
+  if (!hasExplicitRange) resolvedPeriod = resolvedPeriod || 'this_month';
+  const rangeInfo = resolveMissingHoursRange(
+    hasExplicitRange
+      ? { from: fromStr, to: toStr, todayYmd }
+      : { period: resolvedPeriod, todayYmd },
+  );
+  if (!rangeInfo)
+    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
+
+  fromStr = rangeInfo.requestedFrom;
+  toStr = rangeInfo.requestedTo;
+
+  if (!rangeInfo.hasCompletedDays) {
+    return res.json({
+      ok: true,
+      period: resolvedPeriod,
+      from: fromStr,
+      to: toStr,
+      evaluatedFrom: rangeInfo.evaluatedFrom,
+      evaluatedTo: null,
+      excludedTo: rangeInfo.excludedTo,
+      threshold,
+      offenders: 0,
+      sent: 0,
+      dry_run: dryRun,
+      message: 'No completed days in the current period.',
+    });
   }
 
   const offsetMin = getReportOffsetMinutes();
   const tz = getReportTimeZone();
-  const reportRng = rangeFromToUtc(fromStr, toStr, offsetMin, tz);
-  if (!reportRng)
-    return res.status(400).json({ ok: false, error: 'invalid from/to date' });
 
   try {
     const notificationHours = await computeNotificationUserHours(
-      fromStr,
-      toStr,
+      rangeInfo,
       offsetMin,
       tz,
     );
@@ -8632,35 +9192,10 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         .status(400)
         .json({ ok: false, error: 'invalid notification date range' });
 
-    const {
-      evaluatedToStr,
-      weekdayHours,
-      sharedOffHours,
-      requiredHours,
-      ptoByName,
-      loggedByName,
-      users,
-    } = notificationHours;
-
-    const offenders = [];
-    for (const user of users) {
-      const nameKey = user.name ? user.name.trim().toLowerCase() : '';
-      const ptoHours = ptoByName.get(nameKey) ?? 0;
-      const loggedHours = loggedByName.get(nameKey) ?? 0;
-      const missing = requiredHours - ptoHours - loggedHours;
-      if (missing > threshold) {
-        offenders.push({
-          email: user.email,
-          name: user.name || user.email,
-          weekdayHours,
-          sharedOffHours,
-          requiredHours,
-          ptoHours,
-          loggedHours,
-          missing,
-        });
-      }
-    }
+    const offenders = buildMissingHoursRows(
+      notificationHours,
+      threshold,
+    ).filter((row) => row.overThreshold);
 
     if (offenders.length === 0 || dryRun) {
       return res.json({
@@ -8668,9 +9203,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         period: resolvedPeriod,
         from: fromStr,
         to: toStr,
-        evaluatedFrom: fromStr,
-        evaluatedTo: evaluatedToStr,
-        excludedTo: toStr,
+        evaluatedFrom: rangeInfo.evaluatedFrom,
+        evaluatedTo: rangeInfo.evaluatedTo,
+        excludedTo: rangeInfo.excludedTo,
         threshold,
         offenders: offenders.length,
         sent: 0,
@@ -8701,9 +9236,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
         year: 'numeric',
       });
     };
-    const period = evaluatedToStr
-      ? `${fmtPeriodDate(fromStr)} to ${fmtPeriodDate(evaluatedToStr)}`
-      : `${fmtPeriodDate(fromStr)} (no completed days)`;
+    const period = `${fmtPeriodDate(
+      rangeInfo.evaluatedFrom,
+    )} to ${fmtPeriodDate(rangeInfo.evaluatedTo)}`;
     const lastSyncSuffix = buildLastSyncEmailSuffix(await fetchLastSyncAt());
     let sent = 0;
     const errors = [];
@@ -8803,9 +9338,9 @@ app.post('/api/notifications/missing-hours-auto', async (req, res) => {
       period: resolvedPeriod,
       from: fromStr,
       to: toStr,
-      evaluatedFrom: fromStr,
-      evaluatedTo: evaluatedToStr,
-      excludedTo: toStr,
+      evaluatedFrom: rangeInfo.evaluatedFrom,
+      evaluatedTo: rangeInfo.evaluatedTo,
+      excludedTo: rangeInfo.excludedTo,
       threshold,
       offenders: offenders.length,
       sent,

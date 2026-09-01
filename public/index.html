@@ -2259,6 +2259,7 @@
         <div class="actions">
           <button id="btnLoad">Load report</button>
           <button id="btnExport" class="ghost" disabled>Export CSV</button>
+          <button id="btnTaskReportExport" class="ghost" hidden>Export TFS Report (.xlsx)</button>
         </div>
       </section>
 
@@ -2288,8 +2289,8 @@
                 </div>
               </div>
               <p class="muted" style="font-size:12px;margin:8px 0 4px;">
-                Uses the <strong>Report Date Range</strong> selected above, but excludes its <strong>To</strong> date
-                from the notification calculation. Emails all users whose missing hours exceed the threshold.
+                Uses the complete <strong>Report Date Range</strong> selected above, including its
+                <strong>To</strong> date. Emails all users whose missing hours exceed the threshold.
               </p>
               <div id="notifyStatus" class="status muted"></div>
               <div id="notifyPreviewWrap" class="notify-preview-wrap" hidden>
